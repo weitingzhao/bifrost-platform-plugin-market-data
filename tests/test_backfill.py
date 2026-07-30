@@ -121,3 +121,105 @@ def test_enqueue_backfill_option_daily() -> None:
     )
     assert result["enqueued"] >= 1
     assert result["jobs"][0]["payload"]["option_ticker"] == "O:AAPL250620C00150000"
+
+
+def test_enqueue_backfill_stock_daily_grouped() -> None:
+    conn = _BFConn()
+    # 2024-06-20 Thu .. 2024-06-23 Sun → weekdays Thu+Fri only (2 of 4 calendar days)
+    result = enqueue_backfill(
+        conn,
+        kind="stock_daily_grouped",
+        from_date=date(2024, 6, 20),
+        to_date=date(2024, 6, 23),
+    )
+    assert result["chunks"] == 2
+    assert result["enqueued"] == 2
+    assert result["chunks"] < 4  # weekends skipped
+    assert result["jobs"][0]["payload"]["from"] == "2024-06-20"
+    assert result["jobs"][1]["payload"]["from"] == "2024-06-21"
+    assert result["jobs"][0]["payload"]["market"] == "stocks"
+
+
+def test_enqueue_backfill_financials() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(
+        conn,
+        kind="financials",
+        symbols=["AAPL", "MSFT"],
+    )
+    assert result["enqueued"] == 2
+    assert result["chunks"] == 0
+    assert result["jobs"][0]["payload"] == {"symbol": "AAPL"}
+
+
+def test_enqueue_backfill_option_snapshot() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(conn, kind="option_snapshot", symbols=["AAPL"])
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["payload"] == {"underlying": "AAPL"}
+
+
+def test_enqueue_backfill_option_contract() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(conn, kind="option_contract", symbols=["AAPL"])
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["payload"]["underlying"] == "AAPL"
+    assert result["jobs"][0]["payload"]["expired"] is False
+
+
+def test_enqueue_backfill_ticker_sync() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(conn, kind="ticker_sync")
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["payload"] == {}
+
+
+def test_enqueue_backfill_stock_minute() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(
+        conn,
+        kind="stock_minute",
+        symbols=["AAPL"],
+        from_date=date(2024, 6, 1),
+        to_date=date(2024, 6, 30),
+        chunk_days=7,
+    )
+    assert result["enqueued"] == result["chunks"]
+    assert result["chunks"] >= 4
+    assert result["jobs"][0]["payload"]["symbol"] == "AAPL"
+    assert result["jobs"][0]["payload"]["timespan"] == "minute"
+    assert result["jobs"][0]["payload"]["multiplier"] == 1
+
+
+def test_enqueue_backfill_stock_minute_default_chunk_30() -> None:
+    """Minute kinds default chunk_days=30 (not 365)."""
+    conn = _BFConn()
+    # 90 calendar days → 3 chunks of 30
+    result = enqueue_backfill(
+        conn,
+        kind="stock_minute",
+        symbols=["AAPL"],
+        from_date=date(2024, 1, 1),
+        to_date=date(2024, 3, 30),
+    )
+    assert result["chunks"] == 3
+
+
+def test_enqueue_backfill_option_minute() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(
+        conn,
+        kind="option_minute",
+        symbols=["O:AAPL250620C00150000"],
+        from_date=date(2024, 6, 1),
+        to_date=date(2024, 6, 7),
+        chunk_days=7,
+    )
+    assert result["enqueued"] >= 1
+    assert result["jobs"][0]["payload"]["option_ticker"] == "O:AAPL250620C00150000"
+    assert result["jobs"][0]["payload"]["timespan"] == "minute"
+
+
+def test_enqueue_backfill_unsupported() -> None:
+    with pytest.raises(ValueError, match="unsupported kind"):
+        enqueue_backfill(_BFConn(), kind="not_a_real_kind", symbols=["AAPL"])

@@ -3,7 +3,7 @@
 
 scheduler:
   watchlist_query: >-
-    SELECT DISTINCT symbol FROM watchlist
+    SELECT DISTINCT symbol FROM public.watchlist
     WHERE sec_type = 'STK' AND optionable = true
       AND symbol IS NOT NULL AND trim(symbol) <> ''
   # Optional hard-coded override (skips DB query when set):
@@ -26,6 +26,17 @@ scheduler:
       cron: "20 */6 * * *"
       priority: 4
       batch_size: 12
+    option-bars:
+      cron: "45 22 * * *"
+      priority: 4
+      expiry_days: 60
+      max_per_underlying: 40
+    minute-bars:
+      cron: "15 23 * * *"
+      priority: 3
+      expiry_days: 45
+      max_per_underlying: 10
+      batch_size: 80
     calendar:
       cron: "0 22 * * *"
       priority: 1

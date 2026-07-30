@@ -39,7 +39,8 @@
 make install-dev
 make lint
 make test
-make db-init   # P1+
+make db-init              # schema apply
+make verify-market-data   # P6: K8s deploy + health + CronJobs + platform probe
 ```
 
 ## 修改纪律

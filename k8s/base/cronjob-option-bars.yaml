@@ -1,0 +1,153 @@
+# Option daily bars + stock/option minute bars (UTC). One CronJob per slot.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-option-bars
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-option-bars
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: option-bars
+spec:
+  schedule: "45 22 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-option-bars
+            bifrost.market-data/slot: option-bars
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - option-bars
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+                - name: POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-host
+                      optional: true
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-password
+                      optional: true
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-minute-bars
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-minute-bars
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: minute-bars
+spec:
+  schedule: "15 23 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-minute-bars
+            bifrost.market-data/slot: minute-bars
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - minute-bars
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+                - name: POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-host
+                      optional: true
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-password
+                      optional: true
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule

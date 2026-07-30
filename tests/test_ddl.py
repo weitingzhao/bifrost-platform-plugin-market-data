@@ -75,7 +75,7 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 def test_expected_object_counts() -> None:
     assert len(MARKET_TABLES) == 11
     assert len(DATA_OPS_TABLES) == 3
-    assert len(MARKET_VIEWS) == 2
+    assert len(MARKET_VIEWS) == 3
 
 
 @pytest.mark.skipif(

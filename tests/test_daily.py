@@ -10,6 +10,7 @@ import pytest
 from bifrost_market_data.scheduler.daily import (
     SLOT_NAMES,
     enqueue_slot,
+    is_trading_day,
     resolve_target_date,
 )
 from bifrost_market_data.scheduler.enqueue import payload_hash
@@ -23,7 +24,35 @@ class _DailyCursor:
     def execute(self, query: str, params: Any = None) -> None:
         self.parent.statements.append((query, params))
         q = query.lower()
-        if "from watchlist" in q or "select distinct symbol" in q:
+        if "us_trading_calendar" in q:
+            d = params[0] if params else None
+            if d in self.parent.calendar:
+                self.parent._fetchone = (self.parent.calendar[d],)
+            else:
+                self.parent._fetchone = None
+            self.parent._fetchall = []
+        elif "from market.option_contract" in q or "option_contract" in q:
+            underlyings = set(params[0]) if params else set()
+            as_of = params[1] if params and len(params) > 1 else None
+            end = params[2] if params and len(params) > 2 else None
+            max_per = int(params[3]) if params and len(params) > 3 else 40
+            counts: dict[str, int] = {}
+            rows: list[tuple[str]] = []
+            for ticker, und, expiry in self.parent.option_contracts:
+                if und not in underlyings:
+                    continue
+                if as_of is not None and expiry < as_of:
+                    continue
+                if end is not None and expiry > end:
+                    continue
+                n = counts.get(und, 0)
+                if n >= max_per:
+                    continue
+                counts[und] = n + 1
+                rows.append((ticker,))
+            self.parent._fetchall = rows
+            self.parent._fetchone = None
+        elif "from watchlist" in q or "from public.watchlist" in q or "select distinct symbol" in q:
             self.parent._fetchall = [(s,) for s in self.parent.watchlist]
             self.parent._fetchone = None
         elif "returning id" in q:
@@ -57,8 +86,16 @@ class _DailyCursor:
 
 
 class _DailyConn:
-    def __init__(self, watchlist: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        watchlist: list[str] | None = None,
+        calendar: dict[date, bool] | None = None,
+        option_contracts: list[tuple[str, str, date]] | None = None,
+    ) -> None:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
+        self.calendar = calendar or {}
+        # (option_ticker, underlying, expiry)
+        self.option_contracts = option_contracts or []
         self.statements: list[tuple[str, Any]] = []
         self.seen_keys: set[tuple[Any, Any]] = set()
         self.next_id = 0
@@ -79,6 +116,13 @@ class _DailyConn:
 def test_resolve_target_date_explicit() -> None:
     assert resolve_target_date("2024-06-20") == date(2024, 6, 20)
     assert resolve_target_date(date(2024, 1, 2)) == date(2024, 1, 2)
+
+
+def test_is_trading_day_from_calendar() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    assert is_trading_day(conn, holiday) is False
+    assert is_trading_day(conn, date(2024, 7, 5)) is True  # missing → weekday fallback
 
 
 def test_enqueue_stock_eod() -> None:
@@ -128,18 +172,15 @@ def test_enqueue_universe_daily() -> None:
         "universe-daily",
         target_date=date(2024, 6, 20),
         watchlist_symbols=[],
-        scheduler_cfg={
-            "slots": {
-                "universe-daily": {"priority": 3},
-                "calendar": {"priority": 1},
-            }
-        },
+        scheduler_cfg={"slots": {"universe-daily": {"priority": 3}}},
     )
     kinds = [j["kind"] for j in result["jobs"]]
-    assert "stock_daily" in kinds
-    assert "calendar" in kinds
-    stock = next(j for j in result["jobs"] if j["kind"] == "stock_daily")
-    assert stock["payload"]["mode"] == "grouped"
+    assert kinds == ["stock_daily_grouped"]
+    assert "calendar" not in kinds
+    stock = result["jobs"][0]
+    assert stock["payload"]["from"] == "2024-06-20"
+    assert stock["payload"]["market"] == "stocks"
+    assert "mode" not in stock["payload"]
 
 
 def test_enqueue_corporate() -> None:
@@ -157,17 +198,118 @@ def test_enqueue_corporate() -> None:
 
 def test_enqueue_option_refresh_batch() -> None:
     conn = _DailyConn()
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA"]
     result = enqueue_slot(
         conn,
         "option-refresh",
         target_date=date(2024, 6, 20),
-        watchlist_symbols=["AAPL", "MSFT", "TSLA", "NVDA"],
+        watchlist_symbols=symbols,
         scheduler_cfg={"slots": {"option-refresh": {"priority": 4, "batch_size": 2}}},
     )
     # 2 symbols × (contract + expiration)
     assert result["enqueued"] == 4
     underlyings = {j["payload"]["underlying"] for j in result["jobs"]}
-    assert underlyings == {"AAPL", "MSFT"}
+    assert len(underlyings) == 2
+    assert underlyings.issubset(set(symbols))
+
+
+def test_enqueue_option_refresh_rotates_by_date() -> None:
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
+    r1 = enqueue_slot(
+        _DailyConn(),
+        "option-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 2}}},
+    )
+    r2 = enqueue_slot(
+        _DailyConn(),
+        "option-refresh",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 2}}},
+    )
+    u1 = {j["payload"]["underlying"] for j in r1["jobs"]}
+    u2 = {j["payload"]["underlying"] for j in r2["jobs"]}
+    # Different dates should generally pick different batches (stable sha256 rotation).
+    assert u1 != u2 or len(symbols) <= 2
+
+
+def test_enqueue_option_bars() -> None:
+    contracts = [
+        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
+        ("O:AAPL240719P00200000", "AAPL", date(2024, 7, 19)),
+        ("O:MSFT240719C00400000", "MSFT", date(2024, 7, 19)),
+    ]
+    conn = _DailyConn(option_contracts=contracts)
+    result = enqueue_slot(
+        conn,
+        "option-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL", "MSFT"],
+        scheduler_cfg={"slots": {"option-bars": {"priority": 4, "max_per_underlying": 40}}},
+    )
+    assert result["enqueued"] == 3
+    assert all(j["kind"] == "option_daily" for j in result["jobs"])
+    assert {j["payload"]["option_ticker"] for j in result["jobs"]} == {
+        "O:AAPL240719C00200000",
+        "O:AAPL240719P00200000",
+        "O:MSFT240719C00400000",
+    }
+    assert all(j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
+
+
+def test_enqueue_minute_bars() -> None:
+    contracts = [
+        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
+        ("O:AAPL240719P00200000", "AAPL", date(2024, 7, 19)),
+    ]
+    conn = _DailyConn(option_contracts=contracts)
+    result = enqueue_slot(
+        conn,
+        "minute-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {
+                "minute-bars": {
+                    "priority": 3,
+                    "batch_size": 80,
+                    "max_per_underlying": 10,
+                }
+            }
+        },
+    )
+    kinds = [j["kind"] for j in result["jobs"]]
+    assert kinds.count("stock_minute") == 1
+    assert kinds.count("option_minute") == 2
+    stock = next(j for j in result["jobs"] if j["kind"] == "stock_minute")
+    assert stock["payload"]["symbol"] == "AAPL"
+    assert stock["payload"]["from"] == "2024-06-20"
+    assert stock["payload"]["timespan"] == "minute"
+
+
+def test_skip_non_trading_day() -> None:
+    holiday = date(2024, 7, 4)  # Thursday holiday
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(
+        conn,
+        "stock-eod",
+        target_date=holiday,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"stock-eod": {"priority": 5}}},
+    )
+    assert result.get("skipped") is True
+    assert result["enqueued"] == 0
+    assert result["jobs"] == []
+
+
+def test_calendar_slot_not_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(conn, "calendar", target_date=holiday, watchlist_symbols=[])
+    assert result.get("skipped") is not True
+    assert result["enqueued"] == 1
 
 
 def test_enqueue_calendar_and_trim() -> None:
@@ -192,6 +334,8 @@ def test_unknown_slot() -> None:
 
 def test_all_slot_names_covered() -> None:
     assert "stock-eod" in SLOT_NAMES
+    assert "option-bars" in SLOT_NAMES
+    assert "minute-bars" in SLOT_NAMES
     assert "trim" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})

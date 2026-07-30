@@ -16,6 +16,7 @@ from bifrost_market_data.ingest.option_minute import handle_option_minute
 from bifrost_market_data.ingest.option_oi import handle_option_open_interest
 from bifrost_market_data.ingest.option_snapshot import handle_option_snapshot
 from bifrost_market_data.ingest.stock_daily import handle_stock_daily
+from bifrost_market_data.ingest.stock_daily_grouped import handle_stock_daily_grouped
 from bifrost_market_data.ingest.stock_minute import handle_stock_minute
 from bifrost_market_data.ingest.ticker_sync import handle_ticker_sync
 from bifrost_market_data.worker.claim import JobRow
@@ -24,6 +25,7 @@ Handler = Callable[[JobRow], Any]
 
 _RAW_HANDLERS: dict[str, Any] = {
     "stock_daily": handle_stock_daily,
+    "stock_daily_grouped": handle_stock_daily_grouped,
     "stock_minute": handle_stock_minute,
     "option_daily": handle_option_daily,
     "option_minute": handle_option_minute,
@@ -59,6 +61,7 @@ __all__ = [
     "build_handler_registry",
     "raw_handler_kinds",
     "handle_stock_daily",
+    "handle_stock_daily_grouped",
     "handle_stock_minute",
     "handle_option_daily",
     "handle_option_minute",

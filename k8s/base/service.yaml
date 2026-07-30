@@ -1,13 +1,31 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: market-data-health
+  name: market-data-health-stocks
   labels:
-    app.kubernetes.io/name: market-data
+    app.kubernetes.io/name: market-data-health-stocks
+    bifrost.market-data/pool: stocks
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/part-of: bifrost-market-data
+    app.kubernetes.io/name: polygon-worker-stocks
+  ports:
+    - name: health
+      port: 8080
+      targetPort: health
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-data-health-options
+  labels:
+    app.kubernetes.io/name: market-data-health-options
+    bifrost.market-data/pool: options
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: polygon-worker-options
   ports:
     - name: health
       port: 8080

@@ -443,12 +443,48 @@ def _create_views(cur: _Cursor) -> None:
             s.theta,
             s.vega,
             s.open_interest,
+            s.day_open,
+            s.day_high,
+            s.day_low,
             s.day_close,
+            s.day_previous_close,
+            s.day_change_percent,
             s.day_volume,
             s.day_vwap,
             s.fetched_at
         FROM market.option_snapshot s
         ORDER BY s.option_ticker, s.snapshot_ts DESC
+        """
+    )
+    # Bridge for Trade consumers replacing public.option_snapshots_with_underlying_day
+    cur.execute(
+        """
+        CREATE OR REPLACE VIEW market.v_option_snapshot_with_stock AS
+        SELECT
+            os.option_ticker,
+            os.underlying,
+            os.snapshot_ts,
+            os.iv,
+            os.delta,
+            os.gamma,
+            os.theta,
+            os.vega,
+            os.open_interest,
+            os.day_open,
+            os.day_high,
+            os.day_low,
+            os.day_close,
+            os.day_previous_close,
+            os.day_change_percent,
+            os.day_volume,
+            os.day_vwap,
+            os.fetched_at,
+            sd.close AS underlying_price,
+            sd.bar_date AS underlying_bar_date
+        FROM market.option_snapshot os
+        LEFT JOIN market.stock_daily sd
+            ON sd.symbol = os.underlying
+           AND sd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
         """
     )
 
@@ -580,4 +616,5 @@ DATA_OPS_TABLES: tuple[str, ...] = (
 MARKET_VIEWS: tuple[str, ...] = (
     "v_us_equity_universe",
     "v_option_chain_latest",
+    "v_option_snapshot_with_stock",
 )

@@ -38,6 +38,18 @@ spec:
                   value: /config/market-data.yaml
                 - name: SCHEDULE_CONFIG
                   value: /config/schedule.yaml
+                - name: POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-host
+                      optional: true
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-password
+                      optional: true
               volumeMounts:
                 - name: config
                   mountPath: /config/market-data.yaml

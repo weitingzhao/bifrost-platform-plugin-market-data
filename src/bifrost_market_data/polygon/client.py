@@ -388,3 +388,22 @@ class PolygonClient:
         if isinstance(data, dict):
             return data
         raise PolygonAPIError("unexpected market status payload", body=data, url=path)
+
+    async def fetch_grouped_daily(
+        self,
+        date_str: str,
+        *,
+        locale: str = "us",
+        market: str = "stocks",
+        adjusted: bool = True,
+    ) -> dict[str, Any]:
+        """GET ``/v2/aggs/grouped/locale/.../market/.../{date}`` (single response, no pagination)."""
+        path = ep.grouped_daily_path(date_str, locale=locale, market=market)
+        params = ep.grouped_daily_params(adjusted=adjusted)
+        data = await self._request(path, params)
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected grouped daily payload", body=data, url=path)
+        out = dict(data)
+        out.setdefault("pages", 1)
+        out.setdefault("truncated", False)
+        return out

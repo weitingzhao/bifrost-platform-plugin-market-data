@@ -36,6 +36,19 @@ GRANT SELECT ON ALL TABLES IN SCHEMA market TO market_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA market
   GRANT SELECT ON TABLES TO market_reader;
 
+-- Cross-schema read: scheduler loads watchlist symbols from Trade public.watchlist
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'watchlist'
+  ) THEN
+    EXECUTE 'GRANT SELECT ON public.watchlist TO data_writer';
+    RAISE NOTICE 'Granted SELECT on public.watchlist to data_writer';
+  ELSE
+    RAISE NOTICE 'public.watchlist not found — skipping GRANT (apply Trade DDL first)';
+  END IF;
+END $$;
+
 -- Optional: allow readers to see job status (not write)
 GRANT USAGE ON SCHEMA data_ops TO market_reader;
 GRANT SELECT ON data_ops.job_ingest TO market_reader;

@@ -186,3 +186,17 @@ def dividends_params(*, ticker: str | None = None, limit: int = 1000) -> dict[st
 
 def market_status_upcoming_path() -> str:
     return "/v1/marketstatus/upcoming"
+
+
+def grouped_daily_path(
+    date_str: str,
+    *,
+    locale: str = "us",
+    market: str = "stocks",
+) -> str:
+    """``/v2/aggs/grouped/locale/{locale}/market/{market}/{date}``."""
+    return f"/v2/aggs/grouped/locale/{locale}/market/{market}/{date_str}"
+
+
+def grouped_daily_params(*, adjusted: bool = True) -> dict[str, Any]:
+    return {"adjusted": "true" if adjusted else "false"}

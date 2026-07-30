@@ -52,3 +52,12 @@ def test_financials_splits_dividends_calendar() -> None:
     assert ep.dividends_path() == "/stocks/v1/dividends"
     assert ep.market_status_upcoming_path() == "/v1/marketstatus/upcoming"
     assert ep.splits_params(ticker="ibm")["ticker"] == "IBM"
+
+
+def test_grouped_daily_path_and_params() -> None:
+    assert (
+        ep.grouped_daily_path("2024-06-20")
+        == "/v2/aggs/grouped/locale/us/market/stocks/2024-06-20"
+    )
+    assert ep.grouped_daily_params()["adjusted"] == "true"
+    assert ep.grouped_daily_params(adjusted=False)["adjusted"] == "false"

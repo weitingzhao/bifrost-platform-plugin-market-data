@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
@@ -26,12 +27,14 @@ SLOT_NAMES = (
     "universe-daily",
     "corporate",
     "option-refresh",
+    "option-bars",
+    "minute-bars",
     "calendar",
     "trim",
 )
 
 DEFAULT_WATCHLIST_QUERY = """
-SELECT DISTINCT symbol FROM watchlist
+SELECT DISTINCT symbol FROM public.watchlist
 WHERE sec_type = 'STK' AND optionable = true
   AND symbol IS NOT NULL AND trim(symbol) <> ''
 """.strip()
@@ -82,6 +85,24 @@ def resolve_target_date(value: str | date | None = None) -> date:
     return ny_today
 
 
+def is_trading_day(conn: Any, d: date) -> bool:
+    """Check ``data_ops.us_trading_calendar``.
+
+    Missing rows fall back to weekday check (calendar may not be populated yet).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_trading FROM data_ops.us_trading_calendar WHERE cal_date = %s",
+            (d,),
+        )
+        row = cur.fetchone() if hasattr(cur, "fetchone") else None
+    if row is None:
+        return d.weekday() < 5
+    if isinstance(row, Mapping):
+        return bool(row["is_trading"])
+    return bool(row[0])
+
+
 def load_watchlist_symbols(
     conn: Any,
     scheduler_cfg: Mapping[str, Any],
@@ -107,6 +128,59 @@ def load_watchlist_symbols(
             if sym:
                 symbols.append(str(sym).strip().upper())
     return sorted(set(symbols))
+
+
+def load_option_tickers(
+    conn: Any,
+    underlyings: Sequence[str],
+    *,
+    as_of: date,
+    expiry_days: int = 60,
+    max_per_underlying: int = 40,
+) -> list[str]:
+    """Load near-term option_tickers from market.option_contract for underlyings.
+
+    Caps per-underlying count to keep Polygon job volume bounded.
+    """
+    syms = [str(s).strip().upper() for s in underlyings if str(s).strip()]
+    if not syms:
+        return []
+    expiry_days = max(0, int(expiry_days))
+    max_per = max(1, int(max_per_underlying))
+    end = as_of + timedelta(days=expiry_days)
+    tickers: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT option_ticker FROM (
+              SELECT
+                option_ticker,
+                underlying,
+                ROW_NUMBER() OVER (
+                  PARTITION BY underlying
+                  ORDER BY expiry ASC, strike ASC, option_right ASC
+                ) AS rn
+              FROM market.option_contract
+              WHERE underlying = ANY(%s)
+                AND expiry >= %s
+                AND expiry <= %s
+            ) ranked
+            WHERE rn <= %s
+            ORDER BY option_ticker
+            """,
+            (syms, as_of, end, max_per),
+        )
+        rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        if rows is None:
+            rows = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                t = row.get("option_ticker") or next(iter(row.values()), None)
+            else:
+                t = row[0] if row else None
+            if t:
+                tickers.append(str(t).strip().upper())
+    return tickers
 
 
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
@@ -139,6 +213,25 @@ def enqueue_slot(
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
         return {"slot": slot_key, "trimmed": deleted, "enqueued": 0, "deduped": 0}
 
+    skip_on_holiday = slot_key in (
+        "stock-eod",
+        "eod-pipeline",
+        "universe-daily",
+        "corporate",
+        "option-bars",
+        "minute-bars",
+    )
+    if skip_on_holiday and not is_trading_day(conn, day):
+        logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
+        return {
+            "slot": slot_key,
+            "target_date": day_s,
+            "skipped": True,
+            "enqueued": 0,
+            "deduped": 0,
+            "jobs": [],
+        }
+
     symbols = list(watchlist_symbols) if watchlist_symbols is not None else load_watchlist_symbols(conn, cfg)
     enqueued = 0
     deduped = 0
@@ -165,11 +258,10 @@ def enqueue_slot(
 
     elif slot_key == "universe-daily":
         _add(
-            "stock_daily",
-            {"mode": "grouped", "from": day_s, "to": day_s, "market": "stocks"},
+            "stock_daily_grouped",
+            {"from": day_s, "to": day_s, "market": "stocks"},
             pri=priority,
         )
-        _add("calendar", {}, pri=int(_slot_cfg(cfg, "calendar").get("priority") or priority))
 
     elif slot_key == "corporate":
         for sym in symbols:
@@ -178,10 +270,70 @@ def enqueue_slot(
 
     elif slot_key == "option-refresh":
         batch_size = int(scfg.get("batch_size") or 12)
-        batch = symbols[: max(0, batch_size)]
+        if symbols:
+            # Deterministic rotation so the whole watchlist is covered over days.
+            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
+            rotated = symbols[offset:] + symbols[:offset]
+            batch = rotated[: max(0, batch_size)]
+        else:
+            batch = []
         for sym in batch:
             _add("option_contract", {"underlying": sym, "expired": False})
             _add("option_expiration", {"underlying": sym})
+
+    elif slot_key == "option-bars":
+        expiry_days = int(scfg.get("expiry_days") or 60)
+        max_per = int(scfg.get("max_per_underlying") or 40)
+        tickers = load_option_tickers(
+            conn,
+            symbols,
+            as_of=day,
+            expiry_days=expiry_days,
+            max_per_underlying=max_per,
+        )
+        for ot in tickers:
+            _add("option_daily", {"option_ticker": ot, "from": day_s, "to": day_s})
+
+    elif slot_key == "minute-bars":
+        for sym in symbols:
+            _add(
+                "stock_minute",
+                {
+                    "symbol": sym,
+                    "from": day_s,
+                    "to": day_s,
+                    "multiplier": 1,
+                    "timespan": "minute",
+                },
+            )
+        # Option minute bars: rotate a bounded batch of near-term contracts.
+        expiry_days = int(scfg.get("expiry_days") or 45)
+        max_per = int(scfg.get("max_per_underlying") or 10)
+        batch_size = int(scfg.get("batch_size") or 80)
+        tickers = load_option_tickers(
+            conn,
+            symbols,
+            as_of=day,
+            expiry_days=expiry_days,
+            max_per_underlying=max_per,
+        )
+        if tickers:
+            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(tickers)
+            rotated = tickers[offset:] + tickers[:offset]
+            batch = rotated[: max(0, batch_size)]
+        else:
+            batch = []
+        for ot in batch:
+            _add(
+                "option_minute",
+                {
+                    "option_ticker": ot,
+                    "from": day_s,
+                    "to": day_s,
+                    "multiplier": 1,
+                    "timespan": "minute",
+                },
+            )
 
     elif slot_key == "calendar":
         _add("calendar", {})

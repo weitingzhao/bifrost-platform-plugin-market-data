@@ -8,9 +8,11 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 COPY config/market-data.yaml.example /config/market-data.yaml
-COPY scripts/run_worker.py ./scripts/run_worker.py
+COPY config/schedule.yaml /config/schedule.yaml
+COPY scripts/ ./scripts/
 
 ENV PYTHONUNBUFFERED=1
 ENV MARKET_DATA_CONFIG=/config/market-data.yaml
+ENV SCHEDULE_CONFIG=/config/schedule.yaml
 
 CMD ["python", "scripts/run_worker.py"]

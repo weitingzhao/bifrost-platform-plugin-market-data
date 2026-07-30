@@ -9,6 +9,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
+from bifrost_market_data.freshness import (
+    dimension_for_kind,
+    rows_written_from_result,
+    update_freshness,
+)
 from bifrost_market_data.worker.claim import JobRow, claim_job, mark_done, mark_failed
 from bifrost_market_data.worker.health import HealthState, start_health_server
 
@@ -19,6 +24,7 @@ Handler = Callable[[JobRow], Awaitable[Mapping[str, Any] | None]]
 POOL_KINDS: dict[str, tuple[str, ...]] = {
     "stocks": (
         "stock_daily",
+        "stock_daily_grouped",
         "stock_minute",
         "ticker_sync",
         "financials",
@@ -115,6 +121,19 @@ async def process_one_job(
     try:
         result = await _run_handler(handler, job)
         mark_done(conn, job.id, result)
+        try:
+            update_freshness(
+                conn,
+                dimension_for_kind(job.kind),
+                rows_written_from_result(result),
+            )
+        except Exception as freshness_err:
+            logger.warning(
+                "job %s kind=%s freshness update failed: %s",
+                job.id,
+                job.kind,
+                freshness_err,
+            )
         if health is not None:
             health.record_done()
         logger.info("job %s kind=%s done", job.id, job.kind)
