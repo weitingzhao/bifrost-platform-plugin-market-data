@@ -1,0 +1,333 @@
+# Daily EOD schedule slots (UTC). One CronJob per slot.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-stock-eod
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-stock-eod
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: stock-eod
+spec:
+  schedule: "30 21 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-stock-eod
+            bifrost.market-data/slot: stock-eod
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - stock-eod
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+                - name: POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-host
+                      optional: true
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-password
+                      optional: true
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-eod-pipeline
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-eod-pipeline
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: eod-pipeline
+spec:
+  schedule: "0 22 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-eod-pipeline
+            bifrost.market-data/slot: eod-pipeline
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - eod-pipeline
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-universe-daily
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-universe-daily
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: universe-daily
+spec:
+  schedule: "0 22 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-universe-daily
+            bifrost.market-data/slot: universe-daily
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - universe-daily
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-corporate
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-corporate
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: corporate
+spec:
+  schedule: "0 23 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-corporate
+            bifrost.market-data/slot: corporate
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - corporate
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-calendar
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-calendar
+    app.kubernetes.io/part-of: bifrost-market-data
+    bifrost.market-data/slot: calendar
+spec:
+  schedule: "0 22 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: market-data-calendar
+            bifrost.market-data/slot: calendar
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduler
+              image: bifrost-market-data:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - python
+                - -m
+                - bifrost_market_data.scheduler.daily
+                - --slot
+                - calendar
+              env:
+                - name: MARKET_DATA_CONFIG
+                  value: /config/market-data.yaml
+                - name: SCHEDULE_CONFIG
+                  value: /config/schedule.yaml
+              volumeMounts:
+                - name: config
+                  mountPath: /config/market-data.yaml
+                  subPath: market-data.yaml
+                  readOnly: true
+                - name: schedule
+                  mountPath: /config/schedule.yaml
+                  subPath: schedule.yaml
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: config
+              configMap:
+                name: market-data-config
+            - name: schedule
+              configMap:
+                name: market-data-schedule

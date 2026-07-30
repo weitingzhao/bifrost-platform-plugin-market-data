@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init
+.PHONY: install-dev test lint db-init db-init-dry
 
 install-dev:
 	pip install -e ".[dev]"
@@ -7,8 +7,10 @@ test:
 	pytest -q
 
 lint:
-	ruff check src tests
+	ruff check src tests scripts
 
 db-init:
-	@echo "db-init stub — implemented in P1 (schema/ddl.py + scripts)"
-	@exit 1
+	python scripts/init_schema.py
+
+db-init-dry:
+	python scripts/init_schema.py --dry-run

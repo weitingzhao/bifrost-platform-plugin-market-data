@@ -8,8 +8,12 @@ resources:
   - deployment-options.yaml
   - service.yaml
   - configmap.yaml
+  - configmap-schedule.yaml
   - network-policy.yaml
   - pdb.yaml
+  - cronjob-daily.yaml
+  - cronjob-options-refresh.yaml
+  - cronjob-maintenance.yaml
 
 labels:
   - pairs:

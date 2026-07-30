@@ -1,0 +1,35 @@
+# Market-data scheduler slots (CronJob → CLI --slot).
+# Cron strings are informational; K8s CronJob YAML is the runtime schedule source.
+
+scheduler:
+  watchlist_query: >-
+    SELECT DISTINCT symbol FROM watchlist
+    WHERE sec_type = 'STK' AND optionable = true
+      AND symbol IS NOT NULL AND trim(symbol) <> ''
+  # Optional hard-coded override (skips DB query when set):
+  # watchlist_symbols: [AAPL, MSFT, TSLA]
+
+  slots:
+    stock-eod:
+      cron: "30 21 * * *"
+      priority: 5
+    eod-pipeline:
+      cron: "0 22 * * *"
+      priority: 5
+    universe-daily:
+      cron: "0 22 * * *"
+      priority: 3
+    corporate:
+      cron: "0 23 * * *"
+      priority: 2
+    option-refresh:
+      cron: "20 */6 * * *"
+      priority: 4
+      batch_size: 12
+    calendar:
+      cron: "0 22 * * *"
+      priority: 1
+    trim:
+      cron: "15 2 * * *"
+      keep_days: 7
+      keep_max: 5000

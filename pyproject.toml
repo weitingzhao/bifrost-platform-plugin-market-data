@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 market-data-worker = "bifrost_market_data.worker.runner:main"
+market-data-schedule = "bifrost_market_data.scheduler.daily:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -31,6 +32,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["tests"]
 
 [tool.ruff]
 line-length = 100
