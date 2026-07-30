@@ -381,9 +381,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.symbols:
         symbols_override = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
 
+    import time
+
     import psycopg
 
-    conn = psycopg.connect(**postgres_connect_kwargs(cfg))
+    # CNPG / ClusterIP occasionally resets the first TCP handshake from short-lived
+    # CronJob pods; retry briefly before failing the Job.
+    kw = postgres_connect_kwargs(cfg)
+    conn = None
+    last_err: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            conn = psycopg.connect(**kw, connect_timeout=10)
+            break
+        except psycopg.OperationalError as exc:
+            last_err = exc
+            logger.warning(
+                "postgres connect attempt %s/5 failed: %s", attempt, exc
+            )
+            time.sleep(min(2 * attempt, 8))
+    if conn is None:
+        raise last_err if last_err is not None else RuntimeError("postgres connect failed")
     try:
         result = enqueue_slot(
             conn,

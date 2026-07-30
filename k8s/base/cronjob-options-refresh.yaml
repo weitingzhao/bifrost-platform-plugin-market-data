@@ -15,11 +15,12 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 1
+      backoffLimit: 3
       template:
         metadata:
           labels:
             app.kubernetes.io/name: market-data-option-refresh
+            app.kubernetes.io/part-of: bifrost-market-data
             bifrost.market-data/slot: option-refresh
         spec:
           restartPolicy: Never

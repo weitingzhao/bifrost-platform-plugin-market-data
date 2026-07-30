@@ -2,8 +2,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: market-data-config
-  labels:
-    app.kubernetes.io/name: market-data
 data:
   mode: live
   tier: starter
@@ -16,11 +14,12 @@ data:
     postgres:
       host: bifrost-postgres-rw.data.svc.cluster.local
       port: 5432
-      dbname: bifrost_dev
+      dbname: bifrost_stg
       user: bifrost
       password: ""
     redis:
-      url: redis://redis-dev.data.svc.cluster.local:6379/0
+      # STG redis-queue (adjust if STG seat uses a dedicated redis)
+      url: redis://redis-queue-stg.data.svc.cluster.local:6379/0
     worker:
       pool: stocks
       concurrency: 4

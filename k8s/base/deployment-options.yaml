@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: polygon-worker-options
     bifrost.market-data/pool: options
 spec:
-  replicas: 1
+  replicas: 4
   strategy:
     type: Recreate
   selector:

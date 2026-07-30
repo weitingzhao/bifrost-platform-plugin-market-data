@@ -23,3 +23,7 @@ labels:
       app.kubernetes.io/part-of: bifrost
       app.kubernetes.io/component: market-data
     includeSelectors: false
+
+images:
+  - name: bifrost-market-data
+    newTag: "0.1.1"
