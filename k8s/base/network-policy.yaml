@@ -1,0 +1,29 @@
+# Market-data workers — egress to data NS (Postgres/Redis) + Polygon HTTPS + DNS.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: market-data-egress
+  labels:
+    app.kubernetes.io/name: market-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: bifrost-market-data
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+    - ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,19 @@
+polygon:
+  api_key: ""
+  tier: starter          # starter | developer
+  rest_base: https://api.polygon.io
+
+postgres:
+  host: localhost
+  port: 5432
+  dbname: bifrost_dev
+  user: data_writer
+  password: ""
+
+redis:
+  url: redis://localhost:6379/0
+
+worker:
+  pool: stocks           # stocks | options
+  concurrency: 4
+  poll_interval_sec: 5

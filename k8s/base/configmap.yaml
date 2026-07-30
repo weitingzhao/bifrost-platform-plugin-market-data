@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: market-data-config
+  labels:
+    app.kubernetes.io/name: market-data
+data:
+  mode: live
+  tier: starter
+  poll_interval_sec: "5"
+  market-data.yaml: |
+    polygon:
+      api_key: ""
+      tier: starter
+      rest_base: https://api.polygon.io
+    postgres:
+      host: postgres.data.svc.cluster.local
+      port: 5432
+      dbname: bifrost_dev
+      user: data_writer
+      password: ""
+    redis:
+      url: redis://redis-live.data.svc.cluster.local:6379/0
+    worker:
+      pool: stocks
+      concurrency: 4
+      poll_interval_sec: 5

@@ -1,0 +1,23 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: polygon-worker-stocks
+  labels:
+    app.kubernetes.io/name: polygon-worker-stocks
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: polygon-worker-stocks
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: polygon-worker-options
+  labels:
+    app.kubernetes.io/name: polygon-worker-options
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: polygon-worker-options

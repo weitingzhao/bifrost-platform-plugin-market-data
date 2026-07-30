@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: market-data-health
+  labels:
+    app.kubernetes.io/name: market-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/part-of: bifrost-market-data
+  ports:
+    - name: health
+      port: 8080
+      targetPort: health
+      protocol: TCP
