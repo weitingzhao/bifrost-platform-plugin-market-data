@@ -68,6 +68,9 @@ class _DailyCursor:
         elif "delete from" in q:
             self.rowcount = 2
             self.parent._fetchone = None
+        elif "stock_readiness_daily" in q:
+            self.rowcount = 2
+            self.parent._fetchone = None
         else:
             self.parent._fetchone = None
             self.parent._fetchall = []
@@ -419,6 +422,47 @@ def test_all_slot_names_covered() -> None:
     assert "minute-bars" in SLOT_NAMES
     assert "reference" in SLOT_NAMES
     assert "fundamentals-rotate" in SLOT_NAMES
+    assert "readiness-refresh" in SLOT_NAMES
     assert "trim" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
+
+
+def test_enqueue_readiness_refresh() -> None:
+    conn = _DailyConn([])
+    result = enqueue_slot(
+        conn,
+        "readiness-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
+    )
+    assert result["slot"] == "readiness-refresh"
+    assert result["rows_updated"] == 2  # _DailyCursor sets rowcount=2 for UPDATE
+    assert result["enqueued"] == 0
+
+
+def test_readiness_refresh_not_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(
+        conn,
+        "readiness-refresh",
+        target_date=holiday,
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
+    )
+    assert result.get("skipped") is not True
+    assert result["rows_updated"] == 2
+
+
+def test_readiness_refresh_commits() -> None:
+    conn = _DailyConn([])
+    enqueue_slot(
+        conn,
+        "readiness-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={},
+    )
+    assert conn.committed >= 1

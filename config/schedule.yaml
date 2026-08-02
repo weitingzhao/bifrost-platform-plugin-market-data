@@ -51,3 +51,6 @@ scheduler:
       cron: "15 2 * * *"
       keep_days: 7
       keep_max: 5000
+    readiness-refresh:
+      cron: "30 23 * * *"
+      priority: 0

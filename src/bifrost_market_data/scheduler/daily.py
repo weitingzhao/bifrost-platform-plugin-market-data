@@ -32,6 +32,7 @@ SLOT_NAMES = (
     "calendar",
     "reference",
     "fundamentals-rotate",
+    "readiness-refresh",
     "trim",
 )
 
@@ -185,6 +186,28 @@ def load_option_tickers(
     return tickers
 
 
+_READINESS_REFRESH_SQL = """
+UPDATE public.stock_readiness_daily srd
+SET bar_count_lookback = v.bar_rows,
+    first_bar_date = v.first_bar_date,
+    last_bar_date = v.last_bar_date,
+    null_close_rows = v.null_close_rows,
+    null_volume_rows = v.null_volume_rows,
+    price_ready = v.price_ready
+FROM public.v_sepa_symbol_price_readiness v
+WHERE srd.as_of_date = v.as_of_date AND srd.symbol = v.symbol
+""".strip()
+
+
+def _run_readiness_refresh(conn: Any) -> int:
+    """Execute readiness UPDATE and return number of rows affected."""
+    with conn.cursor() as cur:
+        cur.execute(_READINESS_REFRESH_SQL)
+        rows = cur.rowcount if hasattr(cur, "rowcount") else 0
+    conn.commit()
+    return rows
+
+
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
     slots = dict(scheduler_cfg.get("slots") or {})
     return dict(slots.get(slot) or {})
@@ -214,6 +237,11 @@ def enqueue_slot(
         keep_max = int(scfg.get("keep_max") or 5000)
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
         return {"slot": slot_key, "trimmed": deleted, "enqueued": 0, "deduped": 0}
+
+    if slot_key == "readiness-refresh":
+        rows_updated = _run_readiness_refresh(conn)
+        logger.info("readiness-refresh updated %d rows", rows_updated)
+        return {"slot": slot_key, "rows_updated": rows_updated, "enqueued": 0, "deduped": 0}
 
     skip_on_holiday = slot_key in (
         "stock-eod",

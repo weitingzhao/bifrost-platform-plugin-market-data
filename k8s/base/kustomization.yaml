@@ -16,6 +16,7 @@ resources:
   - cronjob-option-bars.yaml
   - cronjob-options-refresh.yaml
   - cronjob-reference.yaml
+  - cronjob-readiness-refresh.yaml
   - cronjob-maintenance.yaml
 
 labels:
