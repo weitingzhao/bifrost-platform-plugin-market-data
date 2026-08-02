@@ -5,6 +5,11 @@ metadata:
   labels:
     app.kubernetes.io/name: polygon-worker-options
     bifrost.market-data/pool: options
+  annotations:
+    bifrost.dev/session: "true"
+    bifrost.dev/session-name: polygon-worker-options
+    bifrost.dev/session-label: Market Data Options
+    bifrost.dev/session-group: market-data
 spec:
   replicas: 4
   strategy:

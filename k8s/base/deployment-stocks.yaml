@@ -5,6 +5,11 @@ metadata:
   labels:
     app.kubernetes.io/name: polygon-worker-stocks
     bifrost.market-data/pool: stocks
+  annotations:
+    bifrost.dev/session: "true"
+    bifrost.dev/session-name: polygon-worker-stocks
+    bifrost.dev/session-label: Market Data Stocks
+    bifrost.dev/session-group: market-data
 spec:
   replicas: 1
   strategy:
