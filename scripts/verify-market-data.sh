@@ -71,6 +71,8 @@ EXPECTED_CRONS=(
   market-data-option-bars
   market-data-minute-bars
   market-data-maintenance
+  market-data-reference
+  market-data-fundamentals-rotate
 )
 MISSING=0
 for cj in "${EXPECTED_CRONS[@]}"; do
@@ -83,7 +85,7 @@ if [[ "$MISSING" -ne 0 ]]; then
   echo "FAIL: one or more CronJobs missing"
   exit 1
 fi
-echo "  7 CronJobs present"
+echo "  ${#EXPECTED_CRONS[@]} CronJobs present"
 
 echo ""
 echo "== [4/6] Worker job activity =="

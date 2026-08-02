@@ -40,6 +40,13 @@ scheduler:
     calendar:
       cron: "0 22 * * *"
       priority: 1
+    reference:
+      cron: "30 21 * * *"
+      priority: 2
+    fundamentals-rotate:
+      cron: "0 3 * * *"
+      priority: 1
+      batch_size: 40
     trim:
       cron: "15 2 * * *"
       keep_days: 7

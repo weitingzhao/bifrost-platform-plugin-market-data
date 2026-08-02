@@ -15,6 +15,7 @@ resources:
   - cronjob-daily.yaml
   - cronjob-option-bars.yaml
   - cronjob-options-refresh.yaml
+  - cronjob-reference.yaml
   - cronjob-maintenance.yaml
 
 labels:
@@ -26,4 +27,4 @@ labels:
 
 images:
   - name: bifrost-market-data
-    newTag: "0.1.1"
+    newTag: "0.1.2"

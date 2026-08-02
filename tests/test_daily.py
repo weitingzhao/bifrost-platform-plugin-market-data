@@ -312,6 +312,87 @@ def test_calendar_slot_not_skipped_on_holiday() -> None:
     assert result["enqueued"] == 1
 
 
+def test_enqueue_reference_ticker_sync() -> None:
+    conn = _DailyConn([])
+    result = enqueue_slot(
+        conn,
+        "reference",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"reference": {"priority": 2}}},
+    )
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["kind"] == "ticker_sync"
+    assert result["jobs"][0]["payload"] == {"mode": "universe"}
+
+
+def test_reference_slot_not_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(
+        conn,
+        "reference",
+        target_date=holiday,
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"reference": {"priority": 2}}},
+    )
+    assert result.get("skipped") is not True
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["kind"] == "ticker_sync"
+
+
+def test_enqueue_fundamentals_rotate_batch() -> None:
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
+    result = enqueue_slot(
+        _DailyConn(),
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"fundamentals-rotate": {"priority": 1, "batch_size": 2}}},
+    )
+    assert result["enqueued"] == 2
+    assert all(j["kind"] == "financials" for j in result["jobs"])
+    batch = {j["payload"]["symbol"] for j in result["jobs"]}
+    assert len(batch) == 2
+    assert batch.issubset(set(symbols))
+
+
+def test_enqueue_fundamentals_rotate_by_date() -> None:
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
+    r1 = enqueue_slot(
+        _DailyConn(),
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"fundamentals-rotate": {"batch_size": 2}}},
+    )
+    r2 = enqueue_slot(
+        _DailyConn(),
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"fundamentals-rotate": {"batch_size": 2}}},
+    )
+    s1 = {j["payload"]["symbol"] for j in r1["jobs"]}
+    s2 = {j["payload"]["symbol"] for j in r2["jobs"]}
+    assert s1 != s2 or len(symbols) <= 2
+
+
+def test_fundamentals_rotate_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(
+        conn,
+        "fundamentals-rotate",
+        target_date=holiday,
+        watchlist_symbols=["AAPL", "MSFT"],
+        scheduler_cfg={"slots": {"fundamentals-rotate": {"batch_size": 40}}},
+    )
+    assert result.get("skipped") is True
+    assert result["enqueued"] == 0
+    assert result["jobs"] == []
+
+
 def test_enqueue_calendar_and_trim() -> None:
     conn = _DailyConn([])
     cal = enqueue_slot(conn, "calendar", watchlist_symbols=[], scheduler_cfg={})
@@ -336,6 +417,8 @@ def test_all_slot_names_covered() -> None:
     assert "stock-eod" in SLOT_NAMES
     assert "option-bars" in SLOT_NAMES
     assert "minute-bars" in SLOT_NAMES
+    assert "reference" in SLOT_NAMES
+    assert "fundamentals-rotate" in SLOT_NAMES
     assert "trim" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})

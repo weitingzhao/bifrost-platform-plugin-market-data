@@ -30,6 +30,8 @@ SLOT_NAMES = (
     "option-bars",
     "minute-bars",
     "calendar",
+    "reference",
+    "fundamentals-rotate",
     "trim",
 )
 
@@ -220,6 +222,7 @@ def enqueue_slot(
         "corporate",
         "option-bars",
         "minute-bars",
+        "fundamentals-rotate",
     )
     if skip_on_holiday and not is_trading_day(conn, day):
         logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
@@ -337,6 +340,22 @@ def enqueue_slot(
 
     elif slot_key == "calendar":
         _add("calendar", {})
+
+    elif slot_key == "reference":
+        # Universe ticker sync — run on weekends/holidays too (calendar-like).
+        _add("ticker_sync", {"mode": "universe"}, pri=priority)
+
+    elif slot_key == "fundamentals-rotate":
+        # Per-symbol financials with deterministic daily rotation (not full universe).
+        batch_size = int(scfg.get("batch_size") or 40)
+        if symbols:
+            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
+            rotated = symbols[offset:] + symbols[:offset]
+            batch = rotated[: max(0, batch_size)]
+        else:
+            batch = []
+        for sym in batch:
+            _add("financials", {"symbol": sym}, pri=priority)
 
     return {
         "slot": slot_key,
