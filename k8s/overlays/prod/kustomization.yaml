@@ -1,0 +1,21 @@
+# PROD seat — independent namespace (mirrors STG overlay pattern).
+#
+# Does NOT touch live DEV/STG workers.
+#
+# Preview: kubectl kustomize k8s/overlays/prod
+# Apply:   kubectl apply -k k8s/overlays/prod
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: plugin-market-data-prod
+
+resources:
+  - ../../base
+
+patches:
+  - path: configmap-patch.yaml
+  - path: replicas-patch.yaml
+
+images:
+  - name: bifrost-market-data
+    newTag: "0.1.2"

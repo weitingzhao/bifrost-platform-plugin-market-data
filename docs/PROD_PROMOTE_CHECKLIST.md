@@ -30,9 +30,18 @@ kubectl -n data cp stocks/backups/bifrost_prod_pre_p9_20260730T230317Z.dump \
 | `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`) |
 | One-shot Job `market-data-prod-ticker-sync` | done (`market.ticker=5306`) |
 
+## PROD workers (applied 2026-08-05)
+
+| Step | Status |
+|------|--------|
+| `k8s/overlays/prod` → NS `plugin-market-data-prod` | applied (dbname `bifrost_prod`, redis `redis-queue-prod`) |
+| PG / Redis NetworkPolicies allow `plugin-market-data-prod` | applied |
+| Owner-safe `stock_daily` seed from `bifrost_dev` (NVDA + last 60d) | done (`~421k` rows; not full history) |
+| Trade `:prod` images / bifrost-core **0.5.2** via `make k3s-deliver-prod` | done (`bifrost-deliver-prod-1785945612`) |
+
 ## Still Owner-gated
 
-- Permanent PROD workers NS (e.g. `plugin-market-data-prod`) — **not** applied
+- Full historical `stock_daily` backfill (optional; DEV has ~3.2M rows)
 - `MARKET_DATA_FRESHNESS_DB=bifrost_prod` for PROD Gallery seat
 
 ## Verify
