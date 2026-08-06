@@ -194,6 +194,67 @@ def check_option_snapshot_coverage(
     }
 
 
+def check_option_oi_coverage(
+    conn: Any,
+    *,
+    watchlist_symbols: Sequence[str] | None = None,
+    lookback_days: int = 14,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    """Watchlist underlyings should have ≥1 OI row per recent trading day."""
+    symbols = (
+        list(watchlist_symbols)
+        if watchlist_symbols is not None
+        else load_watchlist_symbols(conn, {"watchlist_query": DEFAULT_WATCHLIST_QUERY})
+    )
+    trading_days = fetch_recent_trading_days(conn, lookback_days, as_of=as_of)
+    gaps: list[dict[str, Any]] = []
+
+    if symbols and trading_days:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT underlying, trade_date
+                FROM market.option_open_interest
+                WHERE underlying = ANY(%s)
+                  AND trade_date >= %s
+                  AND trade_date <= %s
+                GROUP BY underlying, trade_date
+                """,
+                (list(symbols), trading_days[0], trading_days[-1]),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        present: set[tuple[str, date]] = set()
+        for row in rows or []:
+            if isinstance(row, Mapping):
+                und = str(row.get("underlying") or "")
+                td = row.get("trade_date")
+            else:
+                und = str(row[0] or "")
+                td = row[1]
+            if isinstance(td, datetime):
+                td = td.date()
+            if und and isinstance(td, date):
+                present.add((und.upper(), td))
+        for sym in symbols:
+            for d in trading_days:
+                if (sym, d) not in present:
+                    gaps.append({"underlying": sym, "trade_date": d.isoformat()})
+
+    ok = len(symbols) > 0 and len(gaps) == 0
+    return {
+        "check": "option_oi_coverage",
+        "ok": ok,
+        "watchlist_symbols": len(symbols),
+        "trading_days": [d.isoformat() for d in trading_days],
+        "gap_count": len(gaps),
+        "gaps_sample": gaps[:20],
+        "detail": (
+            f"gaps={len(gaps)} over {len(trading_days)} trading days × {len(symbols)} watchlist"
+        ),
+    }
+
+
 def check_freshness(
     conn: Any,
     *,
@@ -291,8 +352,13 @@ def run_all_checks(
         watchlist_symbols=watchlist_symbols,
     )
     snaps = check_option_snapshot_coverage(conn, watchlist_symbols=watchlist_symbols)
+    oi = check_option_oi_coverage(
+        conn,
+        watchlist_symbols=watchlist_symbols,
+        lookback_days=lookback_days,
+    )
     fresh = check_freshness(conn, max_age_hours=max_age_hours)
-    checks = [stock, snaps, fresh]
+    checks = [stock, snaps, oi, fresh]
     ok = all(bool(c.get("ok")) for c in checks)
     return {
         "ok": ok,

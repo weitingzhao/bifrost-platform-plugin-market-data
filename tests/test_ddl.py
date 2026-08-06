@@ -9,6 +9,7 @@ import pytest
 
 from bifrost_market_data.schema.ddl import (
     DATA_OPS_TABLES,
+    MARKET_ANALYTICS_TABLES,
     MARKET_TABLES,
     MARKET_VIEWS,
     apply_ddl,
@@ -48,9 +49,12 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert conn.committed
     blob = "\n".join(conn.cur.statements)
     assert "CREATE SCHEMA IF NOT EXISTS market" in blob
+    assert "CREATE SCHEMA IF NOT EXISTS market_analytics" in blob
     assert "CREATE SCHEMA IF NOT EXISTS data_ops" in blob
     for name in MARKET_TABLES:
         assert f"market.{name}" in blob, f"missing market.{name}"
+    for name in MARKET_ANALYTICS_TABLES:
+        assert f"market_analytics.{name}" in blob, f"missing market_analytics.{name}"
     for name in DATA_OPS_TABLES:
         assert f"data_ops.{name}" in blob, f"missing data_ops.{name}"
     for name in MARKET_VIEWS:
@@ -58,6 +62,10 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert "ensure_year_partitions" in blob
     assert "ensure_month_partitions" in blob
     assert "SELECT data_ops.ensure_year_partitions('market', 'stock_daily'" in blob
+    assert (
+        "SELECT data_ops.ensure_month_partitions('market_analytics', 'max_pain_daily'"
+        in blob
+    )
     assert "job_ingest_dedup" in blob
     assert "SELECT FOR UPDATE" not in blob  # claim logic is P3, not DDL
 
@@ -73,7 +81,10 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 
 
 def test_expected_object_counts() -> None:
-    assert len(MARKET_TABLES) == 11
+    assert len(MARKET_TABLES) == 13
+    assert "stock_snapshot" in MARKET_TABLES
+    assert "stock_movers" in MARKET_TABLES
+    assert len(MARKET_ANALYTICS_TABLES) == 4
     assert len(DATA_OPS_TABLES) == 3
     assert len(MARKET_VIEWS) == 3
 
@@ -105,6 +116,16 @@ def test_apply_ddl_live_idempotent() -> None:
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'market_analytics' AND table_type = 'BASE TABLE'
+                ORDER BY 1
+                """
+            )
+            analytics = [r[0] for r in cur.fetchall()]
+            for name in MARKET_ANALYTICS_TABLES:
+                assert name in analytics
+            cur.execute(
+                """
+                SELECT table_name FROM information_schema.tables
                 WHERE table_schema = 'data_ops' AND table_type = 'BASE TABLE'
                 ORDER BY 1
                 """
@@ -122,3 +143,5 @@ def test_create_roles_sql_exists() -> None:
     assert "data_writer" in text
     assert "market_reader" in text
     assert "GRANT" in text
+    assert "GRANT USAGE, CREATE ON SCHEMA market_analytics TO data_writer" in text
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA market_analytics TO market_reader" in text

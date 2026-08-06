@@ -54,3 +54,13 @@ scheduler:
     readiness-refresh:
       cron: "30 23 * * *"
       priority: 0
+    stock-snapshot:
+      cron: "5 21 * * *"
+      priority: 4
+    stock-movers:
+      cron: "10 21 * * *"
+      priority: 4
+    oi-gap-heal:
+      # D6=B: weekly re-scan recent days; DB-to-DB extract fills OI gaps
+      cron: "0 4 * * 6"
+      lookback_days: 14

@@ -50,7 +50,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.option_tickers:
             parser.error(f"--option-tickers required for {kind}")
         symbols = [s.strip().upper() for s in args.option_tickers.split(",") if s.strip()]
-    elif kind in ("stock_daily", "stock_minute", "financials", "option_snapshot", "option_contract"):
+    elif kind in (
+        "stock_daily",
+        "stock_minute",
+        "financials",
+        "option_snapshot",
+        "option_contract",
+        "option_open_interest",
+    ):
         if not args.symbols:
             parser.error(f"--symbols required for {kind}")
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]

@@ -34,6 +34,9 @@ SLOT_NAMES = (
     "fundamentals-rotate",
     "readiness-refresh",
     "trim",
+    "stock-snapshot",
+    "stock-movers",
+    "oi-gap-heal",
 )
 
 DEFAULT_WATCHLIST_QUERY = """
@@ -243,6 +246,51 @@ def enqueue_slot(
         logger.info("readiness-refresh updated %d rows", rows_updated)
         return {"slot": slot_key, "rows_updated": rows_updated, "enqueued": 0, "deduped": 0}
 
+    if slot_key == "oi-gap-heal":
+        # D6=B: weekly DB-to-DB extract over recent trading days (no Polygon).
+        # Inline like readiness-refresh — pure SQL gap-fill, no worker job kind.
+        from bifrost_market_data.ingest.option_oi_extract import extract_oi_from_snapshots
+        from bifrost_market_data.quality import fetch_recent_trading_days
+
+        lookback = int(scfg.get("lookback_days") or 14)
+        symbols = (
+            list(watchlist_symbols)
+            if watchlist_symbols is not None
+            else load_watchlist_symbols(conn, cfg)
+        )
+        trading_days = fetch_recent_trading_days(conn, lookback)
+        if not trading_days:
+            return {
+                "slot": slot_key,
+                "lookback_days": lookback,
+                "symbols": len(symbols),
+                "skipped": True,
+                "reason": "no trading days",
+                "enqueued": 0,
+                "deduped": 0,
+            }
+        extract_result = extract_oi_from_snapshots(
+            conn,
+            underlyings=symbols or None,
+            from_date=trading_days[0],
+            to_date=trading_days[-1],
+        )
+        logger.info(
+            "oi-gap-heal from=%s to=%s candidates=%s skipped=%s",
+            extract_result.get("from_date"),
+            extract_result.get("to_date"),
+            extract_result.get("candidates"),
+            extract_result.get("skipped"),
+        )
+        return {
+            "slot": slot_key,
+            "lookback_days": lookback,
+            "symbols": len(symbols),
+            "enqueued": 0,
+            "deduped": 0,
+            **extract_result,
+        }
+
     skip_on_holiday = slot_key in (
         "stock-eod",
         "eod-pipeline",
@@ -251,6 +299,8 @@ def enqueue_slot(
         "option-bars",
         "minute-bars",
         "fundamentals-rotate",
+        "stock-snapshot",
+        "stock-movers",
     )
     if skip_on_holiday and not is_trading_day(conn, day):
         logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
@@ -384,6 +434,22 @@ def enqueue_slot(
             batch = []
         for sym in batch:
             _add("financials", {"symbol": sym}, pri=priority)
+
+    elif slot_key == "stock-snapshot":
+        # Full-market All Tickers Snapshot (D2=A); one job, mode=all.
+        _add(
+            "stock_snapshot",
+            {"mode": "all", "session_date": day_s},
+            pri=priority,
+        )
+
+    elif slot_key == "stock-movers":
+        # One job handles both gainers + losers (handler loops directions).
+        _add(
+            "stock_movers",
+            {"direction": "both", "session_date": day_s},
+            pri=priority,
+        )
 
     return {
         "slot": slot_key,

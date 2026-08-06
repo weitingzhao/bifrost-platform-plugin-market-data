@@ -10,6 +10,8 @@ def test_package_version() -> None:
 
 
 def test_subpackages_import() -> None:
+    import bifrost_market_data.api  # noqa: F401
+    import bifrost_market_data.api.app  # noqa: F401
     import bifrost_market_data.config  # noqa: F401
     import bifrost_market_data.ingest  # noqa: F401
     import bifrost_market_data.polygon  # noqa: F401

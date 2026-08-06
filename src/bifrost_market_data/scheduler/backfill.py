@@ -15,7 +15,12 @@ _DATE_RANGE_KINDS = frozenset(
 )
 
 # Kinds that enqueue one job per symbol (no date range).
-_PER_SYMBOL_KINDS = frozenset({"financials", "option_snapshot", "option_contract"})
+# option_open_interest: Polygon has no historical OI API — this path only fetches
+# the *current* options snapshot OI for listed underlyings. True history is
+# DB-to-DB extract via ingest.option_oi_extract / scripts/backfill_oi.py.
+_PER_SYMBOL_KINDS = frozenset(
+    {"financials", "option_snapshot", "option_contract", "option_open_interest"}
+)
 
 # Single-job kinds (no symbols / dates required).
 _SINGLE_JOB_KINDS = frozenset({"ticker_sync"})
@@ -106,6 +111,11 @@ def enqueue_backfill(
                 payload = {"symbol": sym}
             elif kind_s == "option_snapshot":
                 payload = {"underlying": sym}
+            elif kind_s == "option_open_interest":
+                # Current-snapshot OI only (no historical Polygon OI endpoint).
+                payload = {"underlying": sym}
+                if from_date is not None:
+                    payload["trade_date"] = from_date.isoformat()
             else:  # option_contract
                 payload = {"underlying": sym, "expired": False}
             job_id = insert_job(conn, kind=kind_s, payload=payload, priority=priority)

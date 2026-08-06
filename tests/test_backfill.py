@@ -167,6 +167,31 @@ def test_enqueue_backfill_option_contract() -> None:
     assert result["jobs"][0]["payload"]["expired"] is False
 
 
+def test_enqueue_backfill_option_open_interest() -> None:
+    """API backfill enqueues current-snapshot OI jobs (not historical extract)."""
+    conn = _BFConn()
+    result = enqueue_backfill(conn, kind="option_open_interest", symbols=["AAPL", "MSFT"])
+    assert result["enqueued"] == 2
+    assert result["chunks"] == 0
+    assert result["jobs"][0]["payload"] == {"underlying": "AAPL"}
+    assert result["jobs"][1]["payload"] == {"underlying": "MSFT"}
+
+
+def test_enqueue_backfill_option_open_interest_with_trade_date() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(
+        conn,
+        kind="option_open_interest",
+        symbols=["AAPL"],
+        from_date=date(2024, 6, 20),
+    )
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["payload"] == {
+        "underlying": "AAPL",
+        "trade_date": "2024-06-20",
+    }
+
+
 def test_enqueue_backfill_ticker_sync() -> None:
     conn = _BFConn()
     result = enqueue_backfill(conn, kind="ticker_sync")

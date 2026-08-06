@@ -30,8 +30,18 @@ class _DailyCursor:
                 self.parent._fetchone = (self.parent.calendar[d],)
             else:
                 self.parent._fetchone = None
-            self.parent._fetchall = []
-        elif "from market.option_contract" in q or "option_contract" in q:
+            # fetch_recent_trading_days uses SELECT cal_date ... fetchall
+            if "cal_date" in q:
+                days = sorted(self.parent.calendar.keys(), reverse=True)
+                trading = [d for d in days if self.parent.calendar.get(d)]
+                self.parent._fetchall = [(d,) for d in trading]
+            else:
+                self.parent._fetchall = []
+        elif "option_snapshot" in q:
+            # oi-gap-heal extract SELECT (may also JOIN option_contract)
+            self.parent._fetchall = list(self.parent.extract_rows)
+            self.parent._fetchone = None
+        elif "from market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
             as_of = params[1] if params and len(params) > 1 else None
             end = params[2] if params and len(params) > 2 else None
@@ -81,6 +91,10 @@ class _DailyCursor:
     def fetchall(self) -> list[Any]:
         return list(self.parent._fetchall)
 
+    def executemany(self, query: str, params_seq: Any) -> None:
+        self.parent.statements.append((query, list(params_seq)))
+        self.parent.extract_inserts.extend(list(params_seq))
+
     def __enter__(self) -> _DailyCursor:
         return self
 
@@ -94,11 +108,15 @@ class _DailyConn:
         watchlist: list[str] | None = None,
         calendar: dict[date, bool] | None = None,
         option_contracts: list[tuple[str, str, date]] | None = None,
+        extract_rows: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.calendar = calendar or {}
         # (option_ticker, underlying, expiry)
         self.option_contracts = option_contracts or []
+        # JOIN-shaped rows for oi-gap-heal extract
+        self.extract_rows = extract_rows or []
+        self.extract_inserts: list[tuple[Any, ...]] = []
         self.statements: list[tuple[str, Any]] = []
         self.seen_keys: set[tuple[Any, Any]] = set()
         self.next_id = 0
@@ -114,7 +132,6 @@ class _DailyConn:
 
     def rollback(self) -> None:
         return None
-
 
 def test_resolve_target_date_explicit() -> None:
     assert resolve_target_date("2024-06-20") == date(2024, 6, 20)
@@ -424,9 +441,56 @@ def test_all_slot_names_covered() -> None:
     assert "fundamentals-rotate" in SLOT_NAMES
     assert "readiness-refresh" in SLOT_NAMES
     assert "trim" in SLOT_NAMES
+    assert "stock-snapshot" in SLOT_NAMES
+    assert "stock-movers" in SLOT_NAMES
+    assert "oi-gap-heal" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
 
+
+def test_enqueue_stock_snapshot_slot() -> None:
+    conn = _DailyConn([])
+    result = enqueue_slot(
+        conn,
+        "stock-snapshot",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"stock-snapshot": {"priority": 4}}},
+    )
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["kind"] == "stock_snapshot"
+    assert result["jobs"][0]["payload"] == {"mode": "all", "session_date": "2024-06-20"}
+
+
+def test_enqueue_stock_movers_slot() -> None:
+    conn = _DailyConn([])
+    result = enqueue_slot(
+        conn,
+        "stock-movers",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"stock-movers": {"priority": 4}}},
+    )
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["kind"] == "stock_movers"
+    assert result["jobs"][0]["payload"] == {
+        "direction": "both",
+        "session_date": "2024-06-20",
+    }
+
+
+def test_stock_snapshot_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    result = enqueue_slot(
+        conn,
+        "stock-snapshot",
+        target_date=holiday,
+        watchlist_symbols=[],
+        scheduler_cfg={"slots": {"stock-snapshot": {"priority": 4}}},
+    )
+    assert result.get("skipped") is True
+    assert result["enqueued"] == 0
 
 def test_enqueue_readiness_refresh() -> None:
     conn = _DailyConn([])
@@ -466,3 +530,64 @@ def test_readiness_refresh_commits() -> None:
         scheduler_cfg={},
     )
     assert conn.committed >= 1
+
+
+def test_enqueue_oi_gap_heal() -> None:
+    """D6=B: weekly slot runs extract inline (no Polygon jobs)."""
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 6, 18): True,
+            date(2024, 6, 19): True,
+            date(2024, 6, 20): True,
+        },
+        extract_rows=[
+            (
+                "O:AAPL250620C00150000",
+                "AAPL",
+                100,
+                date(2024, 6, 20),
+                date(2025, 6, 20),
+                150.0,
+                "C",
+                "AAPL",
+            ),
+        ],
+    )
+    result = enqueue_slot(
+        conn,
+        "oi-gap-heal",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3}}},
+    )
+    assert result["slot"] == "oi-gap-heal"
+    assert result["enqueued"] == 0
+    assert result["candidates"] == 1
+    assert result["from_date"] == "2024-06-18"
+    assert result["to_date"] == "2024-06-20"
+    assert any("DO NOTHING" in s[0] for s in conn.statements if "INSERT INTO" in s[0])
+
+
+def test_oi_gap_heal_runs_on_weekend() -> None:
+    """oi-gap-heal is not holiday-skipped (Saturday CronJob)."""
+    saturday = date(2024, 6, 22)
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 6, 18): True,
+            date(2024, 6, 19): True,
+            date(2024, 6, 20): True,
+            saturday: False,
+        },
+        extract_rows=[],
+    )
+    result = enqueue_slot(
+        conn,
+        "oi-gap-heal",
+        target_date=saturday,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3}}},
+    )
+    assert result.get("skipped") is not True or result.get("reason") == "no trading days"
+    assert result["enqueued"] == 0

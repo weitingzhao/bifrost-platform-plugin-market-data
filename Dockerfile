@@ -15,4 +15,6 @@ ENV PYTHONUNBUFFERED=1
 ENV MARKET_DATA_CONFIG=/config/market-data.yaml
 ENV SCHEDULE_CONFIG=/config/schedule.yaml
 
+# Default: ingest worker. API Deployment overrides with:
+#   args: ["python", "scripts/run_api.py"]  (port 8790, GET /health)
 CMD ["python", "scripts/run_worker.py"]

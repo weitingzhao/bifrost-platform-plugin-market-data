@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry verify-market-data
+.PHONY: install-dev test lint db-init db-init-dry apply-roles run-api kustomize-check verify-market-data
 
 install-dev:
 	pip install -e ".[dev]"
@@ -14,6 +14,16 @@ db-init:
 
 db-init-dry:
 	python scripts/init_schema.py --dry-run
+
+# Best-effort roles (CREATE ROLE / GRANT). Prefer elevated PG credentials via POSTGRES_*.
+apply-roles:
+	python scripts/init_schema.py --roles-only
+
+run-api:
+	python scripts/run_api.py
+
+kustomize-check:
+	kubectl kustomize k8s/base >/dev/null
 
 verify-market-data:
 	bash scripts/verify-market-data.sh

@@ -7,6 +7,7 @@ from typing import Any
 
 from bifrost_market_data.quality import (
     check_freshness,
+    check_option_oi_coverage,
     check_option_snapshot_coverage,
     check_stock_daily_coverage,
     run_all_checks,
@@ -33,6 +34,9 @@ class _QCur:
             self._one = None
         elif "from market.option_snapshot" in q:
             self._rows = [(u,) for u in self.parent.snapshot_underlyings]
+            self._one = None
+        elif "from market.option_open_interest" in q:
+            self._rows = list(self.parent.oi_rows)
             self._one = None
         elif "from data_ops.ingest_freshness" in q:
             self._rows = list(self.parent.freshness_rows)
@@ -76,6 +80,14 @@ class _QConn:
             ("MSFT", date(2024, 6, 20)),
         ]
         self.snapshot_underlyings = ["AAPL", "MSFT"]
+        self.oi_rows: list[tuple[str, date]] = [
+            ("AAPL", date(2024, 6, 18)),
+            ("AAPL", date(2024, 6, 19)),
+            ("AAPL", date(2024, 6, 20)),
+            ("MSFT", date(2024, 6, 18)),
+            ("MSFT", date(2024, 6, 19)),
+            ("MSFT", date(2024, 6, 20)),
+        ]
         now = datetime.now(timezone.utc)
         self.freshness_rows = [
             ("stock_daily", now - timedelta(hours=1), 10, "ok", now),
@@ -152,6 +164,35 @@ def test_option_snapshot_coverage_missing() -> None:
     assert "MSFT" in result["missing_sample"]
 
 
+def test_option_oi_coverage_pass() -> None:
+    conn = _QConn()
+    result = check_option_oi_coverage(
+        conn,
+        watchlist_symbols=["AAPL", "MSFT"],
+        lookback_days=3,
+        as_of=date(2024, 6, 20),
+    )
+    assert result["ok"] is True
+    assert result["gap_count"] == 0
+
+
+def test_option_oi_coverage_gaps() -> None:
+    conn = _QConn()
+    conn.oi_rows = [
+        ("AAPL", date(2024, 6, 18)),
+        ("AAPL", date(2024, 6, 19)),
+        # missing AAPL 2024-06-20 and all MSFT
+    ]
+    result = check_option_oi_coverage(
+        conn,
+        watchlist_symbols=["AAPL", "MSFT"],
+        lookback_days=3,
+        as_of=date(2024, 6, 20),
+    )
+    assert result["ok"] is False
+    assert result["gap_count"] > 0
+
+
 def test_freshness_pass() -> None:
     conn = _QConn()
     result = check_freshness(conn)
@@ -182,4 +223,10 @@ def test_run_all_checks() -> None:
     )
     assert report["ok"] is True
     assert report["summary"] == "PASS"
-    assert len(report["checks"]) == 3
+    assert len(report["checks"]) == 4
+    assert {c["check"] for c in report["checks"]} == {
+        "stock_daily_coverage",
+        "option_snapshot_coverage",
+        "option_oi_coverage",
+        "freshness",
+    }

@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-data-api
+  labels:
+    app.kubernetes.io/name: market-data-api
+    bifrost.market-data/role: api
+  annotations:
+    bifrost.dev/session: "true"
+    bifrost.dev/session-name: market-data-api
+    bifrost.dev/session-label: Market Data API
+    bifrost.dev/session-group: market-data
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: market-data-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: market-data-api
+        bifrost.market-data/role: api
+        app.kubernetes.io/part-of: bifrost-market-data
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: bifrost-market-data:0.1.0
+          imagePullPolicy: IfNotPresent
+          # Override image CMD (default: run_worker.py). scripts/run_api.py is in the image.
+          args: ["python", "scripts/run_api.py"]
+          env:
+            - name: MARKET_DATA_CONFIG
+              value: /config/market-data.yaml
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8790"
+            - name: POLYGON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: polygon-api-key
+                  optional: true
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-host
+                  optional: true
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-password
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8790
+          volumeMounts:
+            - name: config
+              mountPath: /config/market-data.yaml
+              subPath: market-data.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+      volumes:
+        - name: config
+          configMap:
+            name: market-data-config

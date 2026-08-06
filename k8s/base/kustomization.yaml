@@ -7,7 +7,9 @@ resources:
   - namespace.yaml
   - deployment-stocks.yaml
   - deployment-options.yaml
+  - deployment-api.yaml
   - service.yaml
+  - service-api.yaml
   - configmap.yaml
   - configmap-schedule.yaml
   - network-policy.yaml

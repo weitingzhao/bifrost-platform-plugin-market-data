@@ -200,3 +200,36 @@ def grouped_daily_path(
 
 def grouped_daily_params(*, adjusted: bool = True) -> dict[str, Any]:
     return {"adjusted": "true" if adjusted else "false"}
+
+
+def stock_snapshot_all_path() -> str:
+    """``/v2/snapshot/locale/us/markets/stocks/tickers`` (full-market)."""
+    return "/v2/snapshot/locale/us/markets/stocks/tickers"
+
+
+def stock_snapshot_all_params(*, include_otc: bool = False) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if include_otc:
+        params["include_otc"] = "true"
+    return params
+
+
+def stock_snapshot_single_path(ticker: str) -> str:
+    """``/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}``."""
+    enc = quote(str(ticker).strip().upper(), safe="")
+    return f"/v2/snapshot/locale/us/markets/stocks/tickers/{enc}"
+
+
+def stock_gainers_losers_path(direction: str) -> str:
+    """``/v2/snapshot/locale/us/markets/stocks/{direction}`` (gainers|losers)."""
+    d = str(direction or "").strip().lower()
+    if d not in ("gainers", "losers"):
+        raise ValueError(f"direction must be gainers|losers, got {direction!r}")
+    return f"/v2/snapshot/locale/us/markets/stocks/{d}"
+
+
+def stock_gainers_losers_params(*, include_otc: bool = False) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if include_otc:
+        params["include_otc"] = "true"
+    return params

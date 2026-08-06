@@ -1,9 +1,11 @@
-# Market Data Schema (`market.*` + `data_ops.*`)
+# Market Data Schema (`market.*` + `market_analytics.*` + `data_ops.*`)
 
-Owner review deliverable for program **market-data-subcontractor** Phase **P1**.
+Owner review deliverable for program **market-data-subcontractor** Phase **P1**,
+extended by **market-data-expand** Wave **0-A** (`market_analytics`).
 
 Physical database: shared PostgreSQL (`bifrost_dev` / `bifrost_prod`).  
-Logical isolation: schemas `market` (public market data) and `data_ops` (ingest jobs / ops metadata).  
+Logical isolation: schemas `market` (public market data), `market_analytics`
+(derived daily analytics), and `data_ops` (ingest jobs / ops metadata).  
 Single vendor: **Polygon.io** — no `source` column, no IB legacy fields.
 
 Apply DDL:
@@ -23,9 +25,10 @@ psql -f scripts/create_roles.sql
 |-----------|--------|
 | Time | Calendar `date` for daily bars (NY trade date semantics at ingest); `timestamptz` UTC for intraday / snapshots |
 | Identity | `symbol` uppercase TRIM at write time; options keyed by Polygon `option_ticker` (`O:AAPL250620C00150000`) |
-| Partitioning | Year for `stock_daily`; month for minute / option daily / snapshot |
+| Partitioning | Year for `stock_daily`; month for minute / option daily / snapshot / analytics; **no partition** for `stock_snapshot` / `stock_movers` (daily upsert by session_date) |
 | Fundamentals | One jsonb table (`stock_financials`) instead of six flat tables |
 | Jobs | `data_ops.job_ingest` is the broker (`SELECT FOR UPDATE SKIP LOCKED` in P3) |
+| Analytics | Derived daily metrics in `market_analytics.*` (computed from `market.*`; no live vendor calls in DDL) |
 
 ---
 
@@ -61,6 +64,45 @@ Replaces `public.stock_min`.
 | OHLCV / vwap / trade_count / fetched_at | | same pattern as daily |
 
 **PK:** `(symbol, period, bar_time)`
+
+### `market.stock_snapshot`
+
+Full-market (or single-ticker) Polygon stock snapshot, daily upsert.
+**Non-partitioned.** Trades/Quotes tick persistence is intentionally deferred (D1=A).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| session_date | date | PK part; NY calendar session day |
+| open/high/low/close | double precision | from snapshot `day` |
+| volume | bigint | |
+| vwap | double precision | |
+| prev_close | double precision | from `prevDay.c` |
+| change | double precision | `todaysChange` |
+| change_pct | double precision | `todaysChangePerc` |
+| fetched_at | timestamptz | ingest wall clock |
+
+**PK:** `(symbol, session_date)`  
+**Index:** `(session_date DESC, symbol)`  
+**Job kind:** `stock_snapshot` · slot `stock-snapshot` (~21:05 UTC)
+
+### `market.stock_movers`
+
+Daily gainers / losers snapshot rows. **Non-partitioned.**
+
+| Column | Type | Notes |
+|--------|------|-------|
+| direction | text | `gainers` or `losers` |
+| symbol | text | PK part |
+| session_date | date | PK part; NY calendar session day |
+| change_pct | double precision | `todaysChangePerc` |
+| price | double precision | day close |
+| volume | bigint | |
+| fetched_at | timestamptz | |
+
+**PK:** `(direction, symbol, session_date)`  
+**Index:** `(session_date DESC, direction)`  
+**Job kind:** `stock_movers` · slot `stock-movers` (~21:10 UTC)
 
 ### `market.option_daily`
 
@@ -124,6 +166,15 @@ Replaces `public.option_open_interest_daily`.
 
 **PK:** `(option_ticker, trade_date)`
 
+**Two write paths (P2):**
+
+| Path | When | Behavior |
+|------|------|----------|
+| Live ingest (`kind=option_open_interest`) | Daily `eod-pipeline` CronJob + API backfill enqueue | Fetches current Polygon options snapshot OI → upsert (updates existing rows). Polygon has **no historical OI API**. |
+| Snapshot extract (`extract_oi_from_snapshots`) | `scripts/backfill_oi.py`, weekly `oi-gap-heal` slot (Sat 04:00 UTC) | DB-to-DB: for each `(option_ticker, NY calendar day)` take `MAX(snapshot_ts)` where `open_interest IS NOT NULL`. **`ON CONFLICT DO NOTHING`** — never overwrites live ingest rows; only fills gaps (D4=B, D5=A, D6=B). |
+
+Coverage check: `quality.check_option_oi_coverage` requires ≥1 OI row per watchlist underlying × recent trading day.
+
 ### `market.ticker`
 
 Merges `public.tickers` + `public.ticker_overview` into one row per symbol (no `tickers_id` FK).
@@ -155,6 +206,75 @@ Replaces `public.massive_corporate_action`.
 
 ---
 
+## `market_analytics` tables
+
+Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
+`PARTITION BY RANGE (trade_date)` with monthly partitions via
+`data_ops.ensure_month_partitions('market_analytics', …, 12, 4)`.
+
+### `market_analytics.max_pain_daily`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| trade_date | date | PK part; RANGE partition key |
+| expiry | date | PK part |
+| max_pain_strike | double precision | strike minimizing total pain |
+| total_oi | integer | |
+| total_pain_at_strike | double precision | pain at max-pain strike |
+| computed_at | timestamptz | default `now()` |
+
+**PK:** `(symbol, trade_date, expiry)`  
+**Index:** `(symbol, trade_date DESC)`
+
+### `market_analytics.atm_iv_daily`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| trade_date | date | PK part; RANGE partition key |
+| expiry | date | PK part |
+| atm_strike | double precision | |
+| atm_iv | double precision | |
+| underlying_price | double precision | |
+| iv_source | text | e.g. `snapshot` |
+| computed_at | timestamptz | default `now()` |
+
+**PK:** `(symbol, trade_date, expiry)`  
+**Index:** `(symbol, trade_date DESC)`
+
+### `market_analytics.pcr_daily`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| trade_date | date | PK part; RANGE partition key |
+| pcr_oi | double precision | put/call open-interest ratio |
+| pcr_volume | double precision | put/call volume ratio |
+| total_put_oi / total_call_oi | integer | |
+| total_put_volume / total_call_volume | bigint | |
+| computed_at | timestamptz | default `now()` |
+
+**PK:** `(symbol, trade_date)`  
+**Index:** `(symbol, trade_date DESC)`
+
+### `market_analytics.iv_percentile_daily`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| trade_date | date | PK part; RANGE partition key |
+| iv_current | double precision | |
+| iv_percentile_1y | double precision | |
+| iv_rank_1y | double precision | |
+| lookback_days | integer | |
+| computed_at | timestamptz | default `now()` |
+
+**PK:** `(symbol, trade_date)`  
+**Index:** `(symbol, trade_date DESC)`
+
+---
+
 ## `market` views
 
 ### `market.v_us_equity_universe`
@@ -164,6 +284,10 @@ Active US common stocks from `market.ticker` (`locale=us`, `market=stocks`, `ins
 ### `market.v_option_chain_latest`
 
 `DISTINCT ON (option_ticker)` latest row from `market.option_snapshot` (convenience; may be heavy on large datasets).
+
+### `market.v_option_snapshot_with_stock`
+
+Option snapshot joined to same-day `market.stock_daily` close (NY calendar date).
 
 ---
 
@@ -203,7 +327,7 @@ Replaces `public.reference_us_holidays` with explicit trading-day flags.
 | Function | Use |
 |----------|-----|
 | `data_ops.ensure_year_partitions(schema, table, years_back, years_forward)` | `stock_daily` |
-| `data_ops.ensure_month_partitions(schema, table, months_back, months_forward)` | minute / option daily / snapshot |
+| `data_ops.ensure_month_partitions(schema, table, months_back, months_forward)` | minute / option daily / snapshot / analytics |
 
 `apply_ddl()` calls these after table creation:
 
@@ -214,6 +338,10 @@ Replaces `public.reference_us_holidays` with explicit trading-day flags.
 | option_daily | month | 12 / 4 |
 | option_minute | month | 12 / 4 |
 | option_snapshot | month | 12 / 4 |
+| max_pain_daily | month | 12 / 4 |
+| atm_iv_daily | month | 12 / 4 |
+| pcr_daily | month | 12 / 4 |
+| iv_percentile_daily | month | 12 / 4 |
 
 Each partitioned parent also gets a `*_default` partition for out-of-range values.
 
@@ -223,17 +351,18 @@ Each partitioned parent also gets a `*_default` partition for out-of-range value
 
 | Role | Access |
 |------|--------|
-| `data_writer` | USAGE/CREATE + ALL on `market` and `data_ops` |
-| `market_reader` | SELECT on `market.*`; SELECT on selected `data_ops` status tables |
+| `data_writer` | USAGE/CREATE + ALL on `market`, `market_analytics`, and `data_ops` |
+| `market_reader` | SELECT on `market.*` + `market_analytics.*`; SELECT on selected `data_ops` status tables |
 
-Passwords in the SQL file are placeholders (`CHANGE_ME_*`).
+Passwords in the SQL file are placeholders (`CHANGE_ME_*`).  
+Apply DDL (`make db-init`) before `scripts/create_roles.sql` so schemas exist.
 
 ---
 
 ## Explicitly out of P1 scope (remain in Trade / Research for now)
 
 - `stock_readiness_daily`, `cache_stock_snapshot`
-- `report_option_max_pain_daily`, `report_option_atm_iv_daily`
+- Legacy `report_option_max_pain_daily` / `report_option_atm_iv_daily` (replaced by `market_analytics.*`)
 - `option_trades` (Developer tier)
 - `ticker_types`, `ticker_related_tickers`
 - `job_bars_backfill`, `job_sepa_phase4`, IB bars paths
@@ -246,3 +375,4 @@ Passwords in the SQL file are placeholders (`CHANGE_ME_*`).
 - [ ] Partition strategy (year vs month)
 - [ ] Confirm no missing core tables for Research/AI near-term needs
 - [ ] Confirm jsonb fundamentals vs six scalar tables decision
+- [ ] Confirm `market_analytics` four-table daily contract (Wave 0-A)

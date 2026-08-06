@@ -61,3 +61,24 @@ def test_grouped_daily_path_and_params() -> None:
     )
     assert ep.grouped_daily_params()["adjusted"] == "true"
     assert ep.grouped_daily_params(adjusted=False)["adjusted"] == "false"
+
+
+def test_stock_snapshot_paths_and_params() -> None:
+    assert ep.stock_snapshot_all_path() == "/v2/snapshot/locale/us/markets/stocks/tickers"
+    assert ep.stock_snapshot_all_params() == {}
+    assert ep.stock_snapshot_all_params(include_otc=True)["include_otc"] == "true"
+    assert (
+        ep.stock_snapshot_single_path("aapl")
+        == "/v2/snapshot/locale/us/markets/stocks/tickers/AAPL"
+    )
+    assert ep.stock_gainers_losers_path("gainers") == (
+        "/v2/snapshot/locale/us/markets/stocks/gainers"
+    )
+    assert ep.stock_gainers_losers_path("LOSERS") == (
+        "/v2/snapshot/locale/us/markets/stocks/losers"
+    )
+    try:
+        ep.stock_gainers_losers_path("both")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass

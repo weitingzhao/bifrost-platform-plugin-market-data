@@ -231,3 +231,53 @@ async def test_pagination_truncated_flag(caplog: pytest.LogCaptureFixture) -> No
     assert data["truncated"] is True
     assert data["pages"] == 1
     assert any("truncated" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_fetch_stock_snapshot_all_paginates_tickers() -> None:
+    scripts = [
+        (
+            "/v2/snapshot/locale/us/markets/stocks/tickers",
+            200,
+            {
+                "status": "OK",
+                "tickers": [{"ticker": "AAPL"}],
+                "next_url": "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?cursor=2",
+            },
+            None,
+        ),
+        (
+            "cursor=2",
+            200,
+            {"status": "OK", "tickers": [{"ticker": "MSFT"}]},
+            None,
+        ),
+    ]
+    async with _client(scripts) as client:
+        data = await client.fetch_stock_snapshot_all()
+    assert len(data["tickers"]) == 2
+    assert data["pages"] == 2
+    assert data["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_stock_snapshot_single_and_movers() -> None:
+    scripts = [
+        (
+            "/v2/snapshot/locale/us/markets/stocks/tickers/AAPL",
+            200,
+            {"status": "OK", "ticker": {"ticker": "AAPL", "todaysChangePerc": 1.2}},
+            None,
+        ),
+        (
+            "/v2/snapshot/locale/us/markets/stocks/gainers",
+            200,
+            {"status": "OK", "tickers": [{"ticker": "XYZ", "todaysChangePerc": 9.0}]},
+            None,
+        ),
+    ]
+    async with _client(scripts) as client:
+        single = await client.fetch_stock_snapshot_single("aapl")
+        movers = await client.fetch_stock_gainers_losers("gainers")
+    assert single["ticker"]["ticker"] == "AAPL"
+    assert movers["tickers"][0]["ticker"] == "XYZ"

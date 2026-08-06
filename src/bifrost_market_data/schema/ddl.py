@@ -1,10 +1,11 @@
-"""Idempotent DDL for market.* and data_ops.* schemas (P1).
+"""Idempotent DDL for market.*, market_analytics.*, and data_ops.* schemas.
 
 Design principles:
 - Single Polygon source (no source column)
 - UTC timestamptz or NY calendar date
 - option_ticker = Polygon native key
 - Partitioned history tables with auto-extend helper
+- market_analytics holds derived daily analytics (max pain, ATM IV, PCR, IV percentile)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ def apply_ddl(conn: _Connection) -> None:
     with conn.cursor() as cur:
         _create_schemas(cur)
         _create_market_tables(cur)
+        _create_market_analytics_tables(cur)
         _create_data_ops_tables(cur)
         _create_views(cur)
         _create_partition_helper(cur)
@@ -36,6 +38,7 @@ def apply_ddl(conn: _Connection) -> None:
 
 def _create_schemas(cur: _Cursor) -> None:
     cur.execute("CREATE SCHEMA IF NOT EXISTS market")
+    cur.execute("CREATE SCHEMA IF NOT EXISTS market_analytics")
     cur.execute("CREATE SCHEMA IF NOT EXISTS data_ops")
 
 
@@ -88,6 +91,55 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
         CREATE INDEX IF NOT EXISTS stock_minute_symbol_period_time
         ON market.stock_minute (symbol, period, bar_time DESC)
+        """
+    )
+
+    # --- stock_snapshot (non-partitioned daily upsert) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.stock_snapshot (
+            symbol         text        NOT NULL,
+            session_date   date        NOT NULL,
+            open           double precision,
+            high           double precision,
+            low            double precision,
+            close          double precision,
+            volume         bigint,
+            vwap           double precision,
+            prev_close     double precision,
+            change         double precision,
+            change_pct     double precision,
+            fetched_at     timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, session_date)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS stock_snapshot_session_date
+        ON market.stock_snapshot (session_date DESC, symbol)
+        """
+    )
+
+    # --- stock_movers (gainers / losers daily upsert) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.stock_movers (
+            direction      text        NOT NULL,
+            symbol         text        NOT NULL,
+            session_date   date        NOT NULL,
+            change_pct     double precision,
+            price          double precision,
+            volume         bigint,
+            fetched_at     timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (direction, symbol, session_date)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS stock_movers_session_direction
+        ON market.stock_movers (session_date DESC, direction)
         """
     )
 
@@ -349,6 +401,99 @@ def _create_market_tables(cur: _Cursor) -> None:
     )
 
 
+def _create_market_analytics_tables(cur: _Cursor) -> None:
+    # --- max_pain_daily (RANGE by month on trade_date) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_analytics.max_pain_daily (
+            symbol                 text        NOT NULL,
+            trade_date             date        NOT NULL,
+            expiry                 date        NOT NULL,
+            max_pain_strike        double precision,
+            total_oi               integer,
+            total_pain_at_strike   double precision,
+            computed_at            timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, trade_date, expiry)
+        ) PARTITION BY RANGE (trade_date)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS max_pain_daily_symbol_date
+        ON market_analytics.max_pain_daily (symbol, trade_date DESC)
+        """
+    )
+
+    # --- atm_iv_daily ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_analytics.atm_iv_daily (
+            symbol             text        NOT NULL,
+            trade_date         date        NOT NULL,
+            expiry             date        NOT NULL,
+            atm_strike         double precision,
+            atm_iv             double precision,
+            underlying_price   double precision,
+            iv_source          text,
+            computed_at        timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, trade_date, expiry)
+        ) PARTITION BY RANGE (trade_date)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS atm_iv_daily_symbol_date
+        ON market_analytics.atm_iv_daily (symbol, trade_date DESC)
+        """
+    )
+
+    # --- pcr_daily ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_analytics.pcr_daily (
+            symbol              text        NOT NULL,
+            trade_date          date        NOT NULL,
+            pcr_oi              double precision,
+            pcr_volume          double precision,
+            total_put_oi        integer,
+            total_call_oi       integer,
+            total_put_volume    bigint,
+            total_call_volume   bigint,
+            computed_at         timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, trade_date)
+        ) PARTITION BY RANGE (trade_date)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS pcr_daily_symbol_date
+        ON market_analytics.pcr_daily (symbol, trade_date DESC)
+        """
+    )
+
+    # --- iv_percentile_daily ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_analytics.iv_percentile_daily (
+            symbol               text        NOT NULL,
+            trade_date           date        NOT NULL,
+            iv_current           double precision,
+            iv_percentile_1y     double precision,
+            iv_rank_1y           double precision,
+            lookback_days        integer,
+            computed_at          timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, trade_date)
+        ) PARTITION BY RANGE (trade_date)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS iv_percentile_daily_symbol_date
+        ON market_analytics.iv_percentile_daily (symbol, trade_date DESC)
+        """
+    )
+
+
 def _create_data_ops_tables(cur: _Cursor) -> None:
     cur.execute(
         """
@@ -407,6 +552,10 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
 
 
 def _create_views(cur: _Cursor) -> None:
+    # CREATE OR REPLACE cannot rename/reorder columns; drop first for idempotent apply.
+    cur.execute("DROP VIEW IF EXISTS market.v_option_snapshot_with_stock")
+    cur.execute("DROP VIEW IF EXISTS market.v_option_chain_latest")
+    cur.execute("DROP VIEW IF EXISTS market.v_us_equity_universe")
     cur.execute(
         """
         CREATE OR REPLACE VIEW market.v_us_equity_universe AS
@@ -590,12 +739,26 @@ def _ensure_partitions(cur: _Cursor) -> None:
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_daily', 12, 4)")
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_minute', 12, 4)")
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_snapshot', 12, 4)")
+    cur.execute(
+        "SELECT data_ops.ensure_month_partitions('market_analytics', 'max_pain_daily', 12, 4)"
+    )
+    cur.execute(
+        "SELECT data_ops.ensure_month_partitions('market_analytics', 'atm_iv_daily', 12, 4)"
+    )
+    cur.execute(
+        "SELECT data_ops.ensure_month_partitions('market_analytics', 'pcr_daily', 12, 4)"
+    )
+    cur.execute(
+        "SELECT data_ops.ensure_month_partitions('market_analytics', 'iv_percentile_daily', 12, 4)"
+    )
 
 
 # Expected table names for tests / docs
 MARKET_TABLES: tuple[str, ...] = (
     "stock_daily",
     "stock_minute",
+    "stock_snapshot",
+    "stock_movers",
     "option_daily",
     "option_minute",
     "option_contract",
@@ -605,6 +768,13 @@ MARKET_TABLES: tuple[str, ...] = (
     "ticker",
     "stock_financials",
     "corporate_action",
+)
+
+MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
+    "max_pain_daily",
+    "atm_iv_daily",
+    "pcr_daily",
+    "iv_percentile_daily",
 )
 
 DATA_OPS_TABLES: tuple[str, ...] = (

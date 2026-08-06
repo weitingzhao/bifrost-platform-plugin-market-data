@@ -3,12 +3,15 @@ polygon:
   tier: starter          # starter | developer
   rest_base: https://api.polygon.io
 
+# DEV default: CNPG LAN NodePort (cluster data NS). Override via POSTGRES_* env
+# or copy this file to config/market-data.yaml (gitignored) for local secrets.
+# Localhost:5432 is NOT the DEV target unless you run a local Postgres.
 postgres:
-  host: localhost
-  port: 5432
+  host: 192.168.10.73
+  port: 30432
   dbname: bifrost_dev
   user: data_writer
-  password: ""
+  password: ""           # set via POSTGRES_PASSWORD env
 
 redis:
   url: redis://localhost:6379/0

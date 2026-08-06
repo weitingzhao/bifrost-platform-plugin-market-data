@@ -407,3 +407,46 @@ class PolygonClient:
         out.setdefault("pages", 1)
         out.setdefault("truncated", False)
         return out
+
+    async def fetch_stock_snapshot_all(
+        self,
+        *,
+        include_otc: bool = False,
+        max_pages: int = 50,
+    ) -> dict[str, Any]:
+        """GET ``/v2/snapshot/locale/us/markets/stocks/tickers`` (paginated via ``tickers``)."""
+        path = ep.stock_snapshot_all_path()
+        params = ep.stock_snapshot_all_params(include_otc=include_otc)
+        return await self._paginate(
+            path, params, max_pages=max_pages, results_key="tickers"
+        )
+
+    async def fetch_stock_snapshot_single(self, ticker: str) -> dict[str, Any]:
+        """GET ``/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}``."""
+        path = ep.stock_snapshot_single_path(ticker)
+        data = await self._request(path, {})
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected stock snapshot payload", body=data, url=path)
+        out = dict(data)
+        out.setdefault("pages", 1)
+        out.setdefault("truncated", False)
+        return out
+
+    async def fetch_stock_gainers_losers(
+        self,
+        direction: str,
+        *,
+        include_otc: bool = False,
+    ) -> dict[str, Any]:
+        """GET ``/v2/snapshot/locale/us/markets/stocks/{gainers|losers}``."""
+        path = ep.stock_gainers_losers_path(direction)
+        params = ep.stock_gainers_losers_params(include_otc=include_otc)
+        data = await self._request(path, params)
+        if not isinstance(data, dict):
+            raise PolygonAPIError(
+                "unexpected gainers/losers payload", body=data, url=path
+            )
+        out = dict(data)
+        out.setdefault("pages", 1)
+        out.setdefault("truncated", False)
+        return out

@@ -23,14 +23,18 @@
 ## 数据库
 
 - 共用物理 PostgreSQL 实例（`bifrost_dev` / `bifrost_prod`）
-- Schema：`market.*`（公共行情）+ `data_ops.*`（作业队列 / freshness）
+- Schema：`market.*`（公共行情）+ `market_analytics.*`（衍生指标）+ `data_ops.*`（作业队列 / freshness）
 - DDL 归 **本 repo** 管理（`src/bifrost_market_data/schema/ddl.py`）
 - 不依赖 `bifrost-core`；不 import `bifrost-trade-*` Python 包
+- **DEV PG 目标**：CNPG LAN NodePort `192.168.10.73:30432`（见 `config/market-data.yaml.example`）
+  - 覆盖：`POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_PASSWORD` 等环境变量
+  - 本机 `localhost:5432` 不是默认 DEV 目标
 
 ## K8s
 
 - Namespace: `plugin-market-data`
 - Workers: `polygon-worker-stocks` / `polygon-worker-options`
+- API: `market-data-api` Service `:8790`（`GET /health`, analytics under `/market/analytics/*`）
 - Console 治理: Subcontractors → Plugin Gallery（catalog 在 P6 注册）
 
 ## 命令
@@ -39,7 +43,9 @@
 make install-dev
 make lint
 make test
-make db-init              # schema apply
+make db-init              # schema apply (+ best-effort roles)
+make apply-roles          # create_roles.sql (needs elevated PG role)
+make run-api              # Plugin API on :8790
 make verify-market-data   # P6: K8s deploy + health + CronJobs + platform probe
 ```
 
