@@ -30,4 +30,4 @@ labels:
 
 images:
   - name: bifrost-market-data
-    newTag: "0.1.2"
+    newTag: "0.2.0"

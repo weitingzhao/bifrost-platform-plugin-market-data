@@ -64,3 +64,16 @@ scheduler:
       # D6=B: weekly re-scan recent days; DB-to-DB extract fills OI gaps
       cron: "0 4 * * 6"
       lookback_days: 14
+    max-pain:
+      # D8=B: daily Max Pain from OI; lookback heals holiday/gap days
+      cron: "45 22 * * *"
+      lookback_days: 3
+    atm-iv-pcr:
+      # D12=A: merged ATM IV + PCR at 23:00 UTC
+      cron: "0 23 * * *"
+      lookback_days: 3
+    iv-percentile:
+      # D12=A: after atm-iv-pcr; depends on atm_iv_daily
+      cron: "15 23 * * *"
+      lookback_days: 3
+      percentile_window: 252

@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: api
-          image: bifrost-market-data:0.1.0
+          image: bifrost-market-data:0.2.0
           imagePullPolicy: IfNotPresent
           # Override image CMD (default: run_worker.py). scripts/run_api.py is in the image.
           args: ["python", "scripts/run_api.py"]

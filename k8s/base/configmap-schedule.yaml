@@ -63,3 +63,13 @@ data:
         oi-gap-heal:
           cron: "0 4 * * 6"
           lookback_days: 14
+        max-pain:
+          cron: "45 22 * * *"
+          lookback_days: 3
+        atm-iv-pcr:
+          cron: "0 23 * * *"
+          lookback_days: 3
+        iv-percentile:
+          cron: "15 23 * * *"
+          lookback_days: 3
+          percentile_window: 252

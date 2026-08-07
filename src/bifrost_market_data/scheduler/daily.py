@@ -37,6 +37,9 @@ SLOT_NAMES = (
     "stock-snapshot",
     "stock-movers",
     "oi-gap-heal",
+    "max-pain",
+    "atm-iv-pcr",
+    "iv-percentile",
 )
 
 DEFAULT_WATCHLIST_QUERY = """
@@ -289,6 +292,182 @@ def enqueue_slot(
             "enqueued": 0,
             "deduped": 0,
             **extract_result,
+        }
+
+    if slot_key == "max-pain":
+        # D8=B: today + lookback_days trading days for gap heal after holidays.
+        # Inline DB compute from market.option_open_interest (no Polygon).
+        from bifrost_market_data.analytics.max_pain import compute_max_pain_for_date
+        from bifrost_market_data.quality import fetch_recent_trading_days
+
+        lookback = int(scfg.get("lookback_days") or 3)
+        symbols = (
+            list(watchlist_symbols)
+            if watchlist_symbols is not None
+            else load_watchlist_symbols(conn, cfg)
+        )
+        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
+        if not trading_days:
+            return {
+                "slot": slot_key,
+                "lookback_days": lookback,
+                "symbols": len(symbols),
+                "skipped": True,
+                "reason": "no trading days",
+                "enqueued": 0,
+                "deduped": 0,
+            }
+        day_results: list[dict[str, Any]] = []
+        total_written = 0
+        total_groups = 0
+        for td in trading_days:
+            one = compute_max_pain_for_date(
+                conn,
+                trade_date=td,
+                underlyings=symbols or None,
+            )
+            day_results.append(one)
+            total_written += int(one.get("rows_written") or 0)
+            total_groups += int(one.get("groups") or 0)
+        logger.info(
+            "max-pain lookback=%s days=%s..%s groups=%s rows_written=%s",
+            lookback,
+            trading_days[0].isoformat(),
+            trading_days[-1].isoformat(),
+            total_groups,
+            total_written,
+        )
+        return {
+            "slot": slot_key,
+            "lookback_days": lookback,
+            "symbols": len(symbols),
+            "trading_days": [d.isoformat() for d in trading_days],
+            "groups": total_groups,
+            "rows_written": total_written,
+            "days": day_results,
+            "enqueued": 0,
+            "deduped": 0,
+        }
+
+    if slot_key == "atm-iv-pcr":
+        # D12=A: merged ATM IV + PCR over lookback trading days (inline, no Polygon).
+        from bifrost_market_data.analytics.atm_iv import compute_atm_iv_for_date
+        from bifrost_market_data.analytics.pcr import compute_pcr_for_date
+        from bifrost_market_data.quality import fetch_recent_trading_days
+
+        lookback = int(scfg.get("lookback_days") or 3)
+        symbols = (
+            list(watchlist_symbols)
+            if watchlist_symbols is not None
+            else load_watchlist_symbols(conn, cfg)
+        )
+        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
+        if not trading_days:
+            return {
+                "slot": slot_key,
+                "lookback_days": lookback,
+                "symbols": len(symbols),
+                "skipped": True,
+                "reason": "no trading days",
+                "enqueued": 0,
+                "deduped": 0,
+            }
+        atm_days: list[dict[str, Any]] = []
+        pcr_days: list[dict[str, Any]] = []
+        atm_written = 0
+        pcr_written = 0
+        for td in trading_days:
+            atm_one = compute_atm_iv_for_date(
+                conn,
+                trade_date=td,
+                underlyings=symbols or None,
+            )
+            pcr_one = compute_pcr_for_date(
+                conn,
+                trade_date=td,
+                underlyings=symbols or None,
+            )
+            atm_days.append(atm_one)
+            pcr_days.append(pcr_one)
+            atm_written += int(atm_one.get("rows_written") or 0)
+            pcr_written += int(pcr_one.get("rows_written") or 0)
+        logger.info(
+            "atm-iv-pcr lookback=%s days=%s..%s atm_rows=%s pcr_rows=%s",
+            lookback,
+            trading_days[0].isoformat(),
+            trading_days[-1].isoformat(),
+            atm_written,
+            pcr_written,
+        )
+        return {
+            "slot": slot_key,
+            "lookback_days": lookback,
+            "symbols": len(symbols),
+            "trading_days": [d.isoformat() for d in trading_days],
+            "atm_rows_written": atm_written,
+            "pcr_rows_written": pcr_written,
+            "atm_days": atm_days,
+            "pcr_days": pcr_days,
+            "enqueued": 0,
+            "deduped": 0,
+        }
+
+    if slot_key == "iv-percentile":
+        # D12=A: after atm-iv-pcr; reads market_analytics.atm_iv_daily.
+        from bifrost_market_data.analytics.iv_percentile import (
+            DEFAULT_PERCENTILE_WINDOW,
+            compute_iv_percentile_for_date,
+        )
+        from bifrost_market_data.quality import fetch_recent_trading_days
+
+        lookback = int(scfg.get("lookback_days") or 3)
+        pct_window = int(scfg.get("percentile_window") or DEFAULT_PERCENTILE_WINDOW)
+        symbols = (
+            list(watchlist_symbols)
+            if watchlist_symbols is not None
+            else load_watchlist_symbols(conn, cfg)
+        )
+        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
+        if not trading_days:
+            return {
+                "slot": slot_key,
+                "lookback_days": lookback,
+                "percentile_window": pct_window,
+                "symbols": len(symbols),
+                "skipped": True,
+                "reason": "no trading days",
+                "enqueued": 0,
+                "deduped": 0,
+            }
+        day_results: list[dict[str, Any]] = []
+        total_written = 0
+        for td in trading_days:
+            one = compute_iv_percentile_for_date(
+                conn,
+                trade_date=td,
+                underlyings=symbols or None,
+                percentile_window=pct_window,
+            )
+            day_results.append(one)
+            total_written += int(one.get("rows_written") or 0)
+        logger.info(
+            "iv-percentile lookback=%s window=%s days=%s..%s rows_written=%s",
+            lookback,
+            pct_window,
+            trading_days[0].isoformat(),
+            trading_days[-1].isoformat(),
+            total_written,
+        )
+        return {
+            "slot": slot_key,
+            "lookback_days": lookback,
+            "percentile_window": pct_window,
+            "symbols": len(symbols),
+            "trading_days": [d.isoformat() for d in trading_days],
+            "rows_written": total_written,
+            "days": day_results,
+            "enqueued": 0,
+            "deduped": 0,
         }
 
     skip_on_holiday = slot_key in (

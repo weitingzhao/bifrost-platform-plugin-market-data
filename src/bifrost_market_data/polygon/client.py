@@ -450,3 +450,239 @@ class PolygonClient:
         out.setdefault("pages", 1)
         out.setdefault("truncated", False)
         return out
+
+    # ---- pass-through REST (P5 Wave 5-A) ----
+
+    async def get_json(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Public wrapper around ``_request`` for thin API pass-through routes."""
+        return await self._request(path, params)
+
+    async def fetch_open_close(
+        self,
+        ticker: str,
+        date_str: str,
+        *,
+        adjusted: bool = True,
+    ) -> dict[str, Any]:
+        path = ep.open_close_path(ticker, date_str)
+        data = await self._request(path, ep.open_close_params(adjusted=adjusted))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected open-close payload", body=data, url=path)
+        return data
+
+    async def fetch_prev_agg(
+        self,
+        ticker: str,
+        *,
+        adjusted: bool = True,
+    ) -> dict[str, Any]:
+        path = ep.prev_agg_path(ticker)
+        data = await self._request(path, ep.prev_agg_params(adjusted=adjusted))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected prev agg payload", body=data, url=path)
+        return data
+
+    async def fetch_news(self, **params: Any) -> dict[str, Any]:
+        path = ep.news_path()
+        data = await self._request(path, ep.news_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected news payload", body=data, url=path)
+        return data
+
+    async def fetch_related_companies(self, ticker: str) -> dict[str, Any]:
+        path = ep.related_companies_path(ticker)
+        data = await self._request(path, {})
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected related companies payload", body=data, url=path)
+        return data
+
+    async def fetch_reference_tickers_query(self, **params: Any) -> dict[str, Any]:
+        path = ep.reference_tickers_path()
+        query = ep.reference_tickers_search_params(**params)
+        return await self._paginate(path, query, max_pages=1)
+
+    async def fetch_ticker_types(
+        self,
+        *,
+        asset_class: str | None = None,
+        locale: str | None = None,
+    ) -> dict[str, Any]:
+        path = ep.ticker_types_path()
+        data = await self._request(path, ep.ticker_types_params(asset_class=asset_class, locale=locale))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected ticker types payload", body=data, url=path)
+        return data
+
+    async def fetch_ticker_detail(
+        self,
+        ticker: str,
+        *,
+        date: str | None = None,
+    ) -> dict[str, Any]:
+        path = ep.ticker_details_path(ticker)
+        data = await self._request(path, ep.ticker_detail_params(date=date))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected ticker detail payload", body=data, url=path)
+        return data
+
+    async def fetch_market_conditions(
+        self,
+        *,
+        asset_class: str | None = None,
+        data_type: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        path = ep.conditions_path()
+        return await self._paginate(
+            path,
+            ep.conditions_params(asset_class=asset_class, data_type=data_type, limit=limit),
+            max_pages=1,
+        )
+
+    async def fetch_market_exchanges(
+        self,
+        *,
+        asset_class: str | None = None,
+        locale: str | None = None,
+    ) -> dict[str, Any]:
+        path = ep.exchanges_path()
+        data = await self._request(path, ep.exchanges_params(asset_class=asset_class, locale=locale))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected exchanges payload", body=data, url=path)
+        return data
+
+    async def fetch_market_status_now(self) -> dict[str, Any]:
+        path = ep.market_status_now_path()
+        data = await self._request(path, {})
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected market status payload", body=data, url=path)
+        return data
+
+    async def fetch_financial_statement(self, kind: str, **params: Any) -> dict[str, Any]:
+        path = ep.financial_statement_path(kind)
+        query = ep.financial_statement_params(**params)
+        data = await self._request(path, query)
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected financial statement payload", body=data, url=path)
+        return data
+
+    async def fetch_ratios(self, **params: Any) -> dict[str, Any]:
+        path = ep.ratios_path()
+        data = await self._request(path, ep.ratios_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected ratios payload", body=data, url=path)
+        return data
+
+    async def fetch_short_interest(self, **params: Any) -> dict[str, Any]:
+        path = ep.short_interest_path()
+        data = await self._request(path, ep.short_interest_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected short interest payload", body=data, url=path)
+        return data
+
+    async def fetch_short_volume(self, **params: Any) -> dict[str, Any]:
+        path = ep.short_volume_path()
+        data = await self._request(path, ep.short_volume_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected short volume payload", body=data, url=path)
+        return data
+
+    async def fetch_float(self, **params: Any) -> dict[str, Any]:
+        path = ep.float_path()
+        data = await self._request(path, ep.float_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected float payload", body=data, url=path)
+        return data
+
+    async def fetch_edgar_index(self, **params: Any) -> dict[str, Any]:
+        path = ep.edgar_index_path()
+        data = await self._request(path, ep.edgar_index_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected edgar index payload", body=data, url=path)
+        return data
+
+    async def fetch_10k_sections(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_10k_sections_path()
+        data = await self._request(path, ep.filing_10k_sections_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected 10-K sections payload", body=data, url=path)
+        return data
+
+    async def fetch_8k_text(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_8k_text_path()
+        data = await self._request(path, ep.filing_8k_text_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected 8-K text payload", body=data, url=path)
+        return data
+
+    async def fetch_13f_filings(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_13f_path()
+        data = await self._request(path, ep.filing_13f_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected 13-F payload", body=data, url=path)
+        return data
+
+    async def fetch_risk_factors(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_risk_factors_path()
+        data = await self._request(path, ep.filing_risk_factors_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected risk factors payload", body=data, url=path)
+        return data
+
+    async def fetch_risk_categories(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_risk_categories_path()
+        data = await self._request(path, ep.filing_risk_categories_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected risk categories payload", body=data, url=path)
+        return data
+
+    async def fetch_form_3(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_form_3_path()
+        data = await self._request(path, ep.insider_filing_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected form-3 payload", body=data, url=path)
+        return data
+
+    async def fetch_form_4(self, **params: Any) -> dict[str, Any]:
+        path = ep.filing_form_4_path()
+        data = await self._request(path, ep.insider_filing_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected form-4 payload", body=data, url=path)
+        return data
+
+    async def fetch_indicator(
+        self,
+        indicator: str,
+        ticker: str,
+        **params: Any,
+    ) -> dict[str, Any]:
+        path = ep.indicator_path(indicator, ticker)
+        data = await self._request(path, ep.indicator_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected indicator payload", body=data, url=path)
+        return data
+
+    async def fetch_last_trade(self, options_ticker: str) -> dict[str, Any]:
+        path = ep.last_trade_path(options_ticker)
+        data = await self._request(path, {})
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected last trade payload", body=data, url=path)
+        return data
+
+    async def fetch_option_quotes(self, options_ticker: str, **params: Any) -> dict[str, Any]:
+        path = ep.option_quotes_path(options_ticker)
+        data = await self._request(path, ep.option_ticks_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected option quotes payload", body=data, url=path)
+        return data
+
+    async def fetch_option_trades(self, options_ticker: str, **params: Any) -> dict[str, Any]:
+        path = ep.option_trades_path(options_ticker)
+        data = await self._request(path, ep.option_ticks_params(**params))
+        if not isinstance(data, dict):
+            raise PolygonAPIError("unexpected option trades payload", body=data, url=path)
+        return data

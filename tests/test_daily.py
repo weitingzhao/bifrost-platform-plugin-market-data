@@ -37,9 +37,95 @@ class _DailyCursor:
                 self.parent._fetchall = [(d,) for d in trading]
             else:
                 self.parent._fetchall = []
+        elif "v_option_snapshot_with_stock" in q:
+            trade_date = params[0] if params else None
+            underlyings = set(params[1]) if params and len(params) > 1 else None
+            rows = []
+            for r in self.parent.atm_snap_rows:
+                if r.get("trade_date") != trade_date:
+                    continue
+                if underlyings is not None and r.get("underlying") not in underlyings:
+                    continue
+                rows.append(
+                    (
+                        r["option_ticker"],
+                        r["underlying"],
+                        r["iv"],
+                        r["underlying_price"],
+                        r["expiry"],
+                        r["strike"],
+                        r["option_right"],
+                    )
+                )
+            self.parent._fetchall = rows
+            self.parent._fetchone = None
+        elif "from market.option_snapshot" in q and "day_volume" in q:
+            trade_date = params[0] if params else None
+            underlyings = set(params[1]) if params and len(params) > 1 else None
+            rows = []
+            for r in self.parent.vol_rows:
+                if r.get("trade_date") != trade_date:
+                    continue
+                if underlyings is not None and r.get("underlying") not in underlyings:
+                    continue
+                rows.append((r["underlying"], r["option_right"], r["day_volume"]))
+            self.parent._fetchall = rows
+            self.parent._fetchone = None
         elif "option_snapshot" in q:
             # oi-gap-heal extract SELECT (may also JOIN option_contract)
             self.parent._fetchall = list(self.parent.extract_rows)
+            self.parent._fetchone = None
+        elif "from market.option_open_interest" in q:
+            trade_date = params[0] if params else None
+            underlyings = None
+            if params and len(params) > 1:
+                underlyings = set(params[1])
+            # PCR path: SUM(...) GROUP BY underlying, option_right
+            if "sum(open_interest)" in q:
+                buckets: dict[tuple[str, str], int] = {}
+                for r in self.parent.oi_rows:
+                    if r.get("trade_date") != trade_date:
+                        continue
+                    if underlyings is not None and r.get("underlying") not in underlyings:
+                        continue
+                    key = (r["underlying"], r["option_right"])
+                    buckets[key] = buckets.get(key, 0) + int(r.get("open_interest") or 0)
+                self.parent._fetchall = [
+                    (und, right, total) for (und, right), total in sorted(buckets.items())
+                ]
+            else:
+                rows = []
+                for r in self.parent.oi_rows:
+                    if r.get("trade_date") != trade_date:
+                        continue
+                    if underlyings is not None and r.get("underlying") not in underlyings:
+                        continue
+                    rows.append(
+                        (
+                            r["underlying"],
+                            r["expiry"],
+                            r["strike"],
+                            r["option_right"],
+                            r["open_interest"],
+                        )
+                    )
+                self.parent._fetchall = rows
+            self.parent._fetchone = None
+        elif "from market_analytics.atm_iv_daily" in q:
+            from_d = params[0] if params else None
+            to_d = params[1] if params and len(params) > 1 else None
+            underlyings = set(params[2]) if params and len(params) > 2 else None
+            rows = []
+            for r in self.parent.atm_iv_hist:
+                td = r["trade_date"]
+                if from_d is not None and td < from_d:
+                    continue
+                if to_d is not None and td > to_d:
+                    continue
+                if underlyings is not None and r["symbol"] not in underlyings:
+                    continue
+                rows.append((r["symbol"], r["trade_date"], r["expiry"], r["atm_iv"]))
+            self.parent._fetchall = rows
             self.parent._fetchone = None
         elif "from market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
@@ -109,6 +195,10 @@ class _DailyConn:
         calendar: dict[date, bool] | None = None,
         option_contracts: list[tuple[str, str, date]] | None = None,
         extract_rows: list[tuple[Any, ...]] | None = None,
+        oi_rows: list[dict[str, Any]] | None = None,
+        atm_snap_rows: list[dict[str, Any]] | None = None,
+        vol_rows: list[dict[str, Any]] | None = None,
+        atm_iv_hist: list[dict[str, Any]] | None = None,
     ) -> None:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.calendar = calendar or {}
@@ -116,6 +206,10 @@ class _DailyConn:
         self.option_contracts = option_contracts or []
         # JOIN-shaped rows for oi-gap-heal extract
         self.extract_rows = extract_rows or []
+        self.oi_rows = oi_rows or []
+        self.atm_snap_rows = atm_snap_rows or []
+        self.vol_rows = vol_rows or []
+        self.atm_iv_hist = atm_iv_hist or []
         self.extract_inserts: list[tuple[Any, ...]] = []
         self.statements: list[tuple[str, Any]] = []
         self.seen_keys: set[tuple[Any, Any]] = set()
@@ -444,6 +538,9 @@ def test_all_slot_names_covered() -> None:
     assert "stock-snapshot" in SLOT_NAMES
     assert "stock-movers" in SLOT_NAMES
     assert "oi-gap-heal" in SLOT_NAMES
+    assert "max-pain" in SLOT_NAMES
+    assert "atm-iv-pcr" in SLOT_NAMES
+    assert "iv-percentile" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
 
@@ -591,3 +688,236 @@ def test_oi_gap_heal_runs_on_weekend() -> None:
     )
     assert result.get("skipped") is not True or result.get("reason") == "no trading days"
     assert result["enqueued"] == 0
+
+
+def test_enqueue_max_pain() -> None:
+    """D8=B: max-pain slot computes inline over lookback trading days."""
+    td = date(2024, 6, 20)
+    expiry = date(2025, 6, 20)
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 6, 18): True,
+            date(2024, 6, 19): True,
+            date(2024, 6, 20): True,
+        },
+        oi_rows=[
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "C",
+                "open_interest": 10,
+            },
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "P",
+                "open_interest": 10,
+            },
+            {
+                "trade_date": date(2024, 6, 19),
+                "underlying": "AAPL",
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "C",
+                "open_interest": 5,
+            },
+            {
+                "trade_date": date(2024, 6, 19),
+                "underlying": "AAPL",
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "P",
+                "open_interest": 5,
+            },
+        ],
+    )
+    result = enqueue_slot(
+        conn,
+        "max-pain",
+        target_date=td,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"max-pain": {"lookback_days": 3}}},
+    )
+    assert result["slot"] == "max-pain"
+    assert result["enqueued"] == 0
+    assert result["lookback_days"] == 3
+    assert result["trading_days"] == ["2024-06-18", "2024-06-19", "2024-06-20"]
+    assert result["rows_written"] == 2  # 19 + 20 (18 has no OI)
+    assert any(
+        "market_analytics.max_pain_daily" in s[0] and "DO UPDATE" in s[0]
+        for s in conn.statements
+        if isinstance(s[0], str) and "INSERT INTO" in s[0]
+    )
+
+
+def test_max_pain_runs_on_holiday_with_lookback() -> None:
+    """Holiday CronJob still runs; lookback only includes trading days."""
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 7, 2): True,
+            date(2024, 7, 3): True,
+            holiday: False,
+        },
+        oi_rows=[],
+    )
+    result = enqueue_slot(
+        conn,
+        "max-pain",
+        target_date=holiday,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"max-pain": {"lookback_days": 3}}},
+    )
+    assert result.get("skipped") is not True
+    assert result["enqueued"] == 0
+    assert result["trading_days"] == ["2024-07-02", "2024-07-03"]
+
+
+def test_enqueue_atm_iv_pcr() -> None:
+    """D12=A: merged slot computes ATM IV + PCR over lookback trading days."""
+    td = date(2024, 6, 20)
+    expiry = date(2025, 6, 20)
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 6, 18): True,
+            date(2024, 6, 19): True,
+            date(2024, 6, 20): True,
+        },
+        atm_snap_rows=[
+            {
+                "trade_date": td,
+                "option_ticker": "O:AAPL1C",
+                "underlying": "AAPL",
+                "iv": 0.25,
+                "underlying_price": 100.0,
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "C",
+            },
+            {
+                "trade_date": td,
+                "option_ticker": "O:AAPL1P",
+                "underlying": "AAPL",
+                "iv": 0.27,
+                "underlying_price": 100.0,
+                "expiry": expiry,
+                "strike": 100.0,
+                "option_right": "P",
+            },
+        ],
+        oi_rows=[
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "option_right": "P",
+                "open_interest": 200,
+                "expiry": expiry,
+                "strike": 100.0,
+            },
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "option_right": "C",
+                "open_interest": 100,
+                "expiry": expiry,
+                "strike": 100.0,
+            },
+        ],
+        vol_rows=[
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "option_right": "P",
+                "day_volume": 80,
+            },
+            {
+                "trade_date": td,
+                "underlying": "AAPL",
+                "option_right": "C",
+                "day_volume": 40,
+            },
+        ],
+    )
+    result = enqueue_slot(
+        conn,
+        "atm-iv-pcr",
+        target_date=td,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"atm-iv-pcr": {"lookback_days": 3}}},
+    )
+    assert result["slot"] == "atm-iv-pcr"
+    assert result["enqueued"] == 0
+    assert result["trading_days"] == ["2024-06-18", "2024-06-19", "2024-06-20"]
+    assert result["atm_rows_written"] == 1
+    assert result["pcr_rows_written"] == 1
+    assert any(
+        "market_analytics.atm_iv_daily" in s[0] and "DO UPDATE" in s[0]
+        for s in conn.statements
+        if isinstance(s[0], str) and "INSERT INTO" in s[0]
+    )
+    assert any(
+        "market_analytics.pcr_daily" in s[0] and "DO UPDATE" in s[0]
+        for s in conn.statements
+        if isinstance(s[0], str) and "INSERT INTO" in s[0]
+    )
+
+
+def test_enqueue_iv_percentile() -> None:
+    """D12=A: iv-percentile slot after ATM IV history exists."""
+    td = date(2024, 6, 20)
+    expiry = date(2025, 6, 20)
+    conn = _DailyConn(
+        watchlist=["AAPL"],
+        calendar={
+            date(2024, 6, 18): True,
+            date(2024, 6, 19): True,
+            date(2024, 6, 20): True,
+        },
+        atm_iv_hist=[
+            {
+                "symbol": "AAPL",
+                "trade_date": date(2024, 6, 18),
+                "expiry": expiry,
+                "atm_iv": 0.20,
+            },
+            {
+                "symbol": "AAPL",
+                "trade_date": date(2024, 6, 19),
+                "expiry": expiry,
+                "atm_iv": 0.25,
+            },
+            {
+                "symbol": "AAPL",
+                "trade_date": td,
+                "expiry": expiry,
+                "atm_iv": 0.30,
+            },
+        ],
+    )
+    result = enqueue_slot(
+        conn,
+        "iv-percentile",
+        target_date=td,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {
+                "iv-percentile": {"lookback_days": 3, "percentile_window": 252},
+            }
+        },
+    )
+    assert result["slot"] == "iv-percentile"
+    assert result["enqueued"] == 0
+    assert result["percentile_window"] == 252
+    assert result["rows_written"] == 3  # one row per trading day with hist
+    assert any(
+        "market_analytics.iv_percentile_daily" in s[0] and "DO UPDATE" in s[0]
+        for s in conn.statements
+        if isinstance(s[0], str) and "INSERT INTO" in s[0]
+    )

@@ -227,6 +227,15 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date, expiry)`  
 **Index:** `(symbol, trade_date DESC)`
 
+**Computation path (P3 / D7=A, D8=B):**
+
+1. Source: `market.option_open_interest` for each trading day in lookback (`lookback_days=3`).
+2. Group by `(underlying, expiry)`; build strike → (call_oi, put_oi).
+3. `pain(K) = Σ [ OI_call(s)·max(0,K−s)·100 + OI_put(s)·max(0,s−K)·100 ]`; `max_pain_strike = argmin_K(pain(K))`.
+4. Upsert into this table (`ON CONFLICT DO UPDATE` refreshes `computed_at`).
+5. Scheduler slot `max-pain` (CronJob `45 22 * * *` UTC) runs inline DB compute — no Polygon.
+6. Read API: `GET /market/analytics/max-pain` (D9=A).
+
 ### `market_analytics.atm_iv_daily`
 
 | Column | Type | Notes |
@@ -243,6 +252,15 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date, expiry)`  
 **Index:** `(symbol, trade_date DESC)`
 
+**Computation path (P4 / D10=A):**
+
+1. Source: `market.v_option_snapshot_with_stock` (last snap per ticker on NY day) JOIN `option_contract`.
+2. Group by `(underlying, expiry)`; spot = median `underlying_price`; nearest strike call/put IV avg.
+3. Upsert (`ON CONFLICT DO UPDATE`); `iv_source='snapshot'`.
+4. Scheduler slot `atm-iv-pcr` (`0 23 * * *` UTC) with PCR.
+5. Read API: `GET /market/analytics/atm-iv`.
+6. **Black-box:** `iv` is Polygon precomputed — see `docs/ANALYTICS.md`.
+
 ### `market_analytics.pcr_daily`
 
 | Column | Type | Notes |
@@ -258,20 +276,33 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date)`  
 **Index:** `(symbol, trade_date DESC)`
 
+**Computation path (P4 / D11=A):**
+
+1. OI totals from `market.option_open_interest` for `trade_date`.
+2. Volume totals from last `option_snapshot.day_volume` per ticker (NY day) + `option_contract` right.
+3. Upsert via slot `atm-iv-pcr`; read `GET /market/analytics/pcr`.
+
 ### `market_analytics.iv_percentile_daily`
 
 | Column | Type | Notes |
 |--------|------|-------|
 | symbol | text | PK part |
 | trade_date | date | PK part; RANGE partition key |
-| iv_current | double precision | |
+| iv_current | double precision | median atm_iv across expiries that day |
 | iv_percentile_1y | double precision | |
 | iv_rank_1y | double precision | |
-| lookback_days | integer | |
+| lookback_days | integer | samples used (≤ percentile_window) |
 | computed_at | timestamptz | default `now()` |
 
 **PK:** `(symbol, trade_date)`  
 **Index:** `(symbol, trade_date DESC)`
+
+**Computation path (P4 / D12=A):**
+
+1. Source: `market_analytics.atm_iv_daily` history (~252 trading days).
+2. Current IV = median of per-expiry `atm_iv` on `trade_date`.
+3. Percentile / rank vs lookback window; slot `iv-percentile` at `15 23 * * *` UTC.
+4. Read API: `GET /market/analytics/iv-percentile`.
 
 ---
 
@@ -356,6 +387,29 @@ Each partitioned parent also gets a `*_default` partition for out-of-range value
 
 Passwords in the SQL file are placeholders (`CHANGE_ME_*`).  
 Apply DDL (`make db-init`) before `scripts/create_roles.sql` so schemas exist.
+
+---
+
+## Plugin REST API (P5 — port 8790)
+
+FastAPI app: `src/bifrost_market_data/api/app.py`. OpenAPI at `/docs`.
+
+| Group | Prefix | Notes |
+|-------|--------|-------|
+| Health | `/health` | DB probe; always HTTP 200 |
+| Status | `/market/status` | Plugin + DB + key-configured bool |
+| Analytics | `/market/analytics/*` | Table reads + max-pain live compute |
+| Ingest | `/market/ingest/*` | `POST enqueue` → `data_ops.job_ingest` (D15=A) |
+| Options | `/market/options/*` | DB expirations / snapshots / OI |
+| Stocks / fundamentals / filings | `/market/stocks/*` | Polygon pass-through (D14=A) |
+| Market ops | `/market/market-ops/*` | Conditions / exchanges / holidays / status |
+| Reference (Polygon) | `/market/tickers*` | Pass-through |
+| Reference (DB) | `/market/reference/*` | Coverage / search over `market.ticker` |
+| Coverage | `/market/coverage/*` | Simplified SQL coverage / gaps |
+| Corporate actions | `/market/corporate-actions` | DB read |
+| Technical / TQ | `/market/technical-indicators/*`, `/market/trades-quotes/*` | Pass-through |
+
+**Deferred to P7 (D13=A):** Celery sync guts, SSE stream, option fill eligibility, gap batch POST writers, Trade API route retirement, frontend rewire.
 
 ---
 

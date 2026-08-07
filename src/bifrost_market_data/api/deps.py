@@ -1,0 +1,161 @@
+"""Shared FastAPI dependencies for Polygon pass-through and DB-read routes."""
+
+from __future__ import annotations
+
+import os
+from datetime import date, datetime, timezone
+from typing import Any, Mapping, Sequence
+
+from fastapi import HTTPException
+
+from bifrost_market_data.config import load_config, postgres_connect_kwargs
+from bifrost_market_data.polygon.client import PolygonClient
+from bifrost_market_data.polygon.errors import PolygonAPIError, PolygonRateLimitError
+
+_client: PolygonClient | None = None
+
+
+def resolve_polygon_api_key() -> str:
+    """Resolve Polygon API key from config or environment."""
+    cfg = load_config()
+    poly = dict(cfg.get("polygon") or {})
+    key = (
+        str(poly.get("api_key") or "").strip()
+        or os.environ.get("POLYGON_API_KEY", "").strip()
+        or os.environ.get("MASSIVE_API_KEY", "").strip()
+    )
+    if not key:
+        raise HTTPException(status_code=503, detail="Polygon API key not configured")
+    return key
+
+
+async def get_polygon_client() -> PolygonClient:
+    """FastAPI dependency returning a shared ``PolygonClient`` instance."""
+    global _client
+    key = resolve_polygon_api_key()
+    cfg = load_config()
+    poly = dict(cfg.get("polygon") or {})
+    tier = str(poly.get("tier") or "developer")
+    rest_base = str(poly.get("rest_base") or "https://api.polygon.io")
+    if _client is None or _client.api_key != key:
+        if _client is not None:
+            await _client.aclose()
+        _client = PolygonClient(key, tier=tier, rest_base=rest_base)
+    return _client
+
+
+def polygon_error_to_http(exc: PolygonAPIError) -> HTTPException:
+    """Map ``PolygonAPIError`` to an HTTP response."""
+    status = exc.status_code or 502
+    if isinstance(exc, PolygonRateLimitError):
+        status = 429
+    return HTTPException(status_code=status, detail=exc.message)
+
+
+def connect_db(*, timeout: int = 10) -> Any:
+    """Open a psycopg connection using plugin config."""
+    import psycopg
+
+    return psycopg.connect(**postgres_connect_kwargs(load_config()), connect_timeout=timeout)
+
+
+def require_db() -> Any:
+    """Connect or raise HTTP 503."""
+    try:
+        return connect_db()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+
+
+def table_exists(conn: Any, schema: str, table: str) -> bool:
+    """Return True when ``schema.table`` is present."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_name = %s
+                LIMIT 1
+                """,
+                (schema, table),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def safe_count(conn: Any, qualified_table: str) -> int | None:
+    """``COUNT(*)`` on a table; return None when missing or on error."""
+    schema, _, name = qualified_table.partition(".")
+    if not schema or not name or not table_exists(conn, schema, name):
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*)::bigint FROM {qualified_table}")
+            row = cur.fetchone()
+        if row is None:
+            return 0
+        return int(row[0] if not isinstance(row, Mapping) else next(iter(row.values())))
+    except Exception:
+        return None
+
+
+def normalize_symbol(value: str | None) -> str:
+    return str(value or "").strip().upper()
+
+
+def as_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()[:10]
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def iso_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def row_dict(row: Any, columns: Sequence[str]) -> dict[str, Any]:
+    if isinstance(row, Mapping):
+        out = {k: row[k] for k in columns if k in row}
+    else:
+        out = {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+    for key in ("bar_date", "trade_date", "expiry", "ex_date", "record_date", "payment_date", "session_date"):
+        if key in out and out[key] is not None:
+            d = as_date(out[key])
+            if d is not None:
+                out[key] = d.isoformat()
+    for key in ("snapshot_ts", "fetched_at", "updated_at", "last_run_at", "computed_at"):
+        if key in out and out[key] is not None:
+            out[key] = iso_value(out[key])
+    return out
+
+
+def polygon_key_configured() -> bool:
+    """Return True when a Polygon API key is present (bool only; no secret)."""
+    cfg = load_config()
+    poly = dict(cfg.get("polygon") or {})
+    key = str(poly.get("api_key") or "").strip()
+    if key:
+        return True
+    return bool(
+        str(os.environ.get("POLYGON_API_KEY") or "").strip()
+        or str(os.environ.get("MASSIVE_API_KEY") or "").strip()
+    )
