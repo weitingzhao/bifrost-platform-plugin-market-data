@@ -17,11 +17,172 @@ from bifrost_market_data.api.deps import (
     safe_count,
     table_exists,
 )
+from bifrost_market_data.quality import run_all_checks
 
 router = APIRouter(prefix="/coverage", tags=["coverage"])
 
 _RECENT_SNAPSHOT_DAYS = 7
 _RECENT_BAR_DAYS = 7
+
+
+def _analytics_metric_summary(conn: Any, table: str) -> dict[str, Any] | None:
+    """Aggregate symbol/day coverage for one market_analytics table."""
+    if not table_exists(conn, "market_analytics", table):
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
+                    COUNT(DISTINCT trade_date)::bigint AS days,
+                    MAX(trade_date) AS latest
+                FROM market_analytics.{table}
+                """
+            )
+            row = cur.fetchone()
+        if not row:
+            return {"symbols": 0, "days": 0, "latest": None}
+        return {
+            "symbols": int(row[0] or 0),
+            "days": int(row[1] or 0),
+            "latest": iso_value(row[2]),
+        }
+    except Exception:
+        return None
+
+
+def query_inventory(conn: Any) -> dict[str, Any]:
+    """One-glance inventory: breadth × depth × analytics scope (watchlist-bound)."""
+    watchlist_symbols = _fetch_watchlist_symbols(conn, limit=200)
+    scope = (
+        "watchlist"
+        if table_exists(conn, "public", "watchlist") and watchlist_symbols
+        else "option_contract_underlyings"
+        if watchlist_symbols
+        else "empty"
+    )
+
+    stock_daily: dict[str, Any] | None = None
+    if table_exists(conn, "market", "stock_daily"):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
+                        COUNT(*)::bigint AS total_rows,
+                        MIN(bar_date) AS min_date,
+                        MAX(bar_date) AS max_date
+                    FROM market.stock_daily
+                    """
+                )
+                row = cur.fetchone()
+            if row:
+                stock_daily = {
+                    "symbols": int(row[0] or 0),
+                    "total_rows": int(row[1] or 0),
+                    "min_date": iso_value(row[2]),
+                    "max_date": iso_value(row[3]),
+                }
+        except Exception:
+            stock_daily = None
+
+    # Stock minute schema exists but is not in the active ingest policy.
+    stock_min = None
+
+    option: dict[str, Any] | None = None
+    option_payload: dict[str, Any] = {
+        "underlyings": 0,
+        "total_contracts": 0,
+        "total_expiries": 0,
+        "snapshot_symbols": 0,
+        "snapshot_latest": None,
+        "oi_symbols": 0,
+        "oi_latest": None,
+    }
+    if table_exists(conn, "market", "option_contract"):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS underlyings,
+                        COUNT(*)::bigint AS total_contracts,
+                        COUNT(DISTINCT expiry)::bigint AS total_expiries
+                    FROM market.option_contract
+                    """
+                )
+                row = cur.fetchone()
+            if row:
+                option_payload["underlyings"] = int(row[0] or 0)
+                option_payload["total_contracts"] = int(row[1] or 0)
+                option_payload["total_expiries"] = int(row[2] or 0)
+        except Exception:
+            pass
+    if table_exists(conn, "market", "option_snapshot"):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
+                        MAX(snapshot_ts)::date AS latest
+                    FROM market.option_snapshot
+                    """
+                )
+                row = cur.fetchone()
+            if row:
+                option_payload["snapshot_symbols"] = int(row[0] or 0)
+                option_payload["snapshot_latest"] = iso_value(row[1])
+        except Exception:
+            pass
+    if table_exists(conn, "market", "option_open_interest"):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
+                        MAX(trade_date) AS latest
+                    FROM market.option_open_interest
+                    """
+                )
+                row = cur.fetchone()
+            if row:
+                option_payload["oi_symbols"] = int(row[0] or 0)
+                option_payload["oi_latest"] = iso_value(row[1])
+        except Exception:
+            pass
+    if any(
+        option_payload[k]
+        for k in (
+            "underlyings",
+            "total_contracts",
+            "total_expiries",
+            "snapshot_symbols",
+            "oi_symbols",
+        )
+    ) or option_payload["snapshot_latest"] or option_payload["oi_latest"]:
+        option = option_payload
+
+    analytics = {
+        "max_pain": _analytics_metric_summary(conn, "max_pain_daily"),
+        "atm_iv": _analytics_metric_summary(conn, "atm_iv_daily"),
+        "pcr": _analytics_metric_summary(conn, "pcr_daily"),
+        "iv_percentile": _analytics_metric_summary(conn, "iv_percentile_daily"),
+    }
+
+    return {
+        "ok": True,
+        "scope": scope,
+        "watchlist_symbols": watchlist_symbols,
+        "stock_daily": stock_daily,
+        "stock_min": stock_min,
+        "option": option,
+        "analytics": analytics,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def query_db_summary(conn: Any) -> dict[str, Any]:
@@ -578,6 +739,26 @@ def query_stock_day_quality_detail(
     days: int = 90,
 ) -> dict[str, Any]:
     return query_bar_quality_detail(conn, symbol=symbol, days=days)
+
+
+@router.get("/quality-score")
+def coverage_quality_score() -> dict[str, Any]:
+    """Run P7 data-quality checks (stock daily / option snapshot / OI / freshness)."""
+    conn = require_db()
+    try:
+        return run_all_checks(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/inventory")
+def coverage_inventory() -> dict[str, Any]:
+    """Aggregate data scope — one-glance inventory of all tracked data."""
+    conn = require_db()
+    try:
+        return query_inventory(conn)
+    finally:
+        conn.close()
 
 
 @router.get("/db-summary")

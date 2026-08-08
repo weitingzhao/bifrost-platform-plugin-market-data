@@ -12,6 +12,31 @@ class _DummyConn:
         return None
 
 
+def test_coverage_quality_score(monkeypatch) -> None:
+    from bifrost_market_data.api import coverage as mod
+
+    sample = {
+        "ok": True,
+        "summary": "PASS",
+        "checks": [
+            {"check": "stock_daily_coverage", "ok": True, "detail": "symbols=4500"},
+            {"check": "option_snapshot_coverage", "ok": True, "detail": "missing=0"},
+            {"check": "option_oi_coverage", "ok": True, "detail": "gaps=0"},
+            {"check": "freshness", "ok": True, "detail": "ok"},
+        ],
+    }
+    monkeypatch.setattr(mod, "run_all_checks", lambda *_a, **_k: sample)
+    monkeypatch.setattr(mod, "require_db", lambda: _DummyConn())
+    client = TestClient(create_app())
+    resp = client.get("/market/coverage/quality-score")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["summary"] == "PASS"
+    assert len(data["checks"]) == 4
+    assert data["checks"][0]["check"] == "stock_daily_coverage"
+
+
 def test_coverage_db_summary(monkeypatch) -> None:
     from bifrost_market_data.api import coverage as mod
 
@@ -30,6 +55,52 @@ def test_coverage_db_summary(monkeypatch) -> None:
     data = resp.json()
     assert data["ok"] is True
     assert data["counts"]["tickers"] == 10
+
+
+def test_coverage_inventory(monkeypatch) -> None:
+    from bifrost_market_data.api import coverage as mod
+
+    sample = {
+        "ok": True,
+        "scope": "watchlist",
+        "watchlist_symbols": ["AAPL", "NVDA"],
+        "stock_daily": {
+            "symbols": 2,
+            "total_rows": 1000,
+            "min_date": "2021-01-04",
+            "max_date": "2026-08-07",
+        },
+        "stock_min": None,
+        "option": {
+            "underlyings": 2,
+            "total_contracts": 500,
+            "total_expiries": 20,
+            "snapshot_symbols": 2,
+            "snapshot_latest": "2026-08-07",
+            "oi_symbols": 2,
+            "oi_latest": "2026-08-07",
+        },
+        "analytics": {
+            "max_pain": {"symbols": 2, "days": 10, "latest": "2026-08-07"},
+            "atm_iv": {"symbols": 2, "days": 10, "latest": "2026-08-07"},
+            "pcr": {"symbols": 2, "days": 3, "latest": "2026-08-07"},
+            "iv_percentile": {"symbols": 2, "days": 3, "latest": "2026-08-07"},
+        },
+        "generated_at": "2026-08-07T20:30:00Z",
+    }
+    monkeypatch.setattr(mod, "query_inventory", lambda *_a, **_k: sample)
+    monkeypatch.setattr(mod, "require_db", lambda: _DummyConn())
+    client = TestClient(create_app())
+    resp = client.get("/market/coverage/inventory")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["scope"] == "watchlist"
+    assert data["stock_min"] is None
+    assert data["stock_daily"]["symbols"] == 2
+    assert data["option"]["underlyings"] == 2
+    assert data["analytics"]["max_pain"]["symbols"] == 2
+    assert len(data["watchlist_symbols"]) == 2
 
 
 def test_coverage_watchlist(monkeypatch) -> None:
