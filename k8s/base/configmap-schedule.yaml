@@ -8,10 +8,13 @@ metadata:
 data:
   schedule.yaml: |
     scheduler:
+      watchlist_source: db
+      # platform_api_url: http://platform-api.bifrost-platform.svc.cluster.local:8780
       watchlist_query: >-
         SELECT DISTINCT symbol FROM public.watchlist
         WHERE sec_type = 'STK' AND optionable = true
           AND symbol IS NOT NULL AND trim(symbol) <> ''
+      iv_radar_benchmarks: [SPY, QQQ, IWM]
       slots:
         stock-eod:
           cron: "30 21 * * *"

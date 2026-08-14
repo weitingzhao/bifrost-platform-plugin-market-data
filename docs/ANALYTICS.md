@@ -45,6 +45,9 @@ Source: `market.option_open_interest` only (no Polygon).
 **Current IV** for `symbol` + `trade_date` = **median** of `atm_iv` across expiries that day
 (robust when near-term expiries are sparse or noisy).
 
+Universe for ATM IV / IV Percentile Cron: optionable watchlist ∪ Wave A Benchmarks (`SPY`, `QQQ`, `IWM`).
+`eod-pipeline` and `option-refresh` also union those three so option snapshots exist for ATM IV.
+
 History: up to `percentile_window` (default 252) daily representative IVs ending on `trade_date`
 (inclusive).
 

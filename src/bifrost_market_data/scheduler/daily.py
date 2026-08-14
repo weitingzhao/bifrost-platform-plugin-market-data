@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import sys
+import urllib.request
+import urllib.error
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -48,6 +51,9 @@ WHERE sec_type = 'STK' AND optionable = true
   AND symbol IS NOT NULL AND trim(symbol) <> ''
 """.strip()
 
+# Wave A IV Radar market-weather ETFs — unioned into atm-iv-pcr + iv-percentile only.
+DEFAULT_IV_RADAR_BENCHMARKS = ("SPY", "QQQ", "IWM")
+
 
 def default_schedule_path() -> Path | None:
     env = (os.environ.get("SCHEDULE_CONFIG") or "").strip()
@@ -79,6 +85,39 @@ def load_schedule(path: str | Path | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"scheduler": {}}
     return raw
+
+
+def load_watchlist_from_platform(platform_url: str, *, timeout: float = 15.0) -> list[str] | None:
+    """Fetch watchlist union from Platform API.
+
+    Returns sorted unique symbol list on success, or None on failure (caller
+    should fall back to DB watchlist).
+    """
+    url = platform_url.rstrip("/") + "/api/v1/watchlist/union"
+    logger.info("fetching watchlist union from %s", url)
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                logger.warning("platform-api returned HTTP %s", resp.status)
+                return None
+            body = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+        logger.warning("platform-api watchlist union unreachable: %s", exc)
+        return None
+
+    if not body.get("ok"):
+        logger.warning("platform-api watchlist union ok=false: %s", body)
+        return None
+
+    symbols = body.get("symbols")
+    if not isinstance(symbols, list):
+        logger.warning("platform-api returned non-list symbols: %r", type(symbols))
+        return None
+
+    result = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+    logger.info("platform-api watchlist union: %d symbols", len(result))
+    return result
 
 
 def resolve_target_date(value: str | date | None = None) -> date:
@@ -116,17 +155,39 @@ def load_watchlist_symbols(
     conn: Any,
     scheduler_cfg: Mapping[str, Any],
 ) -> list[str]:
-    """Return watchlist symbols from config override or DB query."""
+    """Return watchlist symbols from config override, platform-api, or DB query.
+
+    Resolution order:
+    1. ``watchlist_symbols`` hard override (always wins)
+    2. ``watchlist_source: platform-api`` → fetch from Platform API union endpoint
+       (falls back to DB on failure)
+    3. Default: DB query via ``watchlist_query``
+    """
     override = scheduler_cfg.get("watchlist_symbols")
     if override:
         return sorted({str(s).strip().upper() for s in override if str(s).strip()})
+
+    source = str(scheduler_cfg.get("watchlist_source") or "db").strip().lower()
+    if source == "platform-api":
+        platform_url = str(scheduler_cfg.get("platform_api_url") or "").strip()
+        if not platform_url:
+            platform_url = os.environ.get("PLATFORM_API_URL", "").strip()
+        if platform_url:
+            symbols = load_watchlist_from_platform(platform_url)
+            if symbols is not None:
+                return symbols
+            logger.warning("platform-api fallback to DB watchlist query")
+        else:
+            logger.warning(
+                "watchlist_source=platform-api but no platform_api_url configured; "
+                "falling back to DB"
+            )
 
     query = str(scheduler_cfg.get("watchlist_query") or DEFAULT_WATCHLIST_QUERY).strip()
     symbols: list[str] = []
     with conn.cursor() as cur:
         cur.execute(query)
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-        # Support FakeConn that may not implement fetchall — fall back to empty
         if rows is None:
             rows = []
         for row in rows:
@@ -137,6 +198,24 @@ def load_watchlist_symbols(
             if sym:
                 symbols.append(str(sym).strip().upper())
     return sorted(set(symbols))
+
+
+def union_iv_radar_benchmarks(
+    symbols: Sequence[str],
+    scheduler_cfg: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Watchlist ∪ Wave A Benchmarks (SPY/QQQ/IWM) for ATM IV / IV Percentile slots."""
+    cfg = scheduler_cfg or {}
+    raw = cfg.get("iv_radar_benchmarks")
+    if raw is None:
+        benches = DEFAULT_IV_RADAR_BENCHMARKS
+    elif isinstance(raw, str):
+        benches = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+    else:
+        benches = tuple(str(s).strip().upper() for s in raw if str(s).strip())
+    merged = {str(s).strip().upper() for s in symbols if str(s).strip()}
+    merged.update(benches)
+    return sorted(merged)
 
 
 def load_option_tickers(
@@ -356,10 +435,11 @@ def enqueue_slot(
         from bifrost_market_data.quality import fetch_recent_trading_days
 
         lookback = int(scfg.get("lookback_days") or 3)
-        symbols = (
+        symbols = union_iv_radar_benchmarks(
             list(watchlist_symbols)
             if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg)
+            else load_watchlist_symbols(conn, cfg),
+            cfg,
         )
         trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
         if not trading_days:
@@ -422,10 +502,11 @@ def enqueue_slot(
 
         lookback = int(scfg.get("lookback_days") or 3)
         pct_window = int(scfg.get("percentile_window") or DEFAULT_PERCENTILE_WINDOW)
-        symbols = (
+        symbols = union_iv_radar_benchmarks(
             list(watchlist_symbols)
             if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg)
+            else load_watchlist_symbols(conn, cfg),
+            cfg,
         )
         trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
         if not trading_days:
@@ -512,7 +593,8 @@ def enqueue_slot(
             _add("stock_daily", {"symbol": sym, "from": day_s, "to": day_s})
 
     elif slot_key == "eod-pipeline":
-        for sym in symbols:
+        pipeline_syms = union_iv_radar_benchmarks(symbols, cfg)
+        for sym in pipeline_syms:
             _add("option_snapshot", {"underlying": sym})
             _add("option_open_interest", {"underlying": sym, "trade_date": day_s})
 
@@ -530,13 +612,16 @@ def enqueue_slot(
 
     elif slot_key == "option-refresh":
         batch_size = int(scfg.get("batch_size") or 12)
+        benches = union_iv_radar_benchmarks([], cfg)
+        bench_set = set(benches)
         if symbols:
             # Deterministic rotation so the whole watchlist is covered over days.
             offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
             rotated = symbols[offset:] + symbols[:offset]
-            batch = rotated[: max(0, batch_size)]
+            rest = [s for s in rotated if s not in bench_set]
+            batch = list(benches) + rest[: max(0, batch_size)]
         else:
-            batch = []
+            batch = list(benches)
         for sym in batch:
             _add("option_contract", {"underlying": sym, "expired": False})
             _add("option_expiration", {"underlying": sym})

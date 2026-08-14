@@ -311,6 +311,94 @@ def query_ticker_related(conn: Any, *, ticker: str) -> dict[str, Any]:
     return {"ok": True, "source": "db", "symbol": sym, "related": related}
 
 
+_TICKER_COLS = (
+    "symbol", "name", "market", "locale", "primary_exchange",
+    "instrument_type", "active", "currency", "cik", "composite_figi",
+    "sic_code", "sector", "industry", "market_cap", "list_date",
+    "homepage_url", "total_employees", "description", "updated_at",
+)
+
+
+def query_ticker_single(conn: Any, *, symbol: str) -> dict[str, Any] | None:
+    """Full row from market.ticker for a single symbol."""
+    if not table_exists(conn, "market", "ticker"):
+        return None
+    sym = normalize_symbol(symbol)
+    if not sym:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol, name, market, locale, primary_exchange,
+                   instrument_type, active, currency, cik, composite_figi,
+                   sic_code, sector, industry, market_cap, list_date,
+                   homepage_url, total_employees, description, updated_at
+            FROM market.ticker
+            WHERE symbol = %s
+            LIMIT 1
+            """,
+            (sym,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return row_dict(row, _TICKER_COLS)
+
+
+def query_ticker_batch(conn: Any, *, symbols: list[str]) -> list[dict[str, Any]]:
+    """Full rows from market.ticker for multiple symbols."""
+    if not table_exists(conn, "market", "ticker"):
+        return []
+    if not symbols:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol, name, market, locale, primary_exchange,
+                   instrument_type, active, currency, cik, composite_figi,
+                   sic_code, sector, industry, market_cap, list_date,
+                   homepage_url, total_employees, description, updated_at
+            FROM market.ticker
+            WHERE symbol = ANY(%s)
+            ORDER BY symbol ASC
+            """,
+            (symbols,),
+        )
+        rows = cur.fetchall() or []
+    return [row_dict(r, _TICKER_COLS) for r in rows]
+
+
+@router.get("/ticker")
+def reference_ticker_single(
+    symbol: str = Query(..., max_length=20),
+) -> dict[str, Any]:
+    """Full ticker row for a single symbol from market.ticker."""
+    conn = require_db()
+    try:
+        result = query_ticker_single(conn, symbol=symbol)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Ticker not found")
+        return {"ok": True, "ticker": result}
+    finally:
+        conn.close()
+
+
+@router.get("/tickers/batch")
+def reference_tickers_batch(
+    symbols: str = Query(..., description="Comma-separated symbols"),
+) -> dict[str, Any]:
+    """Batch ticker lookup from market.ticker."""
+    parsed = [normalize_symbol(s) for s in symbols.split(",") if normalize_symbol(s)]
+    if not parsed:
+        raise HTTPException(status_code=400, detail="No valid symbols provided")
+    conn = require_db()
+    try:
+        tickers = query_ticker_batch(conn, symbols=parsed)
+        return {"ok": True, "tickers": tickers, "count": len(tickers)}
+    finally:
+        conn.close()
+
+
 @router.get("/tickers/search")
 def reference_tickers_search(
     q: str = Query("", max_length=128),

@@ -2,12 +2,19 @@
 # Cron strings are informational; K8s CronJob YAML is the runtime schedule source.
 
 scheduler:
+  # Watchlist source: "db" (default) queries local PG, "platform-api" fetches
+  # the union of all Trade environments' watchlists from Platform API.
+  watchlist_source: db
+  # platform_api_url: http://platform-api:8780
   watchlist_query: >-
     SELECT DISTINCT symbol FROM public.watchlist
     WHERE sec_type = 'STK' AND optionable = true
       AND symbol IS NOT NULL AND trim(symbol) <> ''
   # Optional hard-coded override (skips DB query when set):
   # watchlist_symbols: [AAPL, MSFT, TSLA]
+  # Wave A IV Radar: unioned into atm-iv-pcr, iv-percentile, eod-pipeline,
+  # and option-refresh (always included in the refresh batch). Not global watchlist_query.
+  iv_radar_benchmarks: [SPY, QQQ, IWM]
 
   slots:
     stock-eod:

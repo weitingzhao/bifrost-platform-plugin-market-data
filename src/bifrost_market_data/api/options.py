@@ -1,19 +1,33 @@
-"""Option discovery DB-read routes (expirations, snapshots, OI, lite analytics)."""
+"""Option discovery DB-read routes (expirations, snapshots, OI, lite analytics).
+
+W0-P2 additions: chain/latest, chain/eod, contracts, strikes, expirations/yyyymmdd
+— all with IB ↔ Polygon contract_key bridging.
+"""
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import (
     as_date,
+    iso_value,
     normalize_symbol,
     require_db,
     row_dict,
     table_exists,
+    view_exists,
 )
+from bifrost_market_data.api.options_bridge import (
+    ib_contract_key_from_parts,
+    identity_key,
+    split_contract_keys,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/options", tags=["options"])
 
@@ -400,3 +414,503 @@ def relative_value(
         "note": "Full relative-value scoring deferred to P7 Trade cleanup",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+# ──────────────────────────────────────────────────────────────────
+# W0-P2: Bridged option chain endpoints (IB ↔ Polygon)
+# ──────────────────────────────────────────────────────────────────
+
+_CHAIN_SNAPSHOT_COLS = (
+    "snapshot_ts",
+    "iv",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "open_interest",
+    "underlying_ticker",
+    "day_open",
+    "day_high",
+    "day_low",
+    "day_close",
+    "day_previous_close",
+    "day_change_percent",
+    "day_volume",
+    "day_vwap",
+    "fetched_at",
+)
+
+_CHAIN_SELECT = """
+    s.snapshot_ts,
+    s.iv, s.delta, s.gamma, s.theta, s.vega, s.open_interest,
+    s.underlying AS underlying_ticker,
+    s.day_open, s.day_high, s.day_low, s.day_close,
+    s.day_previous_close,
+    s.day_change_percent,
+    s.day_volume, s.day_vwap,
+    s.fetched_at,
+    oc.option_ticker AS _option_ticker,
+    oc.underlying AS _underlying,
+    oc.expiry AS _expiry,
+    oc.strike AS _strike,
+    oc.option_right AS _option_right
+"""
+
+_IB_CONTRACT_JOIN = """
+    FROM unnest(%s::text[], %s::date[], %s::text[], %s::float8[], %s::text[])
+      AS req(underlying, expiry, option_right, strike, ib_key)
+    JOIN market.option_contract oc
+      ON oc.underlying = req.underlying
+     AND oc.expiry = req.expiry
+     AND oc.option_right = req.option_right
+     AND abs(oc.strike - req.strike) < 1e-4
+"""
+
+
+def _map_row_to_ib_key(
+    row: Dict[str, Any],
+    *,
+    ib_by_identity: Dict[Tuple, str],
+    poly_requested: set,
+) -> Optional[Dict[str, Any]]:
+    """Attach IB ``contract_key``; drop internal bridge columns."""
+    out = dict(row)
+    req_ib_key = out.pop("_req_ib_key", None)
+    underlying = out.pop("_underlying", None) or out.get("underlying_ticker")
+    expiry = out.pop("_expiry", None)
+    strike = out.pop("_strike", None)
+    option_right = out.pop("_option_right", None)
+    option_ticker = out.pop("_option_ticker", None)
+
+    ck: Optional[str] = None
+    if req_ib_key:
+        ck = str(req_ib_key)
+    elif underlying is not None and expiry is not None and strike is not None and option_right:
+        try:
+            exp_d = expiry if isinstance(expiry, date) else date.fromisoformat(str(expiry)[:10])
+            ident = identity_key(str(underlying), exp_d, float(strike), str(option_right))
+            ck = ib_by_identity.get(ident)
+            if ck is None and option_ticker in poly_requested:
+                ck = ib_contract_key_from_parts(
+                    str(underlying), exp_d, float(strike), str(option_right)
+                )
+        except (TypeError, ValueError):
+            ck = None
+    if ck is None:
+        return None
+
+    for key in ("snapshot_ts", "fetched_at"):
+        if key in out and out[key] is not None:
+            out[key] = iso_value(out[key])
+    for key in ("expiry",):
+        if key in out and out[key] is not None:
+            d = as_date(out[key])
+            if d is not None:
+                out[key] = d.isoformat()
+
+    out["contract_key"] = ck
+    return out
+
+
+def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
+    """Bridged latest snapshot per contract key (IB + Polygon mixed)."""
+    polygon, ib_parts = split_contract_keys(keys)
+    if not polygon and not ib_parts:
+        return []
+
+    ib_by_ident = {
+        identity_key(p.underlying, p.expiry, p.strike, p.option_right): p.original_key
+        for p in ib_parts
+    }
+    poly_requested = set(polygon)
+    rows: List[Dict[str, Any]] = []
+
+    use_view = view_exists(conn, "market", "v_option_chain_latest")
+
+    with conn.cursor() as cur:
+        if polygon:
+            if use_view:
+                cur.execute(
+                    f"""
+                    SELECT {_CHAIN_SELECT}
+                    FROM market.v_option_chain_latest s
+                    JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                    WHERE s.option_ticker = ANY(%s)
+                    """,
+                    (polygon,),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT ON (s.option_ticker)
+                        {_CHAIN_SELECT}
+                    FROM market.option_snapshot s
+                    JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                    WHERE s.option_ticker = ANY(%s)
+                    ORDER BY s.option_ticker, s.snapshot_ts DESC
+                    """,
+                    (polygon,),
+                )
+            for r in cur.fetchall() or []:
+                d = dict(r) if isinstance(r, Mapping) else _tuple_to_chain_dict(r)
+                rows.append(d)
+
+        if ib_parts:
+            underlyings = [p.underlying for p in ib_parts]
+            expiries = [p.expiry for p in ib_parts]
+            strikes = [p.strike for p in ib_parts]
+            rights = [p.option_right for p in ib_parts]
+            ib_keys = [p.original_key for p in ib_parts]
+            ib_params = (underlyings, expiries, rights, strikes, ib_keys)
+            select_ib = _CHAIN_SELECT + ",\n    req.ib_key AS _req_ib_key"
+
+            if use_view:
+                cur.execute(
+                    f"""
+                    SELECT {select_ib}
+                    {_IB_CONTRACT_JOIN}
+                    JOIN market.v_option_chain_latest s ON s.option_ticker = oc.option_ticker
+                    """,
+                    ib_params,
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT ON (oc.option_ticker)
+                        {select_ib}
+                    {_IB_CONTRACT_JOIN}
+                    JOIN market.option_snapshot s ON s.option_ticker = oc.option_ticker
+                    ORDER BY oc.option_ticker, s.snapshot_ts DESC
+                    """,
+                    ib_params,
+                )
+            for r in cur.fetchall() or []:
+                d = dict(r) if isinstance(r, Mapping) else _tuple_to_chain_dict(r, has_ib_key=True)
+                rows.append(d)
+
+    out: List[Dict[str, Any]] = []
+    seen_ck: set = set()
+    for row in rows:
+        mapped = _map_row_to_ib_key(row, ib_by_identity=ib_by_ident, poly_requested=poly_requested)
+        if mapped is None:
+            continue
+        ck = mapped["contract_key"]
+        if ck in seen_ck:
+            continue
+        seen_ck.add(ck)
+        out.append(mapped)
+    return out
+
+
+def _fetch_chain_eod(
+    conn: Any,
+    keys: List[str],
+    since_ts: datetime,
+) -> List[Dict[str, Any]]:
+    """One snapshot per calendar day (America/New_York) per contract, bridged."""
+    polygon, ib_parts = split_contract_keys(keys)
+    if not polygon and not ib_parts:
+        return []
+
+    ib_by_ident = {
+        identity_key(p.underlying, p.expiry, p.strike, p.option_right): p.original_key
+        for p in ib_parts
+    }
+    poly_requested = set(polygon)
+
+    use_view = (
+        table_exists(conn, "market", "v_option_snapshot_with_stock")
+        or view_exists(conn, "market", "v_option_snapshot_with_stock")
+    )
+    snapshot_table = "market.v_option_snapshot_with_stock" if use_view else "market.option_snapshot"
+    price_col = "v.underlying_price" if use_view else "NULL::double precision AS underlying_price"
+
+    out: List[Dict[str, Any]] = []
+
+    def _append_mapped(raw_rows: list) -> None:
+        for row in raw_rows:
+            d = dict(row) if isinstance(row, Mapping) else {}
+            req_ib_key = d.pop("_req_ib_key", None)
+            underlying = d.pop("_underlying", None)
+            expiry = d.pop("_expiry", None)
+            strike = d.pop("_strike", None)
+            option_right = d.pop("_option_right", None)
+            option_ticker = d.pop("_option_ticker", None)
+
+            ck: Optional[str] = None
+            if req_ib_key:
+                ck = str(req_ib_key)
+            elif underlying and expiry is not None and strike is not None and option_right:
+                try:
+                    exp_d = expiry if isinstance(expiry, date) else date.fromisoformat(str(expiry)[:10])
+                    ident = identity_key(str(underlying), exp_d, float(strike), str(option_right))
+                    ck = ib_by_ident.get(ident)
+                    if ck is None and option_ticker in poly_requested:
+                        ck = ib_contract_key_from_parts(str(underlying), exp_d, float(strike), str(option_right))
+                except (TypeError, ValueError):
+                    ck = None
+            if ck is None:
+                continue
+            d["contract_key"] = ck
+            if "snap_day" in d and d["snap_day"] is not None:
+                sd = d["snap_day"]
+                d["snap_day"] = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
+            if "snapshot_ts" in d and d["snapshot_ts"] is not None:
+                d["snapshot_ts"] = iso_value(d["snapshot_ts"])
+            out.append(d)
+
+    with conn.cursor() as cur:
+        if polygon:
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (
+                  DATE(timezone('America/New_York', v.snapshot_ts)),
+                  oc.option_ticker
+                )
+                  DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
+                  v.iv,
+                  {price_col},
+                  v.snapshot_ts,
+                  oc.option_ticker AS _option_ticker,
+                  oc.underlying AS _underlying,
+                  oc.expiry AS _expiry,
+                  oc.strike AS _strike,
+                  oc.option_right AS _option_right
+                FROM {snapshot_table} v
+                JOIN market.option_contract oc ON oc.option_ticker = v.option_ticker
+                WHERE v.option_ticker = ANY(%s)
+                  AND v.snapshot_ts >= %s
+                ORDER BY
+                  DATE(timezone('America/New_York', v.snapshot_ts)),
+                  oc.option_ticker,
+                  v.snapshot_ts DESC
+                """,
+                (polygon, since_ts),
+            )
+            _append_mapped(cur.fetchall() or [])
+
+        if ib_parts:
+            underlyings = [p.underlying for p in ib_parts]
+            expiries = [p.expiry for p in ib_parts]
+            strikes = [p.strike for p in ib_parts]
+            rights = [p.option_right for p in ib_parts]
+            ib_keys = [p.original_key for p in ib_parts]
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (
+                  DATE(timezone('America/New_York', v.snapshot_ts)),
+                  oc.option_ticker
+                )
+                  DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
+                  v.iv,
+                  {price_col},
+                  v.snapshot_ts,
+                  oc.option_ticker AS _option_ticker,
+                  oc.underlying AS _underlying,
+                  oc.expiry AS _expiry,
+                  oc.strike AS _strike,
+                  oc.option_right AS _option_right,
+                  req.ib_key AS _req_ib_key
+                {_IB_CONTRACT_JOIN}
+                JOIN {snapshot_table} v ON v.option_ticker = oc.option_ticker
+                WHERE v.snapshot_ts >= %s
+                ORDER BY
+                  DATE(timezone('America/New_York', v.snapshot_ts)),
+                  oc.option_ticker,
+                  v.snapshot_ts DESC
+                """,
+                (underlyings, expiries, rights, strikes, ib_keys, since_ts),
+            )
+            _append_mapped(cur.fetchall() or [])
+
+    return out
+
+
+def _tuple_to_chain_dict(row: Any, *, has_ib_key: bool = False) -> Dict[str, Any]:
+    """Build dict from positional tuple matching ``_CHAIN_SELECT`` column order."""
+    cols = list(_CHAIN_SNAPSHOT_COLS) + [
+        "_option_ticker", "_underlying", "_expiry", "_strike", "_option_right",
+    ]
+    if has_ib_key:
+        cols.append("_req_ib_key")
+    return {cols[i]: row[i] for i in range(min(len(cols), len(row)))}
+
+
+@router.get("/chain/latest")
+def chain_latest(
+    keys: str = Query(..., description="Comma-separated contract keys (IB or Polygon)"),
+) -> Dict[str, Any]:
+    """Latest snapshot per contract, accepting mixed IB + Polygon keys.
+
+    Returns IB-shaped ``contract_key`` in every row.
+    """
+    raw_keys = [k.strip() for k in keys.split(",") if k.strip()]
+    if not raw_keys:
+        raise HTTPException(status_code=400, detail="No valid keys provided")
+    if len(raw_keys) > 120:
+        raise HTTPException(status_code=400, detail="Max 120 keys per request")
+
+    conn = require_db()
+    try:
+        if not table_exists(conn, "market", "option_snapshot") or not table_exists(conn, "market", "option_contract"):
+            return {"ok": True, "rows": [], "count": 0, "note": "required tables missing"}
+        rows = _fetch_chain_latest(conn, raw_keys)
+    finally:
+        conn.close()
+    return {"ok": True, "rows": rows, "count": len(rows)}
+
+
+@router.get("/chain/eod")
+def chain_eod(
+    keys: str = Query(..., description="Comma-separated contract keys (IB or Polygon)"),
+    since: str | None = Query(None, description="Since datetime (ISO or YYYY-MM-DD)"),
+) -> Dict[str, Any]:
+    """One snapshot per calendar day per contract (America/New_York)."""
+    raw_keys = [k.strip() for k in keys.split(",") if k.strip()]
+    if not raw_keys:
+        raise HTTPException(status_code=400, detail="No valid keys provided")
+    if len(raw_keys) > 120:
+        raise HTTPException(status_code=400, detail="Max 120 keys per request")
+
+    since_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    if since:
+        try:
+            since_ts = datetime.fromisoformat(since)
+            if since_ts.tzinfo is None:
+                since_ts = since_ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            d = as_date(since)
+            if d is not None:
+                since_ts = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+    conn = require_db()
+    try:
+        if not table_exists(conn, "market", "option_snapshot") or not table_exists(conn, "market", "option_contract"):
+            return {"ok": True, "rows": [], "count": 0, "note": "required tables missing"}
+        rows = _fetch_chain_eod(conn, raw_keys, since_ts)
+    finally:
+        conn.close()
+    return {"ok": True, "rows": rows, "count": len(rows)}
+
+
+@router.get("/contracts")
+def option_contracts(
+    symbol: str = Query(..., description="Underlying symbol"),
+    expiry: str | None = Query(None, description="Expiry YYYYMMDD or YYYY-MM-DD"),
+) -> Dict[str, Any]:
+    """List option contracts with IB contract_key for each row."""
+    sym = normalize_symbol(symbol)
+    exp = _norm_expiry(expiry)
+    conn = require_db()
+    try:
+        if not table_exists(conn, "market", "option_contract"):
+            return {"ok": True, "contracts": [], "count": 0, "note": "table missing"}
+        clauses = ["underlying = %s"]
+        params: list = [sym]
+        if exp is not None:
+            clauses.append("expiry = %s")
+            params.append(exp)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT option_ticker, underlying, expiry, strike, option_right
+                FROM market.option_contract
+                WHERE {' AND '.join(clauses)}
+                ORDER BY expiry, strike, option_right
+                """,
+                tuple(params),
+            )
+            raw = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    contracts: List[Dict[str, Any]] = []
+    for r in raw:
+        if isinstance(r, Mapping):
+            ot, und, ex, st, oright = r["option_ticker"], r["underlying"], r["expiry"], r["strike"], r["option_right"]
+        else:
+            ot, und, ex, st, oright = r[0], r[1], r[2], r[3], r[4]
+        exp_d = ex if isinstance(ex, date) else as_date(ex)
+        ib_ck = ib_contract_key_from_parts(str(und), exp_d, float(st), str(oright)) if exp_d else None
+        contracts.append({
+            "option_ticker": str(ot),
+            "underlying": str(und),
+            "expiry": exp_d.isoformat() if exp_d else str(ex),
+            "strike": float(st),
+            "option_right": str(oright),
+            "ib_contract_key": ib_ck,
+        })
+    return {"ok": True, "contracts": contracts, "count": len(contracts)}
+
+
+@router.get("/strikes")
+def option_strikes(
+    symbol: str = Query(..., description="Underlying symbol"),
+    expiry: str = Query(..., description="Expiry YYYYMMDD or YYYY-MM-DD"),
+) -> Dict[str, Any]:
+    """Sorted distinct strikes for a symbol + expiry."""
+    sym = normalize_symbol(symbol)
+    exp = _norm_expiry(expiry)
+    if exp is None:
+        raise HTTPException(status_code=400, detail="Invalid expiry format")
+    conn = require_db()
+    try:
+        if not table_exists(conn, "market", "option_contract"):
+            return {"ok": True, "strikes": [], "count": 0, "note": "table missing"}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT strike FROM market.option_contract
+                WHERE underlying = %s AND expiry = %s
+                ORDER BY strike
+                """,
+                (sym, exp),
+            )
+            raw = cur.fetchall() or []
+    finally:
+        conn.close()
+    strikes: List[float] = []
+    for r in raw:
+        try:
+            strikes.append(float(r[0] if not isinstance(r, Mapping) else r["strike"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return {"ok": True, "strikes": strikes, "count": len(strikes)}
+
+
+@router.get("/expirations/yyyymmdd")
+def option_expirations_yyyymmdd(
+    symbol: str = Query(..., description="Underlying symbol"),
+) -> Dict[str, Any]:
+    """Expirations in YYYYMMDD format from ``market.option_contract``."""
+    sym = normalize_symbol(symbol)
+    conn = require_db()
+    try:
+        if not table_exists(conn, "market", "option_contract"):
+            return {"ok": True, "expirations": [], "count": 0, "note": "table missing"}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT expiry FROM market.option_contract
+                WHERE underlying = %s
+                ORDER BY expiry
+                """,
+                (sym,),
+            )
+            raw = cur.fetchall() or []
+    finally:
+        conn.close()
+    expirations: List[str] = []
+    for r in raw:
+        v = r[0] if not isinstance(r, Mapping) else r["expiry"]
+        if v is None:
+            continue
+        if hasattr(v, "strftime"):
+            expirations.append(v.strftime("%Y%m%d"))
+        else:
+            s = str(v).strip()
+            if len(s) >= 10 and s[4] == "-":
+                expirations.append(s[:4] + s[5:7] + s[8:10])
+            else:
+                expirations.append(s)
+    return {"ok": True, "expirations": expirations, "count": len(expirations)}

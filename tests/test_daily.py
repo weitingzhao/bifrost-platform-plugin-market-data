@@ -8,10 +8,12 @@ from typing import Any
 import pytest
 
 from bifrost_market_data.scheduler.daily import (
+    DEFAULT_IV_RADAR_BENCHMARKS,
     SLOT_NAMES,
     enqueue_slot,
     is_trading_day,
     resolve_target_date,
+    union_iv_radar_benchmarks,
 )
 from bifrost_market_data.scheduler.enqueue import payload_hash
 
@@ -275,8 +277,16 @@ def test_enqueue_eod_pipeline() -> None:
         scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
     )
     kinds = [j["kind"] for j in result["jobs"]]
-    assert kinds == ["option_snapshot", "option_open_interest"]
-    assert result["jobs"][1]["payload"]["trade_date"] == "2024-06-20"
+    assert kinds.count("option_snapshot") == 4  # AAPL ∪ SPY/QQQ/IWM
+    assert kinds.count("option_open_interest") == 4
+    assert {j["payload"]["underlying"] for j in result["jobs"]} == {
+        "AAPL",
+        "SPY",
+        "QQQ",
+        "IWM",
+    }
+    oi = next(j for j in result["jobs"] if j["kind"] == "option_open_interest")
+    assert oi["payload"]["trade_date"] == "2024-06-20"
 
 
 def test_enqueue_universe_daily() -> None:
@@ -320,11 +330,12 @@ def test_enqueue_option_refresh_batch() -> None:
         watchlist_symbols=symbols,
         scheduler_cfg={"slots": {"option-refresh": {"priority": 4, "batch_size": 2}}},
     )
-    # 2 symbols × (contract + expiration)
-    assert result["enqueued"] == 4
+    # 3 benchmarks always + 2 rotated watchlist × (contract + expiration)
+    assert result["enqueued"] == 10
     underlyings = {j["payload"]["underlying"] for j in result["jobs"]}
-    assert len(underlyings) == 2
-    assert underlyings.issubset(set(symbols))
+    assert {"SPY", "QQQ", "IWM"}.issubset(underlyings)
+    assert len(underlyings) == 5
+    assert underlyings - {"SPY", "QQQ", "IWM"} <= set(symbols)
 
 
 def test_enqueue_option_refresh_rotates_by_date() -> None:
@@ -543,6 +554,16 @@ def test_all_slot_names_covered() -> None:
     assert "iv-percentile" in SLOT_NAMES
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
+
+
+def test_union_iv_radar_benchmarks() -> None:
+    merged = union_iv_radar_benchmarks(["AAPL"])
+    assert merged == sorted({"AAPL", *DEFAULT_IV_RADAR_BENCHMARKS})
+    custom = union_iv_radar_benchmarks(
+        ["NVDA"],
+        {"iv_radar_benchmarks": ["SPY"]},
+    )
+    assert custom == ["NVDA", "SPY"]
 
 
 def test_enqueue_stock_snapshot_slot() -> None:
@@ -854,6 +875,7 @@ def test_enqueue_atm_iv_pcr() -> None:
     )
     assert result["slot"] == "atm-iv-pcr"
     assert result["enqueued"] == 0
+    assert result["symbols"] == 4  # AAPL ∪ SPY/QQQ/IWM
     assert result["trading_days"] == ["2024-06-18", "2024-06-19", "2024-06-20"]
     assert result["atm_rows_written"] == 1
     assert result["pcr_rows_written"] == 1
@@ -914,6 +936,7 @@ def test_enqueue_iv_percentile() -> None:
     )
     assert result["slot"] == "iv-percentile"
     assert result["enqueued"] == 0
+    assert result["symbols"] == 4  # AAPL ∪ SPY/QQQ/IWM
     assert result["percentile_window"] == 252
     assert result["rows_written"] == 3  # one row per trading day with hist
     assert any(

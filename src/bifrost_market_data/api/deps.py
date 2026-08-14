@@ -148,6 +148,24 @@ def row_dict(row: Any, columns: Sequence[str]) -> dict[str, Any]:
     return out
 
 
+def view_exists(conn: Any, schema: str, view: str) -> bool:
+    """Return True when ``schema.view`` is present in ``information_schema.views``."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.views
+                WHERE table_schema = %s AND table_name = %s
+                LIMIT 1
+                """,
+                (schema, view),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 def polygon_key_configured() -> bool:
     """Return True when a Polygon API key is present (bool only; no secret)."""
     cfg = load_config()
