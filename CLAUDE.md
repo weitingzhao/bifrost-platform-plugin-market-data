@@ -20,21 +20,24 @@
 - **Trade** (`bifrost-trade-*`): 只读 `market.*`；不直连 Polygon；不写 `data_ops.*`
 - **不含 IB**：无 TWS/Gateway/bars IB 路径
 
-## 数据库
+## 数据库（Golden Source 模式）
 
-- 共用物理 PostgreSQL 实例（`bifrost_dev` / `bifrost_prod`）
+- **单一 Golden Source 数据库**：`bifrost_golden_source`（CNPG 管理）
+- 所有 Trade 环境共享同一数据库实例，不再按环境分离
 - Schema：`market.*`（公共行情）+ `market_analytics.*`（衍生指标）+ `data_ops.*`（作业队列 / freshness）
 - DDL 归 **本 repo** 管理（`src/bifrost_market_data/schema/ddl.py`）
 - 不依赖 `bifrost-core`；不 import `bifrost-trade-*` Python 包
-- **DEV PG 目标**：CNPG LAN NodePort `192.168.10.73:30432`（见 `config/market-data.yaml.example`）
+- **PG 目标**：CNPG LAN NodePort `192.168.10.73:30432`（见 `config/market-data.yaml.example`）
   - 覆盖：`POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_PASSWORD` 等环境变量
-  - 本机 `localhost:5432` 不是默认 DEV 目标
+  - 本机 `localhost:5432` 不是默认目标
+- Trade 消费者通过 Plugin API HTTP（`:8790` via `platform-api` `:8780`）读取，零直接 SQL
 
-## K8s
+## K8s（Single Golden Source）
 
-- Namespace: `plugin-market-data`
+- Namespace: `plugin-market-data`（唯一活跃实例；STG/PROD overlays 已归档至 `k8s/overlays/_archived/`）
 - Workers: `polygon-worker-stocks` / `polygon-worker-options`
 - API: `market-data-api` Service `:8790`（`GET /health`, analytics under `/market/analytics/*`）
+- Watchlist union mode: 通过 `platform-api` 聚合所有 Trade 环境 watchlist
 - Console 治理: Subcontractors → Plugin Gallery（catalog 在 P6 注册）
 
 ## 命令

@@ -1,5 +1,5 @@
 -- PG roles for Market Data Subcontractor (idempotent-ish).
--- Run as a superuser / database owner against bifrost_dev or bifrost_prod.
+-- Run as a superuser / database owner against bifrost_golden_source.
 -- Replace CHANGE_ME passwords before applying in any shared environment.
 
 DO $$

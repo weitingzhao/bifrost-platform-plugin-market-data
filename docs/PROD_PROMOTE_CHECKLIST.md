@@ -1,5 +1,9 @@
 # PROD promote checklist (Post-P9 L2)
 
+> **ARCHIVED (2026-08-14):** PROD overlay retired by `market-data-golden-source` W2-P2.
+> Single Golden Source instance in `plugin-market-data` NS replaces per-env workers.
+> Overlays preserved at `k8s/overlays/_archived/prod/` for rollback reference.
+
 Owner unlock (2026-07-30): backup first, then DDL / related migrate / roles / `p9_drop` on **`bifrost_prod`**.
 
 ## Backup (done)

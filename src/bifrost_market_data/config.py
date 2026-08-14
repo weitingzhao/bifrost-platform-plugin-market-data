@@ -69,7 +69,7 @@ def postgres_connect_kwargs(cfg: dict[str, Any] | None = None) -> dict[str, Any]
     return {
         "host": pg.get("host") or os.environ.get("POSTGRES_HOST") or "localhost",
         "port": int(pg.get("port") or os.environ.get("POSTGRES_PORT") or 5432),
-        "dbname": pg.get("dbname") or os.environ.get("POSTGRES_DB") or "bifrost_dev",
+        "dbname": pg.get("dbname") or os.environ.get("POSTGRES_DB") or "bifrost_golden_source",
         "user": pg.get("user") or os.environ.get("POSTGRES_USER") or "data_writer",
         "password": pg.get("password") or os.environ.get("POSTGRES_PASSWORD") or "",
     }

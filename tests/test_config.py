@@ -16,7 +16,7 @@ def test_load_config_reads_example_yaml() -> None:
     assert isinstance(cfg, dict)
     assert "polygon" in cfg
     assert "postgres" in cfg
-    assert cfg["postgres"]["dbname"] == "bifrost_dev"
+    assert cfg["postgres"]["dbname"] == "bifrost_golden_source"
 
 
 def test_postgres_connect_kwargs_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,5 +31,5 @@ def test_postgres_connect_kwargs_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     kw = postgres_connect_kwargs({"postgres": {}})
     assert kw["host"] == "localhost"
     assert kw["port"] == 5432
-    assert kw["dbname"] == "bifrost_dev"
+    assert kw["dbname"] == "bifrost_golden_source"
     assert kw["user"] == "data_writer"

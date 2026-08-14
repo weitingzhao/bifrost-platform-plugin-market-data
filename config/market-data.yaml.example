@@ -9,7 +9,7 @@ polygon:
 postgres:
   host: 192.168.10.73
   port: 30432
-  dbname: bifrost_dev
+  dbname: bifrost_golden_source
   user: data_writer
   password: ""           # set via POSTGRES_PASSWORD env
 

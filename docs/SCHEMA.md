@@ -3,9 +3,22 @@
 Owner review deliverable for program **market-data-subcontractor** Phase **P1**,
 extended by **market-data-expand** Wave **0-A** (`market_analytics`).
 
-Physical database: shared PostgreSQL (`bifrost_dev` / `bifrost_prod`).  
-Logical isolation: schemas `market` (public market data), `market_analytics`
-(derived daily analytics), and `data_ops` (ingest jobs / ops metadata).  
+## Golden Source Model (since W2 — 2026-08-14)
+
+As of **market-data-golden-source** Wave 2, Market Data runs as a **Single Golden
+Source** instance. Per-environment database separation (`bifrost_dev` / `bifrost_prod`)
+has been retired; all environments share one ingest instance writing to
+**`bifrost_golden_source`** (target database name after Owner-gated rename).
+
+- **One Plugin namespace** (`plugin-market-data`) serves all Trade environments
+- **One database** with schemas `market`, `market_analytics`, `data_ops`
+- **Watchlist union mode**: Plugin reads the union of all Trade environment watchlists
+  via `platform-api` (`GET /api/v1/watchlist/union`)
+- **Trade consumers** read exclusively through Plugin API HTTP (`:8790` proxied via
+  `platform-api` `:8780`) — zero direct SQL against `market.*`
+- **STG/PROD overlays archived** in `k8s/overlays/_archived/` (retained for rollback
+  reference; `plugin-market-data-stg` / `plugin-market-data-prod` namespaces dormant)
+
 Single vendor: **Polygon.io** — no `source` column, no IB legacy fields.
 
 Apply DDL:
