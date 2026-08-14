@@ -1,4 +1,5 @@
-# Market-data workers — egress to data NS (Postgres/Redis) + Polygon HTTPS + DNS.
+# Market-data workers — egress to data NS (Postgres/Redis) + Polygon HTTPS + DNS
+# + platform-api (watchlist union). Ingress from Trade namespaces to Plugin API.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -17,6 +18,13 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: data
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-platform-prod
+      ports:
+        - protocol: TCP
+          port: 8780
     - ports:
         - protocol: TCP
           port: 443
@@ -27,3 +35,36 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: market-data-ingress
+  labels:
+    app.kubernetes.io/name: market-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: market-data-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-dev
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-stg
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-prod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-platform-prod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-platform-stg
+      ports:
+        - protocol: TCP
+          port: 8790

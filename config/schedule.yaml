@@ -4,8 +4,8 @@
 scheduler:
   # Watchlist source: "db" (default) queries local PG, "platform-api" fetches
   # the union of all Trade environments' watchlists from Platform API.
-  watchlist_source: db
-  # platform_api_url: http://platform-api:8780
+  watchlist_source: platform-api
+  platform_api_url: http://platform-api.bifrost-platform-prod.svc.cluster.local:8780
   watchlist_query: >-
     SELECT DISTINCT symbol FROM public.watchlist
     WHERE sec_type = 'STK' AND optionable = true
