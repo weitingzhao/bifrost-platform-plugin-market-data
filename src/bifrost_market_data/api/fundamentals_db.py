@@ -187,7 +187,7 @@ def query_financials(
         clauses.append("report_type = %s")
         params.append(report_type)
     if timeframe:
-        clauses.append("timeframe = %s")
+        clauses.append("period_type = %s")
         params.append(timeframe)
 
     params.append(limit)
@@ -195,7 +195,7 @@ def query_financials(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT symbol, report_type, period_date, timeframe, data, fetched_at
+            SELECT symbol, report_type, period_date, period_type, data, fetched_at
             FROM market.stock_financials
             WHERE {" AND ".join(clauses)}
             ORDER BY period_date DESC
@@ -214,7 +214,7 @@ def _financials_row(row: Any) -> dict[str, Any]:
             "symbol": str(row.get("symbol") or ""),
             "report_type": str(row.get("report_type") or ""),
             "period_date": _date_str(row.get("period_date")),
-            "timeframe": row.get("timeframe"),
+            "timeframe": row.get("period_type"),
             "data": row.get("data"),
             "fetched_at": iso_value(row.get("fetched_at")),
         }
