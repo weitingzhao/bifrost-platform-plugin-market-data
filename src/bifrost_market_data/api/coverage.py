@@ -905,5 +905,110 @@ def coverage_stock_day_quality_detail(
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# SEPA / Data Readiness coverage (W2-P3)
+# ---------------------------------------------------------------------------
+
+_SEPA_COVERAGE_TABLES: list[tuple[str, str, str]] = [
+    ("market", "stock_daily", "bar_date"),
+    ("market", "stock_minute", "bar_time"),
+    ("market", "option_contract", "updated_at"),
+    ("market", "option_snapshot", "snapshot_ts"),
+    ("market", "option_open_interest", "trade_date"),
+    ("market", "option_daily", "bar_date"),
+    ("market", "ticker", "updated_at"),
+    ("market", "stock_financials", "updated_at"),
+    ("market", "corporate_action", "updated_at"),
+]
+
+
+def query_sepa_stats(conn: Any) -> dict[str, Any]:
+    """Row counts and latest date for each market.* table used by SEPA."""
+    tables: list[dict[str, Any]] = []
+    for schema, table, date_col in _SEPA_COVERAGE_TABLES:
+        if not table_exists(conn, schema, table):
+            tables.append({"table": f"{schema}.{table}", "row_count": None, "latest": None})
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*)::bigint, MAX({date_col}) FROM {schema}.{table}"
+                )
+                row = cur.fetchone()
+            cnt = int(row[0] or 0) if row else 0
+            latest = iso_value(row[1]) if row and row[1] else None
+            tables.append({"table": f"{schema}.{table}", "row_count": cnt, "latest": latest})
+        except Exception:
+            tables.append({"table": f"{schema}.{table}", "row_count": None, "latest": None})
+    return {"ok": True, "tables": tables}
+
+
+def query_distributions(
+    conn: Any,
+    *,
+    table: str,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Per-symbol row count distribution for a given table."""
+    valid_tables: dict[str, tuple[str, str]] = {
+        "stock_daily": ("market", "symbol"),
+        "stock_minute": ("market", "symbol"),
+        "option_contract": ("market", "underlying"),
+        "option_snapshot": ("market", "underlying"),
+        "option_open_interest": ("market", "underlying"),
+        "option_daily": ("market", "underlying"),
+        "stock_financials": ("market", "symbol"),
+    }
+    if table not in valid_tables:
+        return {"ok": False, "error": f"Invalid table; choose from: {list(valid_tables.keys())}"}
+
+    schema, sym_col = valid_tables[table]
+    qualified = f"{schema}.{table}"
+    if not table_exists(conn, schema, table):
+        return {"ok": True, "table": qualified, "distributions": [], "count": 0}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT UPPER(TRIM({sym_col})) AS symbol, COUNT(*)::bigint AS row_count
+            FROM {qualified}
+            WHERE TRIM(COALESCE({sym_col}, '')) <> ''
+            GROUP BY UPPER(TRIM({sym_col}))
+            ORDER BY row_count DESC, symbol ASC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall() or []
+
+    distributions = [
+        {"symbol": str(r[0]).strip(), "row_count": int(r[1])} for r in rows if r[0]
+    ]
+    return {"ok": True, "table": qualified, "distributions": distributions, "count": len(distributions)}
+
+
+@router.get("/sepa-stats")
+def coverage_sepa_stats() -> dict[str, Any]:
+    """Row counts and latest timestamps for all market.* tables used by SEPA."""
+    conn = require_db()
+    try:
+        return query_sepa_stats(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/distributions")
+def coverage_distributions(
+    table: str = Query(..., description="Table name (e.g. stock_daily, option_contract)"),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Per-symbol row count distribution for a given market table."""
+    conn = require_db()
+    try:
+        return query_distributions(conn, table=table, limit=limit)
+    finally:
+        conn.close()
+
+
 # Re-export for tests that monkeypatch connect
 _connect = connect_db

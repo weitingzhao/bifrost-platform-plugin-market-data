@@ -208,6 +208,77 @@ def query_universe_count(conn: Any) -> dict[str, Any]:
     return {"ok": True, "total_tickers": n or 0, "source": "market.ticker"}
 
 
+def query_us_equity_universe(conn: Any) -> dict[str, Any]:
+    """US common-stock universe matching former public.v_us_equity_universe.
+
+    Filters: active, locale=us, market=stocks, instrument_type=cs.
+    tickers_id is hashtext(upper(trim(symbol)))::bigint for SEPA compatibility.
+    """
+    if not table_exists(conn, "market", "ticker"):
+        return {"ok": True, "rows": [], "count": 0}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                hashtext(upper(trim(t.symbol)))::bigint AS tickers_id,
+                upper(trim(t.symbol)) AS symbol,
+                t.name,
+                t.market,
+                t.locale,
+                t.primary_exchange,
+                t.instrument_type,
+                t.active,
+                t.list_date::text AS list_date,
+                t.sector,
+                t.industry
+            FROM market.ticker t
+            WHERE COALESCE(t.active, false) = true
+              AND lower(COALESCE(t.locale, '')) = 'us'
+              AND lower(COALESCE(t.market, '')) = 'stocks'
+              AND lower(COALESCE(t.instrument_type, '')) = 'cs'
+            ORDER BY 2
+            """
+        )
+        raw = cur.fetchall() or []
+    rows: list[dict[str, Any]] = []
+    for r in raw:
+        if hasattr(r, "keys"):
+            rows.append(
+                {
+                    "tickers_id": int(r["tickers_id"]) if r["tickers_id"] is not None else None,
+                    "symbol": str(r["symbol"]),
+                    "name": r["name"],
+                    "market": r["market"],
+                    "locale": r["locale"],
+                    "primary_exchange": r["primary_exchange"],
+                    "instrument_type": r["instrument_type"],
+                    "active": bool(r["active"]) if r["active"] is not None else None,
+                    "delisted_utc": None,
+                    "list_date": str(r["list_date"])[:10] if r["list_date"] else None,
+                    "sector": r["sector"],
+                    "industry": r["industry"],
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "tickers_id": int(r[0]) if r[0] is not None else None,
+                    "symbol": str(r[1]),
+                    "name": r[2],
+                    "market": r[3],
+                    "locale": r[4],
+                    "primary_exchange": r[5],
+                    "instrument_type": r[6],
+                    "active": bool(r[7]) if r[7] is not None else None,
+                    "delisted_utc": None,
+                    "list_date": str(r[8])[:10] if r[8] else None,
+                    "sector": r[9],
+                    "industry": r[10],
+                }
+            )
+    return {"ok": True, "rows": rows, "count": len(rows)}
+
+
 def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") -> dict[str, Any]:
     if table_exists(conn, "public", "ticker_types"):
         clauses: list[str] = []
@@ -471,6 +542,16 @@ def reference_universe_count() -> dict[str, Any]:
     conn = require_db()
     try:
         return query_universe_count(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/universe")
+def reference_us_equity_universe() -> dict[str, Any]:
+    """US CS universe rows matching former public.v_us_equity_universe."""
+    conn = require_db()
+    try:
+        return query_us_equity_universe(conn)
     finally:
         conn.close()
 

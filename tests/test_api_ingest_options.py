@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List, Tuple
 
 from fastapi.testclient import TestClient
 
@@ -21,6 +21,124 @@ class _DummyConn:
 
     def cursor(self) -> Any:
         raise AssertionError("cursor should be mocked via helpers")
+
+
+# ──────────────────────────────────────────────────────────────────
+# W0-P3: POST /market/options/expirations/replace
+# ──────────────────────────────────────────────────────────────────
+
+
+class _MockCursor:
+    """Minimal cursor mock that records execute/executemany calls."""
+
+    def __init__(self) -> None:
+        self.executed: List[Tuple[str, Any]] = []
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((sql, params))
+
+    def executemany(self, sql: str, params_seq: Any) -> None:
+        for p in params_seq:
+            self.executed.append((sql, p))
+
+    def __enter__(self) -> "_MockCursor":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        pass
+
+
+class _WritableConn:
+    def __init__(self) -> None:
+        self._cursor = _MockCursor()
+        self.committed = False
+        self.rolled_back = False
+
+    def close(self) -> None:
+        pass
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def cursor(self) -> _MockCursor:
+        return self._cursor
+
+
+def test_replace_expirations_success(monkeypatch) -> None:
+    from bifrost_market_data.api import ingest_options as mod
+
+    conn = _WritableConn()
+    monkeypatch.setattr(mod, "require_db", lambda: conn)
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/options/expirations/replace",
+        json={
+            "symbol": "NVDA",
+            "expirations": ["2026-09-19", "2026-10-17", "2026-12-19"],
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["symbol"] == "NVDA"
+    assert data["replaced"] == 3
+    assert conn.committed is True
+    # Verify DELETE was issued
+    delete_calls = [c for c in conn._cursor.executed if "DELETE" in c[0]]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1] == ("NVDA",)
+    # Verify INSERTs
+    insert_calls = [c for c in conn._cursor.executed if "INSERT" in c[0]]
+    assert len(insert_calls) == 3
+
+
+def test_replace_expirations_yyyymmdd_format(monkeypatch) -> None:
+    from bifrost_market_data.api import ingest_options as mod
+
+    conn = _WritableConn()
+    monkeypatch.setattr(mod, "require_db", lambda: conn)
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/options/expirations/replace",
+        json={
+            "symbol": "aapl",
+            "expirations": ["20260919", "20261017"],
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["symbol"] == "AAPL"
+    assert data["replaced"] == 2
+
+
+def test_replace_expirations_empty_list_rejected() -> None:
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/options/expirations/replace",
+        json={"symbol": "NVDA", "expirations": []},
+    )
+    assert resp.status_code == 400
+
+
+def test_replace_expirations_invalid_date_rejected() -> None:
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/options/expirations/replace",
+        json={"symbol": "NVDA", "expirations": ["not-a-date"]},
+    )
+    assert resp.status_code == 422
+
+
+def test_replace_expirations_missing_symbol_rejected() -> None:
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/options/expirations/replace",
+        json={"expirations": ["2026-09-19"]},
+    )
+    assert resp.status_code == 422
 
 
 def test_ingest_kinds_lists_handlers() -> None:

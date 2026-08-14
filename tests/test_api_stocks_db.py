@@ -270,3 +270,41 @@ class TestQuerySpyCloseUnit:
         monkeypatch.setattr(stocks_db_mod, "table_exists", lambda *_a, **_k: True)
         result = stocks_db_mod.query_spy_close(MockConn(), days=420)
         assert result == [100.0, 101.5, 99.8]
+
+
+class TestUsEquityUniverse:
+    def test_http_returns_rows(self, monkeypatch) -> None:
+        sample = {
+            "ok": True,
+            "rows": [
+                {
+                    "tickers_id": 1,
+                    "symbol": "NVDA",
+                    "name": "NVIDIA",
+                    "market": "stocks",
+                    "locale": "us",
+                    "primary_exchange": "XNAS",
+                    "instrument_type": "cs",
+                    "active": True,
+                    "delisted_utc": None,
+                    "list_date": "1999-01-22",
+                    "sector": "Technology",
+                    "industry": "Semiconductors",
+                }
+            ],
+            "count": 1,
+        }
+        monkeypatch.setattr(reference_db_mod, "query_us_equity_universe", lambda *_a, **_k: sample)
+        _patch_db(monkeypatch)
+        client = TestClient(create_app())
+        resp = client.get("/market/reference/universe")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["count"] == 1
+        assert data["rows"][0]["symbol"] == "NVDA"
+
+    def test_query_empty_when_table_missing(self, monkeypatch) -> None:
+        monkeypatch.setattr(reference_db_mod, "table_exists", lambda *_a, **_k: False)
+        result = reference_db_mod.query_us_equity_universe(None)
+        assert result == {"ok": True, "rows": [], "count": 0}
