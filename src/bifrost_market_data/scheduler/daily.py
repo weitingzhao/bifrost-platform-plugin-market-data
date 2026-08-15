@@ -185,18 +185,28 @@ def load_watchlist_symbols(
 
     query = str(scheduler_cfg.get("watchlist_query") or DEFAULT_WATCHLIST_QUERY).strip()
     symbols: list[str] = []
-    with conn.cursor() as cur:
-        cur.execute(query)
-        rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-        if rows is None:
-            rows = []
-        for row in rows:
-            if isinstance(row, Mapping):
-                sym = row.get("symbol") or next(iter(row.values()), None)
-            else:
-                sym = row[0] if row else None
-            if sym:
-                symbols.append(str(sym).strip().upper())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+            if rows is None:
+                rows = []
+            for row in rows:
+                if isinstance(row, Mapping):
+                    sym = row.get("symbol") or next(iter(row.values()), None)
+                else:
+                    sym = row[0] if row else None
+                if sym:
+                    symbols.append(str(sym).strip().upper())
+    except Exception as exc:
+        # Golden Source no longer hosts public.watchlist (Trade-owned). A missing
+        # table must not fail the CronJob after platform-api union is unreachable.
+        logger.warning("watchlist DB fallback failed: %s; returning empty list", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
     return sorted(set(symbols))
 
 
@@ -285,12 +295,24 @@ WHERE srd.as_of_date = v.as_of_date AND srd.symbol = v.symbol
 
 
 def _run_readiness_refresh(conn: Any) -> int:
-    """Execute readiness UPDATE and return number of rows affected."""
-    with conn.cursor() as cur:
-        cur.execute(_READINESS_REFRESH_SQL)
-        rows = cur.rowcount if hasattr(cur, "rowcount") else 0
-    conn.commit()
-    return rows
+    """Execute readiness UPDATE and return number of rows affected.
+
+    ``public.stock_readiness_daily`` is Trade-owned and is not in Golden Source.
+    Missing-table errors are skipped so the CronJob does not BackoffLimitExceeded.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_READINESS_REFRESH_SQL)
+            rows = cur.rowcount if hasattr(cur, "rowcount") else 0
+        conn.commit()
+        return rows
+    except Exception as exc:
+        logger.warning("readiness-refresh skipped (table missing or query failed): %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
@@ -573,7 +595,23 @@ def enqueue_slot(
             "jobs": [],
         }
 
-    symbols = list(watchlist_symbols) if watchlist_symbols is not None else load_watchlist_symbols(conn, cfg)
+    # Full-market / calendar-like slots do not need the watchlist; skip the
+    # platform-api + DB lookup so a union 404 cannot fail ticker_sync / grouped EOD.
+    _slots_need_watchlist = {
+        "stock-eod",
+        "eod-pipeline",
+        "corporate",
+        "option-refresh",
+        "option-bars",
+        "minute-bars",
+        "fundamentals-rotate",
+    }
+    if watchlist_symbols is not None:
+        symbols = list(watchlist_symbols)
+    elif slot_key in _slots_need_watchlist:
+        symbols = load_watchlist_symbols(conn, cfg)
+    else:
+        symbols = []
     enqueued = 0
     deduped = 0
     jobs: list[dict[str, Any]] = []

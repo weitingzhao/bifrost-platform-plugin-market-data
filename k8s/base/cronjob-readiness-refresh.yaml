@@ -1,4 +1,6 @@
 # Readiness refresh — UPDATE stock_readiness_daily from view (UTC).
+# Suspended: public.stock_readiness_daily is Trade-owned and is not in
+# bifrost_golden_source. Re-enable after a Plugin-native readiness table exists.
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -12,6 +14,7 @@ metadata:
 spec:
   schedule: "30 23 * * *"
   timeZone: UTC
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

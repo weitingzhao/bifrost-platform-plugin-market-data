@@ -151,6 +151,8 @@ class _DailyCursor:
             self.parent._fetchall = rows
             self.parent._fetchone = None
         elif "from watchlist" in q or "from public.watchlist" in q or "select distinct symbol" in q:
+            if self.parent.raise_on_watchlist:
+                raise RuntimeError('relation "public.watchlist" does not exist')
             self.parent._fetchall = [(s,) for s in self.parent.watchlist]
             self.parent._fetchone = None
         elif "returning id" in q:
@@ -167,6 +169,8 @@ class _DailyCursor:
             self.rowcount = 2
             self.parent._fetchone = None
         elif "stock_readiness_daily" in q:
+            if self.parent.raise_on_readiness:
+                raise RuntimeError('relation "public.stock_readiness_daily" does not exist')
             self.rowcount = 2
             self.parent._fetchone = None
         else:
@@ -201,8 +205,12 @@ class _DailyConn:
         atm_snap_rows: list[dict[str, Any]] | None = None,
         vol_rows: list[dict[str, Any]] | None = None,
         atm_iv_hist: list[dict[str, Any]] | None = None,
+        raise_on_watchlist: bool = False,
+        raise_on_readiness: bool = False,
     ) -> None:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
+        self.raise_on_watchlist = raise_on_watchlist
+        self.raise_on_readiness = raise_on_readiness
         self.calendar = calendar or {}
         # (option_ticker, underlying, expiry)
         self.option_contracts = option_contracts or []
@@ -648,6 +656,38 @@ def test_readiness_refresh_commits() -> None:
         scheduler_cfg={},
     )
     assert conn.committed >= 1
+
+
+def test_watchlist_db_fallback_missing_table_returns_empty() -> None:
+    from bifrost_market_data.scheduler.daily import load_watchlist_symbols
+
+    conn = _DailyConn(raise_on_watchlist=True)
+    symbols = load_watchlist_symbols(conn, {"watchlist_source": "db"})
+    assert symbols == []
+
+
+def test_readiness_refresh_missing_table_skips() -> None:
+    conn = _DailyConn(raise_on_readiness=True)
+    result = enqueue_slot(
+        conn,
+        "readiness-refresh",
+        target_date=date(2024, 6, 20),
+        scheduler_cfg={},
+    )
+    assert result["slot"] == "readiness-refresh"
+    assert result["rows_updated"] == 0
+    assert result["enqueued"] == 0
+
+
+def test_reference_and_universe_skip_watchlist_lookup() -> None:
+    """ticker_sync / grouped EOD must succeed even if public.watchlist is gone."""
+    conn = _DailyConn(raise_on_watchlist=True)
+    ref = enqueue_slot(conn, "reference", target_date=date(2024, 6, 20), scheduler_cfg={})
+    assert ref["enqueued"] == 1
+    assert ref["jobs"][0]["kind"] == "ticker_sync"
+    uni = enqueue_slot(conn, "universe-daily", target_date=date(2024, 6, 20), scheduler_cfg={})
+    assert uni["enqueued"] == 1
+    assert uni["jobs"][0]["kind"] == "stock_daily_grouped"
 
 
 def test_enqueue_oi_gap_heal() -> None:
