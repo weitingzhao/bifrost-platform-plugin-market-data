@@ -56,6 +56,12 @@ spec:
                   name: market-data-secrets
                   key: postgres-password
                   optional: true
+            - name: MARKET_DATA_WRITE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: write-token
+                  optional: true
           ports:
             - name: http
               containerPort: 8790

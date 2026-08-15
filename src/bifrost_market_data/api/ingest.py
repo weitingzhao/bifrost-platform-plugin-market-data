@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from fastapi import APIRouter, Body, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 
-from bifrost_market_data.api.deps import iso_value, require_db, row_dict
+from bifrost_market_data.api.deps import iso_value, require_db, require_write_token, row_dict
 from bifrost_market_data.ingest import raw_handler_kinds
 from bifrost_market_data.scheduler.enqueue import insert_job
 
@@ -77,7 +77,7 @@ def get_job(conn: Any, job_id: int) -> dict[str, Any] | None:
     return _job_row_to_api({cols[i]: row[i] for i in range(len(cols))})
 
 
-@router.post("/enqueue")
+@router.post("/enqueue", dependencies=[Depends(require_write_token)])
 def enqueue_job(
     body: dict[str, Any] = Body(...),
 ) -> dict[str, Any]:
@@ -227,6 +227,62 @@ def list_ingest_jobs(
         "ok": True,
         "jobs": jobs,
         "count": len(jobs),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+@router.get("/queue-summary")
+def ingest_queue_summary() -> dict[str, Any]:
+    """Pending + running counts by kind (full queue, not latest-N jobs)."""
+    conn = require_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT kind, status, COUNT(*)::bigint AS n
+                FROM data_ops.job_ingest
+                WHERE status IN ('pending', 'running')
+                GROUP BY kind, status
+                ORDER BY kind, status
+                """
+            )
+            raw = cur.fetchall() or []
+    finally:
+        conn.close()
+    by_kind: dict[str, dict[str, int]] = {}
+    pending_total = 0
+    running_total = 0
+    for r in raw:
+        if isinstance(r, Mapping):
+            kind = str(r.get("kind") or "")
+            status = str(r.get("status") or "")
+            n = int(r.get("n") or 0)
+        else:
+            kind = str(r[0] or "")
+            status = str(r[1] or "")
+            n = int(r[2] or 0)
+        bucket = by_kind.setdefault(kind, {"pending": 0, "running": 0})
+        if status == "pending":
+            bucket["pending"] += n
+            pending_total += n
+        elif status == "running":
+            bucket["running"] += n
+            running_total += n
+    kinds = [
+        {
+            "kind": kind,
+            "pending": vals["pending"],
+            "running": vals["running"],
+            "active": vals["pending"] + vals["running"],
+        }
+        for kind, vals in sorted(by_kind.items())
+    ]
+    return {
+        "ok": True,
+        "pending": pending_total,
+        "running": running_total,
+        "active": pending_total + running_total,
+        "kinds": kinds,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 

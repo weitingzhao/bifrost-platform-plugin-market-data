@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.polygon.client import PolygonClient
@@ -177,3 +178,30 @@ def polygon_key_configured() -> bool:
         str(os.environ.get("POLYGON_API_KEY") or "").strip()
         or str(os.environ.get("MASSIVE_API_KEY") or "").strip()
     )
+
+
+def write_token_expected() -> str:
+    """Operator token for Plugin write routes (unarmed when empty)."""
+    return (
+        os.environ.get("MARKET_DATA_WRITE_TOKEN", "").strip()
+        or os.environ.get("PLUGIN_OPERATOR_TOKEN", "").strip()
+        or os.environ.get("PLATFORM_OPERATOR_TOKEN", "").strip()
+    )
+
+
+def require_write_token(request: Request) -> None:
+    """FastAPI dependency: POST/DELETE ingest requires Bearer operator token when armed.
+
+    When no token is configured, writes stay open (NetworkPolicy-only). Cluster
+    arms ``MARKET_DATA_WRITE_TOKEN`` together with Trade writer env so IB bars
+    keep working.
+    """
+    expected = write_token_expected()
+    if not expected:
+        return
+    header = request.headers.get("Authorization") or ""
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="operator token required")
+    got = header[7:].strip()
+    if len(got) != len(expected) or not hmac.compare_digest(got, expected):
+        raise HTTPException(status_code=401, detail="operator token required")

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from bifrost_market_data.api.deps import require_db
+from bifrost_market_data.api.deps import require_db, require_write_token
 
 router = APIRouter(prefix="/stocks/bars", tags=["stocks-ingest"])
 
@@ -35,7 +35,7 @@ class IngestRequest(BaseModel):
     rows: list[BarRow] = Field(..., min_length=1, max_length=50_000)
 
 
-@router.post("/ingest")
+@router.post("/ingest", dependencies=[Depends(require_write_token)])
 def ingest_bars(body: IngestRequest) -> dict[str, Any]:
     """Batch upsert OHLC bars into market.stock_daily / market.stock_minute."""
     daily_rows: list[tuple[Any, ...]] = []
@@ -68,7 +68,7 @@ def ingest_bars(body: IngestRequest) -> dict[str, Any]:
         conn.close()
 
 
-@router.delete("")
+@router.delete("", dependencies=[Depends(require_write_token)])
 def delete_bars(
     symbol: str = Query(..., description="Stock symbol"),
     delete_daily: bool = Query(False, description="Delete daily bars"),

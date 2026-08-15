@@ -6,10 +6,10 @@ import logging
 from datetime import date
 from typing import Any, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
-from bifrost_market_data.api.deps import normalize_symbol, require_db
+from bifrost_market_data.api.deps import normalize_symbol, require_db, require_write_token
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def _replace_expirations(conn: Any, symbol: str, expirations: List[str]) -> int:
     return len(expirations)
 
 
-@router.post("/expirations/replace")
+@router.post("/expirations/replace", dependencies=[Depends(require_write_token)])
 def replace_expirations(body: ReplaceExpirationsRequest) -> dict[str, Any]:
     """Atomically replace all option expirations for a symbol.
 

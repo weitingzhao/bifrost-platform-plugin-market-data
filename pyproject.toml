@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bifrost-market-data"
-version = "0.3.1"
+version = "0.3.2"
 description = "Bifrost Market Data Subcontractor — Polygon.io ingestion into market.* / data_ops.* schemas"
 readme = "README.md"
 requires-python = ">=3.11"

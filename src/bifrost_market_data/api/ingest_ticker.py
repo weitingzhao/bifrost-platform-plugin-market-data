@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from bifrost_market_data.api.deps import require_db
+from bifrost_market_data.api.deps import require_db, require_write_token
 
 router = APIRouter(prefix="/reference/ticker", tags=["reference-ingest"])
 
@@ -225,7 +225,7 @@ def _upsert_overview(conn: Any, body: TickerOverviewBody) -> bool:
 # -- routes -----------------------------------------------------------------
 
 
-@router.post("/upsert")
+@router.post("/upsert", dependencies=[Depends(require_write_token)])
 def upsert_ticker(body: TickerUpsertBody) -> dict[str, Any]:
     """UPSERT a single ticker into ``market.ticker``."""
     sym = _normalize_symbol(body.symbol)
@@ -241,7 +241,7 @@ def upsert_ticker(body: TickerUpsertBody) -> dict[str, Any]:
         conn.close()
 
 
-@router.post("/upsert-batch")
+@router.post("/upsert-batch", dependencies=[Depends(require_write_token)])
 def upsert_ticker_batch(body: TickerBatchUpsertBody) -> dict[str, Any]:
     """Batch UPSERT tickers into ``market.ticker``."""
     if not body.tickers:
@@ -256,7 +256,7 @@ def upsert_ticker_batch(body: TickerBatchUpsertBody) -> dict[str, Any]:
         conn.close()
 
 
-@router.post("/upsert-overview")
+@router.post("/upsert-overview", dependencies=[Depends(require_write_token)])
 def upsert_ticker_overview(body: TickerOverviewBody) -> dict[str, Any]:
     """Merge overview fields into ``market.ticker`` (COALESCE/NULLIF semantics)."""
     sym = _normalize_symbol(body.symbol)
