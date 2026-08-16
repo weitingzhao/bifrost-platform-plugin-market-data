@@ -70,6 +70,11 @@ spec:
               mountPath: /config/market-data.yaml
               subPath: market-data.yaml
               readOnly: true
+            # Overlay ships X-Market-Data-Write-Token on image 0.3.2 until 0.3.3 is imported.
+            - name: write-auth-deps
+              mountPath: /usr/local/lib/python3.11/site-packages/bifrost_market_data/api/deps.py
+              subPath: deps.py
+              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -97,3 +102,6 @@ spec:
         - name: config
           configMap:
             name: market-data-config
+        - name: write-auth-deps
+          configMap:
+            name: market-data-write-auth-deps

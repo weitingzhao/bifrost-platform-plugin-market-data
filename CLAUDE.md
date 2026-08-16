@@ -50,6 +50,8 @@ make db-init              # schema apply (+ best-effort roles)
 make apply-roles          # create_roles.sql (needs elevated PG role)
 make run-api              # Plugin API on :8790
 make verify-market-data   # P6: K8s deploy + health + CronJobs + platform probe
+make sync-platform-write-token  # copy write-token → platform-stg/prod for Console enqueue
+make sync-write-auth-overlay    # ConfigMap overlay of deps.py (X-Market-Data-Write-Token on image 0.3.2)
 ```
 
 ## 修改纪律

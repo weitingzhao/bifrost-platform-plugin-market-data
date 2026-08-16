@@ -180,6 +180,9 @@ def polygon_key_configured() -> bool:
     )
 
 
+WRITE_TOKEN_HEADER = "X-Market-Data-Write-Token"
+
+
 def write_token_expected() -> str:
     """Operator token for Plugin write routes (unarmed when empty)."""
     return (
@@ -189,8 +192,24 @@ def write_token_expected() -> str:
     )
 
 
+def presented_write_token(request: Request) -> str:
+    """Token from Console proxy header (preferred) or Authorization Bearer.
+
+    platform-api on a Mac uses the Kubernetes API service proxy, which replaces
+    Authorization with the kube token. The proxy therefore also sends
+    ``X-Market-Data-Write-Token``. Trade writers still use Bearer.
+    """
+    extra = (request.headers.get(WRITE_TOKEN_HEADER) or "").strip()
+    if extra:
+        return extra
+    header = request.headers.get("Authorization") or ""
+    if header.startswith("Bearer "):
+        return header[7:].strip()
+    return ""
+
+
 def require_write_token(request: Request) -> None:
-    """FastAPI dependency: POST/DELETE ingest requires Bearer operator token when armed.
+    """FastAPI dependency: POST/DELETE ingest requires operator token when armed.
 
     When no token is configured, writes stay open (NetworkPolicy-only). Cluster
     arms ``MARKET_DATA_WRITE_TOKEN`` together with Trade writer env so IB bars
@@ -199,9 +218,8 @@ def require_write_token(request: Request) -> None:
     expected = write_token_expected()
     if not expected:
         return
-    header = request.headers.get("Authorization") or ""
-    if not header.startswith("Bearer "):
+    got = presented_write_token(request)
+    if not got:
         raise HTTPException(status_code=401, detail="operator token required")
-    got = header[7:].strip()
     if len(got) != len(expected) or not hmac.compare_digest(got, expected):
         raise HTTPException(status_code=401, detail="operator token required")

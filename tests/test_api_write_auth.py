@@ -53,6 +53,21 @@ def test_write_armed_with_token_passes_auth(monkeypatch) -> None:
     assert resp.status_code == 422
 
 
+def test_write_armed_with_proxy_header_passes_auth_when_authorization_is_kube_token(monkeypatch) -> None:
+    monkeypatch.setenv("MARKET_DATA_WRITE_TOKEN", "secret-op")
+    client = TestClient(create_app())
+    resp = client.post(
+        "/market/ingest/enqueue",
+        headers={
+            "Authorization": "Bearer kube-apiserver-token",
+            "X-Market-Data-Write-Token": "secret-op",
+        },
+        json={"kind": "__qa_auth_probe__", "payload": {}},
+    )
+    # Auth passed via X-header; kind is invalid → 400 not 401.
+    assert resp.status_code == 400
+
+
 def test_write_armed_wrong_token_is_401(monkeypatch) -> None:
     monkeypatch.setenv("MARKET_DATA_WRITE_TOKEN", "secret-op")
     client = TestClient(create_app())

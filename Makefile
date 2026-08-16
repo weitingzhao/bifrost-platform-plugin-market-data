@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry apply-roles run-api kustomize-check verify-market-data
+.PHONY: install-dev test lint db-init db-init-dry apply-roles run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay
 
 install-dev:
 	pip install -e ".[dev]"
@@ -27,3 +27,11 @@ kustomize-check:
 
 verify-market-data:
 	bash scripts/verify-market-data.sh
+
+sync-platform-write-token:
+	bash scripts/sync-platform-write-token.sh
+
+sync-write-auth-overlay:
+	kubectl -n plugin-market-data create configmap market-data-write-auth-deps \
+	  --from-file=deps.py=src/bifrost_market_data/api/deps.py \
+	  --dry-run=client -o yaml | kubectl apply -f -
