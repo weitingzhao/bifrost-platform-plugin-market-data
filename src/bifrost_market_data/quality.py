@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from bifrost_market_data.scheduler.daily import DEFAULT_WATCHLIST_QUERY, load_watchlist_symbols
+from bifrost_market_data.scheduler.daily import resolve_watchlist_symbols_for_coverage
 
 # Acceptance thresholds (program YAML)
 STOCK_DAILY_MIN_SYMBOLS = 4000
@@ -82,7 +82,7 @@ def check_stock_daily_coverage(
     symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
-        else load_watchlist_symbols(conn, {"watchlist_query": DEFAULT_WATCHLIST_QUERY})
+        else resolve_watchlist_symbols_for_coverage(conn)
     )
     trading_days = fetch_recent_trading_days(conn, lookback_days)
     gaps: list[dict[str, Any]] = []
@@ -144,7 +144,7 @@ def check_option_snapshot_coverage(
     symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
-        else load_watchlist_symbols(conn, {"watchlist_query": DEFAULT_WATCHLIST_QUERY})
+        else resolve_watchlist_symbols_for_coverage(conn)
     )
     trading_days = fetch_recent_trading_days(conn, 2, as_of=as_of)
     if not trading_days:
@@ -205,7 +205,7 @@ def check_option_oi_coverage(
     symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
-        else load_watchlist_symbols(conn, {"watchlist_query": DEFAULT_WATCHLIST_QUERY})
+        else resolve_watchlist_symbols_for_coverage(conn)
     )
     trading_days = fetch_recent_trading_days(conn, lookback_days, as_of=as_of)
     gaps: list[dict[str, Any]] = []
@@ -345,16 +345,21 @@ def run_all_checks(
     max_age_hours: float = FRESHNESS_MAX_AGE_HOURS,
 ) -> dict[str, Any]:
     """Run all P7 quality checks. Returns report with ``ok`` aggregate flag."""
+    symbols = (
+        list(watchlist_symbols)
+        if watchlist_symbols is not None
+        else resolve_watchlist_symbols_for_coverage(conn)
+    )
     stock = check_stock_daily_coverage(
         conn,
         min_symbols=min_symbols,
         lookback_days=lookback_days,
-        watchlist_symbols=watchlist_symbols,
+        watchlist_symbols=symbols,
     )
-    snaps = check_option_snapshot_coverage(conn, watchlist_symbols=watchlist_symbols)
+    snaps = check_option_snapshot_coverage(conn, watchlist_symbols=symbols)
     oi = check_option_oi_coverage(
         conn,
-        watchlist_symbols=watchlist_symbols,
+        watchlist_symbols=symbols,
         lookback_days=lookback_days,
     )
     fresh = check_freshness(conn, max_age_hours=max_age_hours)
@@ -364,4 +369,5 @@ def run_all_checks(
         "ok": ok,
         "checks": checks,
         "summary": "PASS" if ok else "FAIL",
+        "watchlist_source_count": len(symbols),
     }

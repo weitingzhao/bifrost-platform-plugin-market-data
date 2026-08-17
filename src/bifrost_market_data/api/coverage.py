@@ -18,6 +18,7 @@ from bifrost_market_data.api.deps import (
     table_exists,
 )
 from bifrost_market_data.quality import run_all_checks
+from bifrost_market_data.scheduler.daily import resolve_watchlist_with_source
 
 router = APIRouter(prefix="/coverage", tags=["coverage"])
 
@@ -54,14 +55,7 @@ def _analytics_metric_summary(conn: Any, table: str) -> dict[str, Any] | None:
 
 def query_inventory(conn: Any) -> dict[str, Any]:
     """One-glance inventory: breadth × depth × analytics scope (watchlist-bound)."""
-    watchlist_symbols = _fetch_watchlist_symbols(conn, limit=200)
-    scope = (
-        "watchlist"
-        if table_exists(conn, "public", "watchlist") and watchlist_symbols
-        else "option_contract_underlyings"
-        if watchlist_symbols
-        else "empty"
-    )
+    watchlist_symbols, scope = resolve_watchlist_with_source(conn, limit=200)
 
     stock_daily: dict[str, Any] | None = None
     if table_exists(conn, "market", "stock_daily"):
@@ -221,53 +215,13 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
 
 
 def _fetch_watchlist_symbols(conn: Any, *, limit: int = 80) -> list[str]:
-    if table_exists(conn, "public", "watchlist"):
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT UPPER(TRIM(symbol)) AS sym
-                    FROM public.watchlist
-                    WHERE TRIM(COALESCE(symbol, '')) <> ''
-                    ORDER BY sym
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
-                rows = cur.fetchall() or []
-            out = []
-            for row in rows:
-                sym = row[0] if not isinstance(row, dict) else row.get("sym")
-                if sym:
-                    out.append(str(sym).strip().upper())
-            if out:
-                return out
-        except Exception:
-            pass
-
-    if not table_exists(conn, "market", "option_contract"):
-        return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT UPPER(TRIM(underlying)) AS sym, COUNT(*)::bigint AS n
-                FROM market.option_contract
-                GROUP BY UPPER(TRIM(underlying))
-                ORDER BY n DESC, sym ASC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cur.fetchall() or []
-        return [str(r[0]).strip().upper() for r in rows if r and r[0]]
-    except Exception:
-        return []
+    """Prefer platform-api union (schedule.yaml); fall back to option underlyings."""
+    symbols, _source = resolve_watchlist_with_source(conn, limit=limit)
+    return symbols
 
 
 def query_watchlist_coverage(conn: Any, *, limit: int = 80) -> dict[str, Any]:
-    syms = _fetch_watchlist_symbols(conn, limit=limit)
-    source = "public.watchlist" if table_exists(conn, "public", "watchlist") else "option_contract_underlyings"
+    syms, source = resolve_watchlist_with_source(conn, limit=limit)
     symbols_out: list[dict[str, Any]] = []
     if syms and table_exists(conn, "market", "option_contract"):
         try:

@@ -210,6 +210,83 @@ def load_watchlist_symbols(
     return sorted(set(symbols))
 
 
+def _option_contract_underlyings(conn: Any, *, limit: int = 200) -> list[str]:
+    """Fallback symbol set when Trade watchlist is not on Golden Source."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT UPPER(TRIM(underlying)) AS sym
+                FROM market.option_contract
+                WHERE TRIM(COALESCE(underlying, '')) <> ''
+                GROUP BY UPPER(TRIM(underlying))
+                ORDER BY COUNT(*) DESC, sym ASC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:
+        logger.warning("option_contract underlyings fallback failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+    out: list[str] = []
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym = row.get("sym") or next(iter(row.values()), None)
+        else:
+            sym = row[0] if row else None
+        if sym:
+            out.append(str(sym).strip().upper())
+    return sorted(set(out))
+
+
+def resolve_watchlist_symbols_for_coverage(
+    conn: Any,
+    *,
+    limit: int = 200,
+    scheduler_cfg: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Resolve coverage/quality watchlist; see ``resolve_watchlist_with_source``."""
+    symbols, _source = resolve_watchlist_with_source(
+        conn, limit=limit, scheduler_cfg=scheduler_cfg
+    )
+    return symbols
+
+
+def resolve_watchlist_with_source(
+    conn: Any,
+    *,
+    limit: int = 200,
+    scheduler_cfg: Mapping[str, Any] | None = None,
+) -> tuple[list[str], str]:
+    """Resolve coverage/quality watchlist the same way CronJobs do.
+
+    Order:
+    1. ``schedule.yaml`` scheduler block (``watchlist_source: platform-api`` union)
+    2. DB ``public.watchlist`` (usually absent on Golden Source)
+    3. ``market.option_contract`` underlyings (inventory-compatible fallback)
+
+    Returns ``(symbols, source)`` where source is ``watchlist``,
+    ``option_contract_underlyings``, or ``empty``.
+    """
+    if scheduler_cfg is None:
+        raw = load_schedule()
+        sched = raw.get("scheduler") if isinstance(raw, dict) else {}
+        scheduler_cfg = sched if isinstance(sched, dict) else {}
+    symbols = load_watchlist_symbols(conn, scheduler_cfg)
+    if symbols:
+        clipped = symbols[: int(limit)] if limit else symbols
+        return clipped, "watchlist"
+    fallback = _option_contract_underlyings(conn, limit=limit)
+    if fallback:
+        return fallback, "option_contract_underlyings"
+    return [], "empty"
+
+
 def union_iv_radar_benchmarks(
     symbols: Sequence[str],
     scheduler_cfg: Mapping[str, Any] | None = None,

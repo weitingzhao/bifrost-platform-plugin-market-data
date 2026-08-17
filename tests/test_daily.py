@@ -666,6 +666,53 @@ def test_watchlist_db_fallback_missing_table_returns_empty() -> None:
     assert symbols == []
 
 
+def test_resolve_watchlist_option_contract_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When platform-api/DB watchlist is empty, fall back to option underlyings."""
+    from bifrost_market_data.scheduler import daily as daily_mod
+
+    monkeypatch.setattr(
+        daily_mod,
+        "load_watchlist_symbols",
+        lambda _conn, _cfg: [],
+    )
+
+    class _Conn:
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, q, params=None):
+            self._q = q
+
+        def fetchall(self):
+            return [("SPY",), ("QQQ",)]
+
+        def rollback(self):
+            pass
+
+    symbols, source = daily_mod.resolve_watchlist_with_source(_Conn(), limit=10)
+    assert source == "option_contract_underlyings"
+    assert symbols == ["QQQ", "SPY"]
+
+
+def test_resolve_watchlist_prefers_loaded_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bifrost_market_data.scheduler import daily as daily_mod
+
+    monkeypatch.setattr(
+        daily_mod,
+        "load_watchlist_symbols",
+        lambda _conn, _cfg: ["MU", "TSLA"],
+    )
+    symbols, source = daily_mod.resolve_watchlist_with_source(object(), limit=10)
+    assert source == "watchlist"
+    assert symbols == ["MU", "TSLA"]
+
+
 def test_readiness_refresh_missing_table_skips() -> None:
     conn = _DailyConn(raise_on_readiness=True)
     result = enqueue_slot(
