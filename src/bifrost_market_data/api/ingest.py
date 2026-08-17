@@ -287,6 +287,21 @@ def ingest_queue_summary() -> dict[str, Any]:
     }
 
 
+@router.get("/queue-dashboard")
+def ingest_queue_dashboard(
+    grace_minutes: int = Query(45, ge=5, le=240),
+) -> dict[str, Any]:
+    """Queue composition + Cron schedule plan + plan-vs-actual adherence."""
+    from bifrost_market_data.api.ingest_dashboard import build_queue_dashboard
+
+    conn = require_db()
+    try:
+        return build_queue_dashboard(conn, grace_minutes=int(grace_minutes))
+    finally:
+        conn.close()
+
+
+
 @router.get("/kinds")
 def list_ingest_kinds() -> dict[str, Any]:
     """List worker handler kinds accepted by POST /market/ingest/enqueue."""
