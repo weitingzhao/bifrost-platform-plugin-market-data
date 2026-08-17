@@ -1,9 +1,5 @@
 user default off
-# polygon-ws: full write on massive:* keys + health hash
 user polygon-ws on >POLYGON_WS_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@all
-# trade-prod: read-only (quote keys + health + stream)
 user trade-prod on >TRADE_PROD_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list
-# trade-dev: read-only observe
 user trade-dev on >TRADE_DEV_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list
-# platform: probe + read
 user platform on >PLATFORM_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list
