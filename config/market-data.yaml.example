@@ -16,6 +16,32 @@ postgres:
 redis:
   url: redis://localhost:6379/0
 
+# Polygon Options WebSocket ingestor — writes to shared redis-massive bus.
+polygon_ws:
+  ws_url: wss://socket.polygon.io/options
+  tier: starter            # starter | developer (WS needs developer for AM/T events)
+  ws_enabled: false        # set true after upgrading to Options Developer+
+  trades_enabled: false    # T.O: events (developer tier only)
+
+# Shared Redis for Polygon WS quotes (data NS, symmetric to redis-ib).
+# Override via REDIS_MASSIVE_HOST / REDIS_MASSIVE_PORT / REDIS_MASSIVE_PASSWORD env.
+redis_massive:
+  host: redis-massive
+  port: 6379
+  db: 0
+  # username: polygon-ws
+  # password: ""          # set via REDIS_MASSIVE_PASSWORD env
+
+# Watchlist PG — the WS ingestor queries watchlist from a Trade env database.
+# Override via WATCHLIST_PG_HOST / WATCHLIST_PG_DB / WATCHLIST_PG_PASSWORD env.
+# Future: replace with platform-api watchlist union API.
+watchlist_pg:
+  host: 192.168.10.73
+  port: 30432
+  dbname: bifrost_dev
+  user: data_writer
+  password: ""            # set via WATCHLIST_PG_PASSWORD env
+
 worker:
   pool: stocks           # stocks | options
   concurrency: 4

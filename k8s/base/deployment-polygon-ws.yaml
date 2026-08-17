@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polygon-ws-ingestor
+  labels:
+    app.kubernetes.io/name: polygon-ws-ingestor
+    bifrost.market-data/component: ws-ingestor
+  annotations:
+    bifrost.dev/session: "true"
+    bifrost.dev/session-name: polygon-ws-ingestor
+    bifrost.dev/session-label: Polygon Options WS
+    bifrost.dev/session-group: market-data
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: polygon-ws-ingestor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: polygon-ws-ingestor
+        bifrost.market-data/component: ws-ingestor
+        app.kubernetes.io/part-of: bifrost-market-data
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: ingestor
+          image: bifrost-market-data:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["python", "scripts/run_polygon_ws.py"]
+          env:
+            - name: MARKET_DATA_CONFIG
+              value: /config/market-data.yaml
+            - name: POLYGON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: polygon-api-key
+                  optional: true
+            - name: REDIS_MASSIVE_HOST
+              value: redis-massive
+            - name: REDIS_MASSIVE_PORT
+              value: "6379"
+            - name: REDIS_MASSIVE_USERNAME
+              value: polygon-ws
+            - name: REDIS_MASSIVE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-massive-ws-secret
+                  key: password
+                  optional: true
+            - name: WATCHLIST_PG_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-host
+                  optional: true
+            - name: WATCHLIST_PG_DB
+              value: bifrost_dev
+            - name: WATCHLIST_PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-user
+                  optional: true
+            - name: WATCHLIST_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-password
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /config/market-data.yaml
+              subPath: market-data.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: market-data-config

@@ -1,0 +1,41 @@
+# redis-massive ingress — Plugin NS + Trade NS + Platform NS + same-namespace pods.
+# ACL enforces write isolation (trade-dev/trade-prod read-only).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-massive-ingress
+  labels:
+    app.kubernetes.io/name: redis-massive
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis-massive
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: plugin-market-data
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-dev
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-stg
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-prod
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-platform-stg
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost-platform-prod
+      ports:
+        - protocol: TCP
+          port: 6379

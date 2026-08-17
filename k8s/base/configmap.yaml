@@ -21,6 +21,21 @@ data:
       password: ""
     redis:
       url: redis://redis-dev.data.svc.cluster.local:6379/0
+    polygon_ws:
+      ws_url: wss://socket.polygon.io/options
+      tier: starter
+      ws_enabled: false
+      trades_enabled: false
+    redis_massive:
+      host: redis-massive
+      port: 6379
+      db: 0
+    watchlist_pg:
+      host: bifrost-postgres-rw.data.svc.cluster.local
+      port: 5432
+      dbname: bifrost_dev
+      user: data_writer
+      password: ""
     worker:
       pool: stocks
       concurrency: 4

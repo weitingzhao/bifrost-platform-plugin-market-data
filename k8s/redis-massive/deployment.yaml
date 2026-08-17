@@ -1,0 +1,67 @@
+# Shared Polygon options data bus — ephemeral (no AOF/RDB).
+# All keys rebuild from Polygon WS via polygon-ws-ingestor.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-massive
+  labels:
+    app.kubernetes.io/name: redis-massive
+    bifrost.io/redis-role: massive-data
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-massive
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-massive
+        bifrost.io/redis-role: massive-data
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+          args:
+            - --maxmemory
+            - "256mb"
+            - --maxmemory-policy
+            - allkeys-lru
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --aclfile
+            - /etc/redis/acl.conf
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: acl
+              mountPath: /etc/redis
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 300Mi
+      volumes:
+        - name: acl
+          secret:
+            secretName: redis-massive-acl

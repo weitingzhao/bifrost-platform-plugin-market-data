@@ -1,0 +1,16 @@
+# Trade prod — short name redis-massive → data NS
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-massive
+  namespace: bifrost-prod
+  labels:
+    app.kubernetes.io/name: redis-massive
+    bifrost.io/external-alias: "true"
+spec:
+  type: ExternalName
+  externalName: redis-massive.data.svc.cluster.local
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
