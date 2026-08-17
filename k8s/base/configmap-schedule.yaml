@@ -65,7 +65,7 @@ data:
           priority: 4
         oi-gap-heal:
           cron: "0 4 * * 6"
-          lookback_days: 14
+          lookback_days: 30
         max-pain:
           cron: "45 22 * * *"
           lookback_days: 3

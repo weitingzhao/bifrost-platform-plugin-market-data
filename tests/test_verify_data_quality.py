@@ -32,6 +32,9 @@ class _QCur:
         elif "from market.stock_daily" in q and "bar_date" in q:
             self._rows = list(self.parent.stock_daily_rows)
             self._one = None
+        elif "from market.option_contract" in q:
+            self._rows = [(u,) for u in self.parent.optionable_underlyings]
+            self._one = None
         elif "from market.option_snapshot" in q:
             self._rows = [(u,) for u in self.parent.snapshot_underlyings]
             self._one = None
@@ -79,6 +82,7 @@ class _QConn:
             ("MSFT", date(2024, 6, 19)),
             ("MSFT", date(2024, 6, 20)),
         ]
+        self.optionable_underlyings = ["AAPL", "MSFT"]
         self.snapshot_underlyings = ["AAPL", "MSFT"]
         self.oi_rows: list[tuple[str, date]] = [
             ("AAPL", date(2024, 6, 18)),
@@ -162,6 +166,21 @@ def test_option_snapshot_coverage_missing() -> None:
     )
     assert result["ok"] is False
     assert "MSFT" in result["missing_sample"]
+
+
+def test_option_snapshot_skips_equity_only() -> None:
+    """Symbols with zero option_contract rows must not fail snapshot acceptance."""
+    conn = _QConn()
+    conn.optionable_underlyings = ["AAPL"]
+    conn.snapshot_underlyings = ["AAPL"]
+    result = check_option_snapshot_coverage(
+        conn,
+        watchlist_symbols=["AAPL", "SATS"],
+        as_of=date(2024, 6, 20),
+    )
+    assert result["ok"] is True
+    assert result["skipped_non_optionable"] == 1
+    assert result["missing_count"] == 0
 
 
 def test_option_oi_coverage_pass() -> None:

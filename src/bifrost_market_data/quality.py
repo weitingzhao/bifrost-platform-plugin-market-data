@@ -70,6 +70,62 @@ def fetch_recent_trading_days(conn: Any, n: int, *, as_of: date | None = None) -
     return sorted(out)
 
 
+def fetch_completed_trading_days(
+    conn: Any,
+    n: int,
+    *,
+    as_of: date | None = None,
+) -> list[date]:
+    """Return ``n`` most recent *completed* sessions for gap acceptance.
+
+    When ``as_of`` is omitted (live probe), the calendar ``today`` is still an
+    open session — EOD bars/OI are not expected yet — so it is excluded.
+    Explicit historical ``as_of`` keeps that date in the window (tests / backfill).
+    """
+    today = datetime.now(timezone.utc).date()
+    end = as_of or today
+    live_probe = as_of is None or as_of >= today
+    days = fetch_recent_trading_days(conn, n + (1 if live_probe else 0), as_of=end)
+    if live_probe and days and days[-1] == end:
+        days = days[:-1]
+    if len(days) > n:
+        days = days[-n:]
+    return days
+
+
+def filter_optionable_underlyings(conn: Any, symbols: Sequence[str]) -> list[str]:
+    """Watchlist symbols that have ≥1 row in ``market.option_contract``.
+
+    Equity-only names (e.g. SATS with zero contracts) must not fail option
+    snapshot / OI acceptance.
+    """
+    syms = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+    if not syms:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT UPPER(TRIM(underlying)) AS und
+                FROM market.option_contract
+                WHERE UPPER(TRIM(underlying)) = ANY(%s)
+                """,
+                (syms,),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception:
+        return syms
+    found: set[str] = set()
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            und = row.get("und") or next(iter(row.values()), None)
+        else:
+            und = row[0] if row else None
+        if und:
+            found.add(str(und).strip().upper())
+    return [s for s in syms if s in found]
+
+
 def check_stock_daily_coverage(
     conn: Any,
     *,
@@ -84,7 +140,7 @@ def check_stock_daily_coverage(
         if watchlist_symbols is not None
         else resolve_watchlist_symbols_for_coverage(conn)
     )
-    trading_days = fetch_recent_trading_days(conn, lookback_days)
+    trading_days = fetch_completed_trading_days(conn, lookback_days)
     gaps: list[dict[str, Any]] = []
 
     if symbols and trading_days:
@@ -140,23 +196,22 @@ def check_option_snapshot_coverage(
     watchlist_symbols: Sequence[str] | None = None,
     as_of: date | None = None,
 ) -> dict[str, Any]:
-    """Watchlist underlyings should have a snapshot on the latest trading day."""
-    symbols = (
+    """Optionable watchlist underlyings should have a snapshot on the last completed session."""
+    raw_symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
         else resolve_watchlist_symbols_for_coverage(conn)
     )
-    trading_days = fetch_recent_trading_days(conn, 2, as_of=as_of)
+    symbols = filter_optionable_underlyings(conn, raw_symbols)
+    trading_days = fetch_completed_trading_days(conn, 1, as_of=as_of)
     if not trading_days:
         return {
             "check": "option_snapshot_coverage",
             "ok": False,
             "missing": list(symbols),
-            "detail": "no trading day available",
+            "detail": "no completed trading day available",
         }
-    # Prefer second-to-last trading day (last fully completed session);
-    # if only one day is available, fall back to it.
-    target = trading_days[-2] if len(trading_days) >= 2 else trading_days[-1]
+    target = trading_days[-1]
     # Snapshots use timestamptz; match NY calendar day via date(snapshot_ts AT TIME ZONE 'America/New_York')
     missing: list[str] = []
     if symbols:
@@ -179,17 +234,24 @@ def check_option_snapshot_coverage(
                 found.add(str(row[0] or "").upper())
         missing = [s for s in symbols if s not in found]
 
-    ok = len(symbols) > 0 and len(missing) == 0
+    skipped = len(raw_symbols) - len(symbols)
+    if len(raw_symbols) > 0 and len(symbols) == 0:
+        ok = True  # equity-only watchlist: option checks N/A
+    else:
+        ok = len(missing) == 0 and (len(symbols) > 0 or len(raw_symbols) == 0)
     return {
         "check": "option_snapshot_coverage",
         "ok": ok,
         "target_date": target.isoformat(),
-        "watchlist_symbols": len(symbols),
+        "watchlist_symbols": len(raw_symbols),
+        "optionable_symbols": len(symbols),
+        "skipped_non_optionable": skipped,
         "missing_count": len(missing),
         "missing_sample": missing[:20],
         "detail": (
             f"target={target.isoformat()}; "
-            f"missing={len(missing)}/{len(symbols)} watchlist underlyings"
+            f"missing={len(missing)}/{len(symbols)} optionable "
+            f"(skipped {skipped} equity-only)"
         ),
     }
 
@@ -201,13 +263,14 @@ def check_option_oi_coverage(
     lookback_days: int = 14,
     as_of: date | None = None,
 ) -> dict[str, Any]:
-    """Watchlist underlyings should have ≥1 OI row per recent trading day."""
-    symbols = (
+    """Optionable underlyings should have ≥1 OI row per completed trading day."""
+    raw_symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
         else resolve_watchlist_symbols_for_coverage(conn)
     )
-    trading_days = fetch_recent_trading_days(conn, lookback_days, as_of=as_of)
+    symbols = filter_optionable_underlyings(conn, raw_symbols)
+    trading_days = fetch_completed_trading_days(conn, lookback_days, as_of=as_of)
     gaps: list[dict[str, Any]] = []
 
     if symbols and trading_days:
@@ -241,16 +304,23 @@ def check_option_oi_coverage(
                 if (sym, d) not in present:
                     gaps.append({"underlying": sym, "trade_date": d.isoformat()})
 
-    ok = len(symbols) > 0 and len(gaps) == 0
+    skipped = len(raw_symbols) - len(symbols)
+    if len(raw_symbols) > 0 and len(symbols) == 0:
+        ok = True
+    else:
+        ok = len(symbols) > 0 and len(gaps) == 0
     return {
         "check": "option_oi_coverage",
         "ok": ok,
-        "watchlist_symbols": len(symbols),
+        "watchlist_symbols": len(raw_symbols),
+        "optionable_symbols": len(symbols),
+        "skipped_non_optionable": skipped,
         "trading_days": [d.isoformat() for d in trading_days],
         "gap_count": len(gaps),
         "gaps_sample": gaps[:20],
         "detail": (
-            f"gaps={len(gaps)} over {len(trading_days)} trading days × {len(symbols)} watchlist"
+            f"gaps={len(gaps)} over {len(trading_days)} trading days × "
+            f"{len(symbols)} optionable (skipped {skipped} equity-only)"
         ),
     }
 
