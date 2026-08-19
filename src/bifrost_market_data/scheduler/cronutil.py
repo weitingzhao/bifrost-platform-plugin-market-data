@@ -8,7 +8,6 @@ Does not implement full cron semantics (lists/ranges beyond ``*/N``).
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
 
 
 def _parse_field(field: str, minimum: int, maximum: int) -> set[int] | None:
