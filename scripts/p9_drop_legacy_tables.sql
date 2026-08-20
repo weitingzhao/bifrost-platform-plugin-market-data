@@ -21,11 +21,13 @@
 -- NOT dropped (Trade / Research owned):
 --   stock_readiness_daily, cache_stock_snapshot, report_option_*,
 --   option_trades, ticker_types,
---   ticker_related_tickers (retained; symbol-keyed via from_symbol — no FK to tickers),
 --   job_bars_backfill, job_sepa_phase4, watchlist
 --
--- Dropped in this holiday migration wave:
+-- Dropped in holiday migration wave:
 --   reference_us_holidays → market.us_market_holiday (Golden Source)
+--
+-- Dropped in related-tickers migration wave:
+--   ticker_related_tickers → market.ticker_related (Golden Source / FDW)
 
 BEGIN;
 
@@ -42,6 +44,8 @@ DROP TABLE IF EXISTS public.ticker_overview CASCADE;
 DROP TABLE IF EXISTS public.massive_corporate_action CASCADE;
 DROP TABLE IF EXISTS public.job_massive_backfill CASCADE;
 DROP TABLE IF EXISTS public.reference_us_holidays CASCADE;
+DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE;
+DROP TABLE IF EXISTS public.stock_related_tickers CASCADE;
 
 -- Legacy flat fundamentals (names vary by historical DDL; IF EXISTS is safe)
 DROP TABLE IF EXISTS public.stock_financial_balance_sheet CASCADE;

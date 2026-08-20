@@ -422,6 +422,31 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
+    # --- ticker_related (Polygon related-companies; replaces public.ticker_related_tickers) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.ticker_related (
+            from_symbol  text        NOT NULL,
+            to_symbol    text        NOT NULL,
+            rank         integer     NOT NULL DEFAULT 0,
+            fetched_at   timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (from_symbol, to_symbol)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ticker_related_from
+        ON market.ticker_related (from_symbol)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ticker_related_to
+        ON market.ticker_related (to_symbol)
+        """
+    )
+
 
 def _create_market_analytics_tables(cur: _Cursor) -> None:
     # --- max_pain_daily (RANGE by month on trade_date) ---
@@ -784,6 +809,7 @@ MARKET_TABLES: tuple[str, ...] = (
     "stock_financials",
     "corporate_action",
     "us_market_holiday",
+    "ticker_related",
 )
 
 MARKET_ANALYTICS_TABLES: tuple[str, ...] = (

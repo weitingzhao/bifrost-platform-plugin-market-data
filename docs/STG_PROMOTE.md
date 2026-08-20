@@ -21,12 +21,13 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 | Step | Status |
 |------|--------|
 | `market` / `data_ops` DDL (`POSTGRES_DB=bifrost_stg`) | done |
-| `ticker_related_tickers` → `from_symbol` | done |
+| `public.ticker_related_tickers` → `market.ticker_related` (Golden Source) | done (2026-08-19) |
 | `scripts/create_roles.sql` | done |
 | `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`) |
 | STG workers consume `ticker_sync` | after overlay apply |
 | Daily `reference` CronJob (`ticker_sync` universe) | schedule `30 21 * * *` UTC |
 | Daily `fundamentals-rotate` CronJob (`financials` batch_size=40) | schedule `0 3 * * *` UTC; skip non-trading days |
+| Daily `related-rotate` CronJob (`ticker_related` batch_size=40) | schedule `30 22 * * *` UTC; skip non-trading days |
 
 ### 养库 SLA（dev / analysis base）
 

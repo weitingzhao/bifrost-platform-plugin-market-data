@@ -241,6 +241,27 @@ The retired flat table `data_ops.us_trading_calendar` is dropped by DDL.
 
 Trade consumers read this table via FDW (`market.us_market_holiday`).
 
+### `market.ticker_related`
+
+Polygon related-companies peers (`GET /v1/related-companies/{ticker}`).
+Replaces Trade-owned `public.ticker_related_tickers`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| from_symbol | text | PK part; source ticker |
+| to_symbol | text | PK part; peer ticker |
+| rank | integer | API `results[]` order (0-based) |
+| fetched_at | timestamptz | default `now()` |
+
+**PK:** `(from_symbol, to_symbol)`  
+**Indexes:** `(from_symbol)`, `(to_symbol)`
+
+Ingest kind `ticker_related` (one symbol per job) deletes existing peers for
+`from_symbol` then upserts the fresh set. Scheduler slot `related-rotate`
+rotates watchlist symbols daily (`batch_size` default 40).
+
+Trade consumers read this table via FDW (`market.ticker_related`).
+
 ---
 
 ## `market_analytics` tables
@@ -453,7 +474,7 @@ FastAPI app: `src/bifrost_market_data/api/app.py`. OpenAPI at `/docs`.
 - `stock_readiness_daily`, `cache_stock_snapshot`
 - Legacy `report_option_max_pain_daily` / `report_option_atm_iv_daily` (replaced by `market_analytics.*`)
 - `option_trades` (Developer tier)
-- `ticker_types`, `ticker_related_tickers`
+- `ticker_types`
 - `job_bars_backfill`, `job_sepa_phase4`, IB bars paths
 
 ---

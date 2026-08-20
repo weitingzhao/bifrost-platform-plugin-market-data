@@ -29,9 +29,9 @@ kubectl -n data cp stocks/backups/bifrost_prod_pre_p9_20260730T230317Z.dump \
 | Step | Status |
 |------|--------|
 | `scripts/init_schema.py` (`POSTGRES_DB=bifrost_prod`) | done |
-| `scripts/migrate_related_from_symbol.sql` (uses `tickers.ticker`) | done (`related_rows=13012`) |
+| Related peers → `market.ticker_related` (Golden Source; Trade FDW) | done (`related_rows=13012`, 2026-08-19) |
 | `scripts/create_roles.sql` | done |
-| `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`) |
+| `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`; includes DROP `public.ticker_related_tickers`) |
 | One-shot Job `market-data-prod-ticker-sync` | done (`market.ticker=5306`) |
 
 ## PROD workers (applied 2026-08-05)
@@ -57,8 +57,9 @@ kubectl -n data exec "$PRIMARY" -c postgres -- psql -d bifrost_prod -tAc "
 SELECT 'legacy=' || count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN (
   'stock_day','tickers','job_massive_backfill','option_snapshots');
 SELECT 'ticker=' || count(*) FROM market.ticker;
-SELECT 'related_from_symbol=' || EXISTS (
-  SELECT 1 FROM information_schema.columns
-  WHERE table_schema='public' AND table_name='ticker_related_tickers' AND column_name='from_symbol');
+SELECT 'ticker_related=' || count(*) FROM market.ticker_related;
+SELECT 'legacy_related=' || EXISTS (
+  SELECT 1 FROM information_schema.tables
+  WHERE table_schema='public' AND table_name='ticker_related_tickers');
 "
 ```

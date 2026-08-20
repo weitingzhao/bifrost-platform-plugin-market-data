@@ -20,6 +20,7 @@ from bifrost_market_data.ingest.stock_daily_grouped import handle_stock_daily_gr
 from bifrost_market_data.ingest.stock_minute import handle_stock_minute
 from bifrost_market_data.ingest.stock_movers import handle_stock_movers
 from bifrost_market_data.ingest.stock_snapshot import handle_stock_snapshot
+from bifrost_market_data.ingest.ticker_related import handle_ticker_related
 from bifrost_market_data.ingest.ticker_sync import handle_ticker_sync
 from bifrost_market_data.worker.claim import JobRow
 
@@ -38,6 +39,7 @@ _RAW_HANDLERS: dict[str, Any] = {
     "option_expiration": handle_option_expiration,
     "option_open_interest": handle_option_open_interest,
     "ticker_sync": handle_ticker_sync,
+    "ticker_related": handle_ticker_related,
     "financials": handle_financials,
     "splits": handle_splits,
     "dividends": handle_dividends,
@@ -76,6 +78,7 @@ __all__ = [
     "handle_option_expiration",
     "handle_option_open_interest",
     "handle_ticker_sync",
+    "handle_ticker_related",
     "handle_financials",
     "handle_splits",
     "handle_dividends",

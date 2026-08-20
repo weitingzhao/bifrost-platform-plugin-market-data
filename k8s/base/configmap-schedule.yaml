@@ -53,6 +53,10 @@ data:
           cron: "0 3 * * *"
           priority: 1
           batch_size: 40
+        related-rotate:
+          cron: "30 22 * * *"
+          priority: 1
+          batch_size: 40
         trim:
           cron: "15 2 * * *"
           keep_days: 7

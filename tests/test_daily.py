@@ -497,6 +497,35 @@ def test_enqueue_fundamentals_rotate_batch() -> None:
     assert batch.issubset(set(symbols))
 
 
+def test_enqueue_related_rotate_batch() -> None:
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
+    result = enqueue_slot(
+        _DailyConn(),
+        "related-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"related-rotate": {"priority": 1, "batch_size": 2}}},
+    )
+    assert result["enqueued"] == 2
+    assert all(j["kind"] == "ticker_related" for j in result["jobs"])
+    batch = {j["payload"]["symbol"] for j in result["jobs"]}
+    assert len(batch) == 2
+    assert batch.issubset(set(symbols))
+
+
+def test_enqueue_related_rotate_skipped_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    result = enqueue_slot(
+        _DailyConn(calendar={holiday: False}),
+        "related-rotate",
+        target_date=holiday,
+        watchlist_symbols=["AAPL", "MSFT"],
+        scheduler_cfg={"slots": {"related-rotate": {"batch_size": 2}}},
+    )
+    assert result.get("skipped") is True
+    assert result["enqueued"] == 0
+
+
 def test_enqueue_fundamentals_rotate_by_date() -> None:
     symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
     r1 = enqueue_slot(
@@ -559,6 +588,7 @@ def test_all_slot_names_covered() -> None:
     assert "minute-bars" in SLOT_NAMES
     assert "reference" in SLOT_NAMES
     assert "fundamentals-rotate" in SLOT_NAMES
+    assert "related-rotate" in SLOT_NAMES
     assert "readiness-refresh" in SLOT_NAMES
     assert "trim" in SLOT_NAMES
     assert "stock-snapshot" in SLOT_NAMES

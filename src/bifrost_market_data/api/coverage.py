@@ -183,6 +183,7 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
     """Aggregate row counts and ingest freshness dimensions."""
     counts: dict[str, int | None] = {
         "tickers": safe_count(conn, "market.ticker"),
+        "ticker_related": safe_count(conn, "market.ticker_related"),
         "stock_daily": safe_count(conn, "market.stock_daily"),
         "option_contract": safe_count(conn, "market.option_contract"),
         "option_snapshot": safe_count(conn, "market.option_snapshot"),

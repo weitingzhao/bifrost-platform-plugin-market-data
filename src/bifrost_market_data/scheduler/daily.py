@@ -35,6 +35,7 @@ SLOT_NAMES = (
     "calendar",
     "reference",
     "fundamentals-rotate",
+    "related-rotate",
     "readiness-refresh",
     "trim",
     "stock-snapshot",
@@ -647,6 +648,7 @@ def enqueue_slot(
         "option-bars",
         "minute-bars",
         "fundamentals-rotate",
+        "related-rotate",
         "stock-snapshot",
         "stock-movers",
     )
@@ -671,6 +673,7 @@ def enqueue_slot(
         "option-bars",
         "minute-bars",
         "fundamentals-rotate",
+        "related-rotate",
     }
     if watchlist_symbols is not None:
         symbols = list(watchlist_symbols)
@@ -802,6 +805,18 @@ def enqueue_slot(
             batch = []
         for sym in batch:
             _add("financials", {"symbol": sym}, pri=priority)
+
+    elif slot_key == "related-rotate":
+        # Per-symbol related-companies with deterministic daily rotation.
+        batch_size = int(scfg.get("batch_size") or 40)
+        if symbols:
+            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
+            rotated = symbols[offset:] + symbols[:offset]
+            batch = rotated[: max(0, batch_size)]
+        else:
+            batch = []
+        for sym in batch:
+            _add("ticker_related", {"symbol": sym}, pri=priority)
 
     elif slot_key == "stock-snapshot":
         # Full-market All Tickers Snapshot (D2=A); one job, mode=all.

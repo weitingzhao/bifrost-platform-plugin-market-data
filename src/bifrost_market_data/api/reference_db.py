@@ -17,11 +17,11 @@ from bifrost_market_data.api.deps import (
 
 router = APIRouter(prefix="/reference", tags=["reference-db"])
 
-_HAS_RELATED = "public.ticker_related_tickers"
+_HAS_RELATED = "market.ticker_related"
 
 
 def _related_table_exists(conn: Any) -> bool:
-    return table_exists(conn, "public", "ticker_related_tickers")
+    return table_exists(conn, "market", "ticker_related")
 
 
 def _overview_missing_predicate() -> str:
@@ -112,7 +112,7 @@ def query_related_coverage(conn: Any) -> dict[str, Any]:
             "filled": 0,
             "missing": total,
             "source": "db",
-            "note": "public.ticker_related_tickers not present; related coverage unavailable.",
+            "note": "market.ticker_related not present; related coverage unavailable.",
         }
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
@@ -120,7 +120,7 @@ def query_related_coverage(conn: Any) -> dict[str, Any]:
         cur.execute(
             """
             SELECT COUNT(DISTINCT UPPER(TRIM(from_symbol)))::bigint
-            FROM public.ticker_related_tickers
+            FROM market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             """
         )
@@ -147,7 +147,7 @@ def query_missing_related(conn: Any, *, limit: int, offset: int) -> dict[str, An
             FROM market.ticker t
             LEFT JOIN (
                 SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
-                FROM public.ticker_related_tickers
+                FROM market.ticker_related
             ) r ON r.sym = UPPER(TRIM(t.symbol))
             WHERE r.sym IS NULL
             ORDER BY t.symbol ASC
@@ -183,7 +183,7 @@ def query_filled_related(conn: Any, *, limit: int, offset: int) -> dict[str, Any
         cur.execute(
             """
             SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
-            FROM public.ticker_related_tickers
+            FROM market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             ORDER BY sym ASC
             LIMIT %s OFFSET %s
@@ -356,26 +356,26 @@ def query_ticker_related(conn: Any, *, ticker: str) -> dict[str, Any]:
             "source": "db",
             "symbol": sym,
             "related": [],
-            "note": "public.ticker_related_tickers not present.",
+            "note": "market.ticker_related not present.",
         }
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT
                 UPPER(TRIM(r.to_symbol)) AS symbol,
-                r.relationship,
+                r.rank,
                 t.name
-            FROM public.ticker_related_tickers r
+            FROM market.ticker_related r
             LEFT JOIN market.ticker t ON t.symbol = UPPER(TRIM(r.to_symbol))
             WHERE UPPER(TRIM(r.from_symbol)) = %s
-            ORDER BY r.to_symbol ASC
+            ORDER BY r.rank ASC, r.to_symbol ASC
             LIMIT 200
             """,
             (sym,),
         )
         raw = cur.fetchall() or []
     related = [
-        {"symbol": str(r[0]), "relationship": r[1], "name": r[2]}
+        {"symbol": str(r[0]), "rank": r[1], "name": r[2]}
         for r in raw
         if r and r[0]
     ]
