@@ -587,7 +587,7 @@ latest_bar AS (
     SELECT DISTINCT ON (d.symbol)
         d.symbol, d.bar_date, d.close AS bar_close
     FROM market.stock_daily d
-    JOIN snap s ON UPPER(TRIM(d.symbol)) = UPPER(TRIM(s.symbol))
+    JOIN snap s ON d.symbol = s.symbol
     WHERE d.bar_date >= CURRENT_DATE - 90
     ORDER BY d.symbol, d.bar_date DESC
 ),
@@ -595,20 +595,20 @@ latest_bar_full AS (
     SELECT DISTINCT ON (d.symbol)
         d.symbol, d.bar_date, d.close AS bar_close
     FROM market.stock_daily d
-    JOIN snap s ON UPPER(TRIM(d.symbol)) = UPPER(TRIM(s.symbol))
-    WHERE UPPER(TRIM(d.symbol)) NOT IN (SELECT UPPER(TRIM(symbol)) FROM latest_bar)
+    JOIN snap s ON d.symbol = s.symbol
+    WHERE d.symbol NOT IN (SELECT symbol FROM latest_bar)
     ORDER BY d.symbol, d.bar_date DESC
 ),
 bar_agg AS (
     SELECT
-        UPPER(TRIM(symbol)) AS symbol,
+        symbol,
         COUNT(*)::int AS bar_rows,
         MAX(bar_date) AS last_bar_date,
         COUNT(*) FILTER (WHERE close IS NULL)::int AS null_close_rows,
         COUNT(*) FILTER (WHERE volume IS NULL)::int AS null_volume_rows
     FROM market.stock_daily
     WHERE bar_date >= CURRENT_DATE - 420
-    GROUP BY UPPER(TRIM(symbol))
+    GROUP BY symbol
 ),
 candidates AS (
     SELECT
@@ -631,10 +631,10 @@ candidates AS (
               OR ba.null_close_rows > 0 OR ba.null_volume_rows > 0)
         ) AS is_fallback_gap
     FROM universe u
-    JOIN snap sn ON UPPER(TRIM(sn.symbol)) = UPPER(TRIM(u.symbol))
-    LEFT JOIN latest_bar lb ON UPPER(TRIM(lb.symbol)) = UPPER(TRIM(u.symbol))
-    LEFT JOIN latest_bar_full lbf ON UPPER(TRIM(lbf.symbol)) = UPPER(TRIM(u.symbol))
-    LEFT JOIN bar_agg ba ON ba.symbol = UPPER(TRIM(u.symbol))
+    JOIN snap sn ON sn.symbol = u.symbol
+    LEFT JOIN latest_bar lb ON lb.symbol = u.symbol
+    LEFT JOIN latest_bar_full lbf ON lbf.symbol = u.symbol
+    LEFT JOIN bar_agg ba ON ba.symbol = u.symbol
 )
 """
 
