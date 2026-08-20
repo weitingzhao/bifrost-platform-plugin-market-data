@@ -25,7 +25,7 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "reference": {"kinds": ["ticker_sync"], "freshness": None},
     "fundamentals-rotate": {"kinds": ["financials"], "freshness": None},
     "related-rotate": {"kinds": ["ticker_related"], "freshness": None},
-    "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": None},
+    "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
     "stock-movers": {"kinds": ["stock_movers"], "freshness": None},
     "oi-gap-heal": {"kinds": [], "freshness": "option_open_interest", "inline": True},
     "max-pain": {"kinds": [], "freshness": None, "inline": True},

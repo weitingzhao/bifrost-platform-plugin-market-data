@@ -850,6 +850,7 @@ def coverage_stock_day_quality_detail(
 _SEPA_COVERAGE_TABLES: list[tuple[str, str, str]] = [
     ("market", "stock_daily", "bar_date"),
     ("market", "stock_minute", "bar_time"),
+    ("market", "stock_snapshot", "session_date"),
     ("market", "option_contract", "updated_at"),
     ("market", "option_snapshot", "snapshot_ts"),
     ("market", "option_open_interest", "trade_date"),

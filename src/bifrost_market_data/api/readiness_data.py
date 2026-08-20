@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from bifrost_market_data.api.deps import require_db, table_exists
+from bifrost_market_data.api.deps import iso_value, require_db, table_exists
 
 router = APIRouter(prefix="/readiness", tags=["readiness-data"])
 
@@ -478,5 +478,263 @@ def readiness_financials_by_instrument_type() -> dict[str, Any]:
     conn = require_db()
     try:
         return query_financials_by_instrument_type(conn)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Snapshot coverage + vendor gap (Wave 1 — Data Quality self-assessment)
+# ---------------------------------------------------------------------------
+
+
+def query_snapshot_coverage(conn: Any) -> dict[str, Any]:
+    """Latest-session snapshot row count + per-instrument-type breakdown.
+
+    Replaces Trade readiness_snapshot.py Step 2 SQL that read the retired
+    ``public.cache_stock_snapshot``.
+    """
+    if not table_exists(conn, "market", "stock_snapshot"):
+        return {"ok": True, "row_count": 0, "last_fetched_at": None, "session_date": None, "by_instrument_type": []}
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(session_date) FROM market.stock_snapshot")
+        row = cur.fetchone()
+        latest_sd = row[0] if row else None
+
+    if latest_sd is None:
+        return {"ok": True, "row_count": 0, "last_fetched_at": None, "session_date": None, "by_instrument_type": []}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::bigint, MAX(fetched_at)
+            FROM market.stock_snapshot
+            WHERE session_date = %s
+            """,
+            (latest_sd,),
+        )
+        agg = cur.fetchone()
+    row_count = int(agg[0] or 0) if agg else 0
+    last_fetched_at = iso_value(agg[1]) if agg and agg[1] else None
+
+    by_type: list[dict[str, Any]] = []
+    has_universe = table_exists(conn, "market", "v_us_equity_universe") or _view_or_table_exists(conn, "market", "v_us_equity_universe")
+    if has_universe:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(u.instrument_type, 'UNKNOWN') AS code,
+                    COUNT(s.symbol)::bigint AS snapshot_row_count,
+                    COUNT(u.symbol)::bigint AS universe_ticker_count
+                FROM market.v_us_equity_universe u
+                LEFT JOIN market.stock_snapshot s
+                    ON UPPER(TRIM(s.symbol)) = UPPER(TRIM(u.symbol))
+                   AND s.session_date = %s
+                GROUP BY COALESCE(u.instrument_type, 'UNKNOWN')
+                ORDER BY universe_ticker_count DESC
+                """,
+                (latest_sd,),
+            )
+            for r in cur.fetchall() or []:
+                by_type.append({
+                    "code": str(r[0]),
+                    "snapshot_row_count": int(r[1] or 0),
+                    "universe_ticker_count": int(r[2] or 0),
+                })
+
+    return {
+        "ok": True,
+        "row_count": row_count,
+        "last_fetched_at": last_fetched_at,
+        "session_date": latest_sd.isoformat() if hasattr(latest_sd, "isoformat") else str(latest_sd),
+        "by_instrument_type": by_type,
+    }
+
+
+def _view_or_table_exists(conn: Any, schema: str, name: str) -> bool:
+    """Check for a view or table in information_schema."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM information_schema.views
+                WHERE table_schema = %s AND table_name = %s
+                LIMIT 1
+                """,
+                (schema, name),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+_VENDOR_GAP_SQL = """\
+WITH latest_session AS (
+    SELECT MAX(session_date) AS sd FROM market.stock_snapshot
+),
+snap AS (
+    SELECT s.symbol, s.close, s.session_date
+    FROM market.stock_snapshot s, latest_session ls
+    WHERE s.session_date = ls.sd AND s.close IS NOT NULL
+),
+universe AS (
+    SELECT symbol, instrument_type
+    FROM market.v_us_equity_universe
+    WHERE LOWER(COALESCE(instrument_type, '')) <> 'warrant'
+),
+latest_bar AS (
+    SELECT DISTINCT ON (d.symbol)
+        d.symbol, d.bar_date, d.close AS bar_close
+    FROM market.stock_daily d
+    JOIN snap s ON UPPER(TRIM(d.symbol)) = UPPER(TRIM(s.symbol))
+    WHERE d.bar_date >= CURRENT_DATE - 90
+    ORDER BY d.symbol, d.bar_date DESC
+),
+latest_bar_full AS (
+    SELECT DISTINCT ON (d.symbol)
+        d.symbol, d.bar_date, d.close AS bar_close
+    FROM market.stock_daily d
+    JOIN snap s ON UPPER(TRIM(d.symbol)) = UPPER(TRIM(s.symbol))
+    WHERE UPPER(TRIM(d.symbol)) NOT IN (SELECT UPPER(TRIM(symbol)) FROM latest_bar)
+    ORDER BY d.symbol, d.bar_date DESC
+),
+bar_agg AS (
+    SELECT
+        UPPER(TRIM(symbol)) AS symbol,
+        COUNT(*)::int AS bar_rows,
+        MAX(bar_date) AS last_bar_date,
+        COUNT(*) FILTER (WHERE close IS NULL)::int AS null_close_rows,
+        COUNT(*) FILTER (WHERE volume IS NULL)::int AS null_volume_rows
+    FROM market.stock_daily
+    WHERE bar_date >= CURRENT_DATE - 420
+    GROUP BY UPPER(TRIM(symbol))
+),
+candidates AS (
+    SELECT
+        u.symbol,
+        sn.session_date,
+        COALESCE(lb.bar_date, lbf.bar_date) AS last_bar_date,
+        COALESCE(lb.bar_close, lbf.bar_close) AS last_bar_close,
+        sn.close AS snapshot_close,
+        ba.bar_rows,
+        ba.last_bar_date AS agg_last_bar_date,
+        ba.null_close_rows,
+        ba.null_volume_rows,
+        (COALESCE(lb.bar_date, lbf.bar_date) IS NOT NULL
+         AND sn.session_date > COALESCE(lb.bar_date, lbf.bar_date)
+         AND ABS(COALESCE(lb.bar_close, lbf.bar_close) - sn.close) >= 0.0001
+        ) AS is_vendor_gap,
+        (COALESCE(lb.bar_date, lbf.bar_date) IS NULL
+         AND (ba.bar_rows IS NULL OR ba.bar_rows < 240
+              OR ba.last_bar_date < CURRENT_DATE - 7
+              OR ba.null_close_rows > 0 OR ba.null_volume_rows > 0)
+        ) AS is_fallback_gap
+    FROM universe u
+    JOIN snap sn ON UPPER(TRIM(sn.symbol)) = UPPER(TRIM(u.symbol))
+    LEFT JOIN latest_bar lb ON UPPER(TRIM(lb.symbol)) = UPPER(TRIM(u.symbol))
+    LEFT JOIN latest_bar_full lbf ON UPPER(TRIM(lbf.symbol)) = UPPER(TRIM(u.symbol))
+    LEFT JOIN bar_agg ba ON ba.symbol = UPPER(TRIM(u.symbol))
+)
+"""
+
+
+def query_vendor_gap(
+    conn: Any,
+    *,
+    detail: bool = False,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Vendor gap detection: snapshot close vs latest bar close divergence.
+
+    Absorbs the CTE from Trade readiness_snapshot.py Step 3.
+    """
+    if not table_exists(conn, "market", "stock_snapshot"):
+        return {"ok": True, "gap_count": 0, "session_date": None}
+
+    has_universe = table_exists(conn, "market", "v_us_equity_universe") or _view_or_table_exists(conn, "market", "v_us_equity_universe")
+    if not has_universe or not table_exists(conn, "market", "stock_daily"):
+        return {"ok": True, "gap_count": 0, "session_date": None}
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(session_date) FROM market.stock_snapshot")
+        row = cur.fetchone()
+        latest_sd = row[0] if row else None
+    if latest_sd is None:
+        return {"ok": True, "gap_count": 0, "session_date": None}
+
+    session_date_str = latest_sd.isoformat() if hasattr(latest_sd, "isoformat") else str(latest_sd)
+
+    with conn.cursor() as cur:
+        count_sql = (
+            _VENDOR_GAP_SQL
+            + "SELECT COUNT(*)::bigint FROM candidates WHERE is_vendor_gap OR is_fallback_gap"
+        )
+        cur.execute(count_sql)
+        cnt_row = cur.fetchone()
+    gap_count = int(cnt_row[0] or 0) if cnt_row else 0
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "gap_count": gap_count,
+        "session_date": session_date_str,
+    }
+
+    if detail:
+        with conn.cursor() as cur:
+            detail_sql = (
+                _VENDOR_GAP_SQL
+                + """
+                SELECT
+                    symbol, session_date::text, last_bar_date::text,
+                    last_bar_close, snapshot_close,
+                    CASE WHEN is_vendor_gap THEN 'vendor_gap' ELSE 'fallback_gap' END AS reason,
+                    bar_rows, agg_last_bar_date::text, null_close_rows, null_volume_rows
+                FROM candidates
+                WHERE is_vendor_gap OR is_fallback_gap
+                ORDER BY symbol
+                LIMIT %s
+                """
+            )
+            cur.execute(detail_sql, (limit,))
+            rows = cur.fetchall() or []
+        gaps: list[dict[str, Any]] = []
+        for r in rows:
+            gaps.append({
+                "symbol": str(r[0]),
+                "session_date": str(r[1]) if r[1] else None,
+                "last_bar_date": str(r[2]) if r[2] else None,
+                "last_bar_close": float(r[3]) if r[3] is not None else None,
+                "snapshot_close": float(r[4]) if r[4] is not None else None,
+                "reason": str(r[5]),
+                "bar_rows": int(r[6]) if r[6] is not None else None,
+                "agg_last_bar_date": str(r[7]) if r[7] else None,
+                "null_close_rows": int(r[8]) if r[8] is not None else None,
+                "null_volume_rows": int(r[9]) if r[9] is not None else None,
+            })
+        result["gaps"] = gaps
+
+    return result
+
+
+@router.get("/snapshot-coverage")
+def readiness_snapshot_coverage() -> dict[str, Any]:
+    """Snapshot row count and instrument-type breakdown for latest session."""
+    conn = require_db()
+    try:
+        return query_snapshot_coverage(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/vendor-gap")
+def readiness_vendor_gap(
+    detail: bool = Query(False, description="Include gap detail rows"),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Vendor gap detection: snapshot close vs latest bar close divergence."""
+    conn = require_db()
+    try:
+        return query_vendor_gap(conn, detail=detail, limit=limit)
     finally:
         conn.close()
