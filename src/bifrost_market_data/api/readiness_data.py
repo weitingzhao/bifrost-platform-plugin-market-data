@@ -570,71 +570,34 @@ def _view_or_table_exists(conn: Any, schema: str, name: str) -> bool:
 
 
 _VENDOR_GAP_SQL = """\
-WITH latest_session AS (
-    SELECT MAX(session_date) AS sd FROM market.stock_snapshot
-),
-snap AS (
+WITH snap AS (
     SELECT s.symbol, s.close, s.session_date
-    FROM market.stock_snapshot s, latest_session ls
-    WHERE s.session_date = ls.sd AND s.close IS NOT NULL
-),
-universe AS (
-    SELECT symbol, instrument_type
-    FROM market.v_us_equity_universe
-    WHERE LOWER(COALESCE(instrument_type, '')) <> 'warrant'
-),
-latest_bar AS (
-    SELECT DISTINCT ON (d.symbol)
-        d.symbol, d.bar_date, d.close AS bar_close
-    FROM market.stock_daily d
-    JOIN snap s ON d.symbol = s.symbol
-    WHERE d.bar_date >= CURRENT_DATE - 90
-    ORDER BY d.symbol, d.bar_date DESC
-),
-latest_bar_full AS (
-    SELECT DISTINCT ON (d.symbol)
-        d.symbol, d.bar_date, d.close AS bar_close
-    FROM market.stock_daily d
-    JOIN snap s ON d.symbol = s.symbol
-    WHERE d.symbol NOT IN (SELECT symbol FROM latest_bar)
-    ORDER BY d.symbol, d.bar_date DESC
-),
-bar_agg AS (
-    SELECT
-        symbol,
-        COUNT(*)::int AS bar_rows,
-        MAX(bar_date) AS last_bar_date,
-        COUNT(*) FILTER (WHERE close IS NULL)::int AS null_close_rows,
-        COUNT(*) FILTER (WHERE volume IS NULL)::int AS null_volume_rows
-    FROM market.stock_daily
-    WHERE bar_date >= CURRENT_DATE - 420
-    GROUP BY symbol
+    FROM market.stock_snapshot s
+    WHERE s.session_date = (SELECT MAX(session_date) FROM market.stock_snapshot)
+      AND s.close IS NOT NULL
 ),
 candidates AS (
     SELECT
         u.symbol,
         sn.session_date,
-        COALESCE(lb.bar_date, lbf.bar_date) AS last_bar_date,
-        COALESCE(lb.bar_close, lbf.bar_close) AS last_bar_close,
+        lb.bar_date AS last_bar_date,
+        lb.bar_close AS last_bar_close,
         sn.close AS snapshot_close,
-        ba.bar_rows,
-        ba.last_bar_date AS agg_last_bar_date,
-        ba.null_close_rows,
-        ba.null_volume_rows,
-        (COALESCE(lb.bar_date, lbf.bar_date) IS NOT NULL
-         AND sn.session_date > COALESCE(lb.bar_date, lbf.bar_date)
-         AND ABS(COALESCE(lb.bar_close, lbf.bar_close) - sn.close) >= 0.0001
+        (lb.bar_date IS NOT NULL
+         AND sn.session_date > lb.bar_date
+         AND ABS(lb.bar_close - sn.close) >= 0.0001
         ) AS is_vendor_gap,
-        (COALESCE(lb.bar_date, lbf.bar_date) IS NULL
-         AND (ba.bar_rows IS NULL OR ba.bar_rows < 240
-              OR ba.last_bar_date < CURRENT_DATE - 7
-              OR ba.null_close_rows > 0 OR ba.null_volume_rows > 0)
-        ) AS is_fallback_gap
-    FROM universe u
+        (lb.bar_date IS NULL) AS is_fallback_gap
+    FROM market.v_us_equity_universe u
     JOIN snap sn ON sn.symbol = u.symbol
-    LEFT JOIN latest_bar lb ON lb.symbol = u.symbol
-    LEFT JOIN latest_bar_full lbf ON lbf.symbol = u.symbol
-    LEFT JOIN bar_agg ba ON ba.symbol = u.symbol
+    LEFT JOIN LATERAL (
+        SELECT d.bar_date, d.close AS bar_close
+        FROM market.stock_daily d
+        WHERE d.symbol = u.symbol
+        ORDER BY d.bar_date DESC
+        LIMIT 1
+    ) lb ON true
+    WHERE LOWER(COALESCE(u.instrument_type, '')) <> 'warrant'
 )
 """
 
@@ -688,8 +651,7 @@ def query_vendor_gap(
                 SELECT
                     symbol, session_date::text, last_bar_date::text,
                     last_bar_close, snapshot_close,
-                    CASE WHEN is_vendor_gap THEN 'vendor_gap' ELSE 'fallback_gap' END AS reason,
-                    bar_rows, agg_last_bar_date::text, null_close_rows, null_volume_rows
+                    CASE WHEN is_vendor_gap THEN 'vendor_gap' ELSE 'fallback_gap' END AS reason
                 FROM candidates
                 WHERE is_vendor_gap OR is_fallback_gap
                 ORDER BY symbol
@@ -707,10 +669,6 @@ def query_vendor_gap(
                 "last_bar_close": float(r[3]) if r[3] is not None else None,
                 "snapshot_close": float(r[4]) if r[4] is not None else None,
                 "reason": str(r[5]),
-                "bar_rows": int(r[6]) if r[6] is not None else None,
-                "agg_last_bar_date": str(r[7]) if r[7] else None,
-                "null_close_rows": int(r[8]) if r[8] is not None else None,
-                "null_volume_rows": int(r[9]) if r[9] is not None else None,
             })
         result["gaps"] = gaps
 
