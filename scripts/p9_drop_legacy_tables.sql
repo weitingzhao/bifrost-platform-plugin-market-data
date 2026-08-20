@@ -22,7 +22,10 @@
 --   stock_readiness_daily, cache_stock_snapshot, report_option_*,
 --   option_trades, ticker_types,
 --   ticker_related_tickers (retained; symbol-keyed via from_symbol — no FK to tickers),
---   job_bars_backfill, job_sepa_phase4, reference_us_holidays, watchlist
+--   job_bars_backfill, job_sepa_phase4, watchlist
+--
+-- Dropped in this holiday migration wave:
+--   reference_us_holidays → market.us_market_holiday (Golden Source)
 
 BEGIN;
 
@@ -38,6 +41,7 @@ DROP TABLE IF EXISTS public.tickers CASCADE;
 DROP TABLE IF EXISTS public.ticker_overview CASCADE;
 DROP TABLE IF EXISTS public.massive_corporate_action CASCADE;
 DROP TABLE IF EXISTS public.job_massive_backfill CASCADE;
+DROP TABLE IF EXISTS public.reference_us_holidays CASCADE;
 
 -- Legacy flat fundamentals (names vary by historical DDL; IF EXISTS is safe)
 DROP TABLE IF EXISTS public.stock_financial_balance_sheet CASCADE;
@@ -117,5 +121,6 @@ END $$;
 --   AND table_name IN (
 --     'stock_day','stock_min','option_day','option_min','option_contracts',
 --     'option_snapshots','option_expiration_cache','option_open_interest_daily',
---     'tickers','ticker_overview','massive_corporate_action','job_massive_backfill'
+--     'tickers','ticker_overview','massive_corporate_action','job_massive_backfill',
+--     'reference_us_holidays'
 --   );

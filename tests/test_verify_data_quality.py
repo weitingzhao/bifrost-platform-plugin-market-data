@@ -10,8 +10,10 @@ from bifrost_market_data.quality import (
     check_option_oi_coverage,
     check_option_snapshot_coverage,
     check_stock_daily_coverage,
+    fetch_completed_trading_days,
     run_all_checks,
 )
+from bifrost_market_data.trading_calendar import iter_weekdays_excluding
 
 
 class _QCur:
@@ -26,8 +28,8 @@ class _QCur:
         if "count(distinct symbol)" in q:
             self._one = (self.parent.symbol_count,)
             self._rows = []
-        elif "us_trading_calendar" in q:
-            self._rows = [(d,) for d in self.parent.trading_days]
+        elif "us_market_holiday" in q:
+            self._rows = [(d,) for d in self.parent.closed_holidays]
             self._one = None
         elif "from market.stock_daily" in q and "bar_date" in q:
             self._rows = list(self.parent.stock_daily_rows)
@@ -69,28 +71,19 @@ class _QConn:
         self.statements: list[tuple[str, Any]] = []
         self.symbol_count = 4500
         self.watchlist = ["AAPL", "MSFT"]
-        self.trading_days = [
-            date(2024, 6, 18),
-            date(2024, 6, 19),
-            date(2024, 6, 20),
-        ]
+        self.closed_holidays: list[date] = []
+        # Default fixture window: three completed sessions ending 2024-06-20.
+        self.fixture_as_of = date(2024, 6, 20)
+        self.trading_days = fetch_completed_trading_days(
+            self, 3, as_of=self.fixture_as_of
+        )
         self.stock_daily_rows: list[tuple[str, date]] = [
-            ("AAPL", date(2024, 6, 18)),
-            ("AAPL", date(2024, 6, 19)),
-            ("AAPL", date(2024, 6, 20)),
-            ("MSFT", date(2024, 6, 18)),
-            ("MSFT", date(2024, 6, 19)),
-            ("MSFT", date(2024, 6, 20)),
+            (sym, d) for sym in ("AAPL", "MSFT") for d in self.trading_days
         ]
         self.optionable_underlyings = ["AAPL", "MSFT"]
         self.snapshot_underlyings = ["AAPL", "MSFT"]
         self.oi_rows: list[tuple[str, date]] = [
-            ("AAPL", date(2024, 6, 18)),
-            ("AAPL", date(2024, 6, 19)),
-            ("AAPL", date(2024, 6, 20)),
-            ("MSFT", date(2024, 6, 18)),
-            ("MSFT", date(2024, 6, 19)),
-            ("MSFT", date(2024, 6, 20)),
+            (sym, d) for sym in ("AAPL", "MSFT") for d in self.trading_days
         ]
         now = datetime.now(timezone.utc)
         self.freshness_rows = [
@@ -104,8 +97,20 @@ class _QConn:
         return _QCur(self)
 
 
+def test_iter_weekdays_skips_closed() -> None:
+    days = iter_weekdays_excluding(
+        end=date(2024, 7, 5),
+        n=3,
+        closed={date(2024, 7, 4)},
+    )
+    assert days == [date(2024, 7, 2), date(2024, 7, 3), date(2024, 7, 5)]
+
+
 def test_stock_daily_coverage_pass() -> None:
     conn = _QConn()
+    # Coverage uses live completed days — seed rows to match.
+    live_days = fetch_completed_trading_days(conn, 3)
+    conn.stock_daily_rows = [(sym, d) for sym in ("AAPL", "MSFT") for d in live_days]
     result = check_stock_daily_coverage(
         conn,
         watchlist_symbols=["AAPL", "MSFT"],
@@ -118,10 +123,11 @@ def test_stock_daily_coverage_pass() -> None:
 
 def test_stock_daily_coverage_gaps() -> None:
     conn = _QConn()
+    live_days = fetch_completed_trading_days(conn, 3)
     conn.stock_daily_rows = [
-        ("AAPL", date(2024, 6, 18)),
-        ("AAPL", date(2024, 6, 19)),
-        # missing AAPL 2024-06-20 and all MSFT
+        ("AAPL", live_days[0]),
+        ("AAPL", live_days[1]),
+        # missing last AAPL day and all MSFT
     ]
     result = check_stock_daily_coverage(
         conn,
@@ -234,6 +240,9 @@ def test_freshness_stale() -> None:
 
 def test_run_all_checks() -> None:
     conn = _QConn()
+    live_days = fetch_completed_trading_days(conn, 3)
+    conn.stock_daily_rows = [(sym, d) for sym in ("AAPL", "MSFT") for d in live_days]
+    conn.oi_rows = [(sym, d) for sym in ("AAPL", "MSFT") for d in live_days]
     report = run_all_checks(
         conn,
         watchlist_symbols=["AAPL", "MSFT"],

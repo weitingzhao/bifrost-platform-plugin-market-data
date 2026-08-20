@@ -70,4 +70,3 @@ END $$;
 GRANT USAGE ON SCHEMA data_ops TO market_reader;
 GRANT SELECT ON data_ops.job_ingest TO market_reader;
 GRANT SELECT ON data_ops.ingest_freshness TO market_reader;
-GRANT SELECT ON data_ops.us_trading_calendar TO market_reader;

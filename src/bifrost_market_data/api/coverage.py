@@ -637,27 +637,9 @@ def query_stock_day_gap(
     if not sym:
         return {"ok": False, "error": "symbol is required"}
     start = date.today() - timedelta(days=years * 365)
-    expected_days: list[date] = []
-    if table_exists(conn, "data_ops", "us_trading_calendar"):
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT cal_date
-                FROM data_ops.us_trading_calendar
-                WHERE is_trading = true
-                  AND cal_date >= %s
-                  AND cal_date <= CURRENT_DATE
-                ORDER BY cal_date
-                """,
-                (start,),
-            )
-            expected_days = [as_date(r[0]) for r in (cur.fetchall() or []) if as_date(r[0])]
-    else:
-        d = start
-        while d <= date.today():
-            if d.weekday() < 5:
-                expected_days.append(d)
-            d += timedelta(days=1)
+    from bifrost_market_data.trading_calendar import expected_trading_days
+
+    expected_days = expected_trading_days(conn, start=start, end=date.today())
 
     covered: set[date] = set()
     if table_exists(conn, "market", "stock_daily"):
@@ -682,7 +664,7 @@ def query_stock_day_gap(
         "covered_days": len(covered),
         "missing_days": len(missing),
         "missing_dates": missing[:120],
-        "note": "Simplified calendar gap using us_trading_calendar when available.",
+        "note": "Calendar gap using market.us_market_holiday (weekday − NYSE closed).",
     }
 
 

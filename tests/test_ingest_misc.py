@@ -71,8 +71,22 @@ async def test_calendar() -> None:
     client = mock_client(
         fetch_market_status_upcoming={
             "results": [
-                {"date": "2024-07-04", "status": "closed", "name": "Independence Day", "exchange": "NYSE"},
-                {"date": "2024-07-03", "status": "early-close", "name": "Early Close", "exchange": "NYSE"},
+                {
+                    "date": "2024-07-04",
+                    "status": "closed",
+                    "name": "Independence Day",
+                    "exchange": "NYSE",
+                    "open": "2024-07-04T13:30:00.000Z",
+                    "close": "2024-07-04T20:00:00.000Z",
+                },
+                {
+                    "date": "2024-07-03",
+                    "status": "early-close",
+                    "name": "Early Close",
+                    "exchange": "NYSE",
+                    "open": "2024-07-03T13:30:00.000Z",
+                    "close": "2024-07-03T18:00:00.000Z",
+                },
             ],
             "pages": 1,
         }
@@ -80,10 +94,14 @@ async def test_calendar() -> None:
     conn = FakeConn()
     result = await handle_calendar(make_job("calendar", {}), client, conn)
     assert result["rows_written"] == 2
-    assert "data_ops.us_trading_calendar" in conn.upsert_sqls()[0]
-    rows = {str(r[0]): r for r in conn.statements[0][1]}
-    assert rows["2024-07-04"][1] is False
-    assert rows["2024-07-03"][1] is True  # early-close still trading day flag True
+    assert result["holiday_rows_written"] == 2
+    sqls = conn.upsert_sqls()
+    assert any("market.us_market_holiday" in s for s in sqls)
+    assert not any("us_trading_calendar" in s for s in sqls)
+    hol_stmt = next(s for s in conn.statements if "us_market_holiday" in s[0])
+    hol_rows = {(r[0], str(r[1])): r for r in hol_stmt[1]}
+    assert hol_rows[("NYSE", "2024-07-04")][3] == "closed"
+    assert hol_rows[("NYSE", "2024-07-03")][3] == "early-close"
 
 
 def test_registry_covers_all_pool_kinds() -> None:

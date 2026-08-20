@@ -26,19 +26,21 @@ class _DailyCursor:
     def execute(self, query: str, params: Any = None) -> None:
         self.parent.statements.append((query, params))
         q = query.lower()
-        if "us_trading_calendar" in q:
-            d = params[0] if params else None
-            if d in self.parent.calendar:
-                self.parent._fetchone = (self.parent.calendar[d],)
-            else:
-                self.parent._fetchone = None
-            # fetch_recent_trading_days uses SELECT cal_date ... fetchall
-            if "cal_date" in q:
-                days = sorted(self.parent.calendar.keys(), reverse=True)
-                trading = [d for d in days if self.parent.calendar.get(d)]
-                self.parent._fetchall = [(d,) for d in trading]
-            else:
+        if "us_market_holiday" in q:
+            # is_trading_day: SELECT 1 ... holiday_date = %s AND status = 'closed'
+            if "holiday_date = %s" in q or "holiday_date=%s" in q:
+                d = params[0] if params else None
+                # calendar[d] False → closed holiday present
+                if d in self.parent.calendar and self.parent.calendar[d] is False:
+                    self.parent._fetchone = (1,)
+                else:
+                    self.parent._fetchone = None
                 self.parent._fetchall = []
+            else:
+                # fetch_closed_holiday_dates → list of closed dates
+                closed = [d for d, trading in self.parent.calendar.items() if not trading]
+                self.parent._fetchall = [(d,) for d in closed]
+                self.parent._fetchone = None
         elif "v_option_snapshot_with_stock" in q:
             trade_date = params[0] if params else None
             underlyings = set(params[1]) if params and len(params) > 1 else None
@@ -247,6 +249,11 @@ def test_is_trading_day_from_calendar() -> None:
     conn = _DailyConn(calendar={holiday: False})
     assert is_trading_day(conn, holiday) is False
     assert is_trading_day(conn, date(2024, 7, 5)) is True  # missing → weekday fallback
+    # early-close stored as trading=True is ignored; only closed holidays matter
+    early = date(2024, 7, 3)
+    conn2 = _DailyConn(calendar={early: True})
+    assert is_trading_day(conn2, early) is True
+    assert is_trading_day(conn2, date(2024, 7, 6)) is False  # Saturday
 
 
 def test_enqueue_stock_eod() -> None:
@@ -884,7 +891,8 @@ def test_max_pain_runs_on_holiday_with_lookback() -> None:
     )
     assert result.get("skipped") is not True
     assert result["enqueued"] == 0
-    assert result["trading_days"] == ["2024-07-02", "2024-07-03"]
+    # lookback=3 ending on holiday → prior weekdays 7/1–7/3 (7/4 closed excluded)
+    assert result["trading_days"] == ["2024-07-01", "2024-07-02", "2024-07-03"]
 
 
 def test_enqueue_atm_iv_pcr() -> None:

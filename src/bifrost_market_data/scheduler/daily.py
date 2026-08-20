@@ -134,21 +134,10 @@ def resolve_target_date(value: str | date | None = None) -> date:
 
 
 def is_trading_day(conn: Any, d: date) -> bool:
-    """Check ``data_ops.us_trading_calendar``.
+    """NYSE session check via ``market.us_market_holiday`` (weekday − closed)."""
+    from bifrost_market_data.trading_calendar import is_trading_day as _is_trading_day
 
-    Missing rows fall back to weekday check (calendar may not be populated yet).
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT is_trading FROM data_ops.us_trading_calendar WHERE cal_date = %s",
-            (d,),
-        )
-        row = cur.fetchone() if hasattr(cur, "fetchone") else None
-    if row is None:
-        return d.weekday() < 5
-    if isinstance(row, Mapping):
-        return bool(row["is_trading"])
-    return bool(row[0])
+    return _is_trading_day(conn, d)
 
 
 def load_watchlist_symbols(
@@ -439,7 +428,7 @@ def enqueue_slot(
             if watchlist_symbols is not None
             else load_watchlist_symbols(conn, cfg)
         )
-        trading_days = fetch_recent_trading_days(conn, lookback)
+        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
         if not trading_days:
             return {
                 "slot": slot_key,

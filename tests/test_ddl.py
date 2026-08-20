@@ -67,6 +67,7 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
         in blob
     )
     assert "job_ingest_dedup" in blob
+    assert "DROP TABLE IF EXISTS data_ops.us_trading_calendar" in blob
     assert "SELECT FOR UPDATE" not in blob  # claim logic is P3, not DDL
 
 
@@ -81,11 +82,13 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 
 
 def test_expected_object_counts() -> None:
-    assert len(MARKET_TABLES) == 13
+    assert len(MARKET_TABLES) == 14
     assert "stock_snapshot" in MARKET_TABLES
     assert "stock_movers" in MARKET_TABLES
+    assert "us_market_holiday" in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 4
-    assert len(DATA_OPS_TABLES) == 3
+    assert len(DATA_OPS_TABLES) == 2
+    assert "us_trading_calendar" not in DATA_OPS_TABLES
     assert len(MARKET_VIEWS) == 3
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from bifrost_market_data.scheduler.daily import resolve_watchlist_symbols_for_coverage
@@ -33,41 +33,10 @@ def fetch_stock_daily_symbol_count(conn: Any) -> int:
 
 
 def fetch_recent_trading_days(conn: Any, n: int, *, as_of: date | None = None) -> list[date]:
-    """Return up to ``n`` most recent trading days from the calendar (or weekdays)."""
-    end = as_of or datetime.now(timezone.utc).date()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT cal_date
-            FROM data_ops.us_trading_calendar
-            WHERE is_trading = true AND cal_date <= %s
-            ORDER BY cal_date DESC
-            LIMIT %s
-            """,
-            (end, int(n)),
-        )
-        rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-    days: list[date] = []
-    for row in rows or []:
-        if isinstance(row, Mapping):
-            d = row.get("cal_date") or next(iter(row.values()), None)
-        else:
-            d = row[0] if row else None
-        if isinstance(d, datetime):
-            days.append(d.date())
-        elif isinstance(d, date):
-            days.append(d)
-    if days:
-        return sorted(set(days))
+    """Return up to ``n`` most recent NYSE trading days (weekday − closed holidays)."""
+    from bifrost_market_data.trading_calendar import fetch_recent_trading_days as _fetch
 
-    # Fallback: weekdays only
-    out: list[date] = []
-    cur_d = end
-    while len(out) < n:
-        if cur_d.weekday() < 5:
-            out.append(cur_d)
-        cur_d -= timedelta(days=1)
-    return sorted(out)
+    return _fetch(conn, n, as_of=as_of)
 
 
 def fetch_completed_trading_days(

@@ -217,6 +217,30 @@ Replaces `public.massive_corporate_action`.
 
 **Unique:** `(symbol, action_type, ex_date)`
 
+### `market.us_market_holiday`
+
+Canonical US exchange holiday / early-close calendar from Polygon
+(`/v1/marketstatus/upcoming`). Replaces Trade-owned `public.reference_us_holidays`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| exchange | text | PK part; e.g. `NYSE` |
+| holiday_date | date | PK part |
+| name | text | Holiday label |
+| status | text | `closed` / `early-close` |
+| open_time / close_time | timestamptz | Session window when provided |
+| fetched_at | timestamptz | default `now()` |
+
+**PK:** `(exchange, holiday_date)`  
+**Index:** `(holiday_date DESC)`
+
+Plugin scheduler / quality / coverage derive trading sessions as
+**weekday − NYSE `status='closed'`** (same semantics as Trade
+`get_is_us_trading_day`). `early-close` remains a trading day.
+The retired flat table `data_ops.us_trading_calendar` is dropped by DDL.
+
+Trade consumers read this table via FDW (`market.us_market_holiday`).
+
 ---
 
 ## `market_analytics` tables
@@ -360,10 +384,8 @@ Replaces `public.job_massive_backfill` as the PG-as-broker queue.
 
 Per-dimension freshness for Platform probes (`dimension` PK).
 
-### `data_ops.us_trading_calendar`
-
-Replaces `public.reference_us_holidays` with explicit trading-day flags.
-
+~~`data_ops.us_trading_calendar`~~ — **retired**. Trading-day checks use
+`market.us_market_holiday` (weekday − NYSE closed).
 ---
 
 ## Partition helpers

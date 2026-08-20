@@ -400,6 +400,28 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
+    # --- us_market_holiday (vendor calendar; replaces public.reference_us_holidays) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.us_market_holiday (
+            exchange     text        NOT NULL DEFAULT 'NYSE',
+            holiday_date date        NOT NULL,
+            name         text,
+            status       text,
+            open_time    timestamptz,
+            close_time   timestamptz,
+            fetched_at   timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (exchange, holiday_date)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS us_market_holiday_date
+        ON market.us_market_holiday (holiday_date DESC)
+        """
+    )
+
 
 def _create_market_analytics_tables(cur: _Cursor) -> None:
     # --- max_pain_daily (RANGE by month on trade_date) ---
@@ -540,15 +562,8 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS data_ops.us_trading_calendar (
-            cal_date    date    PRIMARY KEY,
-            is_trading  boolean NOT NULL DEFAULT true,
-            note        text
-        )
-        """
-    )
+    # Retired: flat is_trading calendar → derive from market.us_market_holiday.
+    cur.execute("DROP TABLE IF EXISTS data_ops.us_trading_calendar CASCADE")
 
 
 def _create_views(cur: _Cursor) -> None:
@@ -768,6 +783,7 @@ MARKET_TABLES: tuple[str, ...] = (
     "ticker",
     "stock_financials",
     "corporate_action",
+    "us_market_holiday",
 )
 
 MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
@@ -780,7 +796,6 @@ MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
 DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",
     "ingest_freshness",
-    "us_trading_calendar",
 )
 
 MARKET_VIEWS: tuple[str, ...] = (
