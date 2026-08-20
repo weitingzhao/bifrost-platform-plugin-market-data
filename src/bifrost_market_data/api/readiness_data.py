@@ -629,6 +629,7 @@ def query_vendor_gap(
     session_date_str = latest_sd.isoformat() if hasattr(latest_sd, "isoformat") else str(latest_sd)
 
     with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '120s'")
         count_sql = (
             _VENDOR_GAP_SQL
             + "SELECT COUNT(*)::bigint FROM candidates WHERE is_vendor_gap OR is_fallback_gap"
@@ -645,6 +646,7 @@ def query_vendor_gap(
 
     if detail:
         with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '120s'")
             detail_sql = (
                 _VENDOR_GAP_SQL
                 + """
