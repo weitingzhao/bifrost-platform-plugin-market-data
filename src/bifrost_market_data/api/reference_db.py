@@ -280,7 +280,7 @@ def query_us_equity_universe(conn: Any) -> dict[str, Any]:
 
 
 def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") -> dict[str, Any]:
-    if table_exists(conn, "public", "ticker_types"):
+    if table_exists(conn, "market", "ticker_type"):
         clauses: list[str] = []
         params: list[Any] = []
         if asset_class and asset_class != "*":
@@ -293,10 +293,10 @@ def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") 
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT asset_class, locale, ticker_type, description
-                FROM public.ticker_types
+                SELECT asset_class, locale, code AS ticker_type, description
+                FROM market.ticker_type
                 {where}
-                ORDER BY asset_class, locale, ticker_type
+                ORDER BY asset_class, locale, code
                 LIMIT 500
                 """,
                 tuple(params),
@@ -304,7 +304,7 @@ def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") 
             raw = cur.fetchall() or []
         cols = ("asset_class", "locale", "ticker_type", "description")
         rows = [row_dict(r, cols) for r in raw]
-        return {"ok": True, "source": "public.ticker_types", "rows": rows, "count": len(rows)}
+        return {"ok": True, "source": "market.ticker_type", "rows": rows, "count": len(rows)}
 
     if not table_exists(conn, "market", "ticker"):
         return {"ok": True, "source": "market.ticker.distinct", "rows": [], "count": 0}
@@ -335,9 +335,9 @@ def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") 
 
 
 def query_ticker_types_count(conn: Any) -> dict[str, Any]:
-    if table_exists(conn, "public", "ticker_types"):
-        n = safe_count(conn, "public.ticker_types") or 0
-        return {"ok": True, "total_ticker_types": n, "source": "public.ticker_types"}
+    if table_exists(conn, "market", "ticker_type"):
+        n = safe_count(conn, "market.ticker_type") or 0
+        return {"ok": True, "total_ticker_types": n, "source": "market.ticker_type"}
     data = query_ticker_types(conn)
     return {
         "ok": True,

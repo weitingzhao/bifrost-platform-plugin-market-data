@@ -82,11 +82,12 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 
 
 def test_expected_object_counts() -> None:
-    assert len(MARKET_TABLES) == 15
+    assert len(MARKET_TABLES) == 16
     assert "stock_snapshot" in MARKET_TABLES
     assert "stock_movers" in MARKET_TABLES
     assert "us_market_holiday" in MARKET_TABLES
     assert "ticker_related" in MARKET_TABLES
+    assert "ticker_type" in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 4
     assert len(DATA_OPS_TABLES) == 2
     assert "us_trading_calendar" not in DATA_OPS_TABLES

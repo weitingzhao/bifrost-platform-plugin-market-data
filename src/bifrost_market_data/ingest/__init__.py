@@ -22,6 +22,7 @@ from bifrost_market_data.ingest.stock_movers import handle_stock_movers
 from bifrost_market_data.ingest.stock_snapshot import handle_stock_snapshot
 from bifrost_market_data.ingest.ticker_related import handle_ticker_related
 from bifrost_market_data.ingest.ticker_sync import handle_ticker_sync
+from bifrost_market_data.ingest.ticker_type import handle_ticker_type
 from bifrost_market_data.worker.claim import JobRow
 
 Handler = Callable[[JobRow], Any]
@@ -40,6 +41,7 @@ _RAW_HANDLERS: dict[str, Any] = {
     "option_open_interest": handle_option_open_interest,
     "ticker_sync": handle_ticker_sync,
     "ticker_related": handle_ticker_related,
+    "ticker_type": handle_ticker_type,
     "financials": handle_financials,
     "splits": handle_splits,
     "dividends": handle_dividends,
@@ -79,6 +81,7 @@ __all__ = [
     "handle_option_open_interest",
     "handle_ticker_sync",
     "handle_ticker_related",
+    "handle_ticker_type",
     "handle_financials",
     "handle_splits",
     "handle_dividends",

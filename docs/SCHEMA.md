@@ -262,6 +262,26 @@ rotates watchlist symbols daily (`batch_size` default 40).
 
 Trade consumers read this table via FDW (`market.ticker_related`).
 
+### `market.ticker_type`
+
+Polygon instrument type dictionary (`GET /v3/reference/tickers/types`).
+Replaces Trade-owned `public.ticker_types`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| code | text | PK part; e.g. `CS`, `ETF` |
+| description | text | Human-readable label |
+| asset_class | text | PK part; e.g. `stocks`, `indices` |
+| locale | text | PK part; e.g. `us` |
+| fetched_at | timestamptz | default `now()` |
+
+**PK:** `(code, asset_class, locale)`
+
+Ingest kind `ticker_type` (no payload) TRUNCATEs then upserts the full
+dictionary (~25 rows). No CronJob — enqueue manually when Polygon codes change.
+
+Trade consumers read via Plugin HTTP (`/market/reference/ticker-types`).
+
 ---
 
 ## `market_analytics` tables
@@ -474,7 +494,6 @@ FastAPI app: `src/bifrost_market_data/api/app.py`. OpenAPI at `/docs`.
 - `stock_readiness_daily`, `cache_stock_snapshot`
 - Legacy `report_option_max_pain_daily` / `report_option_atm_iv_daily` (replaced by `market_analytics.*`)
 - `option_trades` (Developer tier)
-- `ticker_types`
 - `job_bars_backfill`, `job_sepa_phase4`, IB bars paths
 
 ---

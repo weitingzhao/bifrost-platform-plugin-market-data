@@ -20,7 +20,7 @@
 --
 -- NOT dropped (Trade / Research owned):
 --   stock_readiness_daily, cache_stock_snapshot, report_option_*,
---   option_trades, ticker_types,
+--   option_trades,
 --   job_bars_backfill, job_sepa_phase4, watchlist
 --
 -- Dropped in holiday migration wave:
@@ -28,6 +28,9 @@
 --
 -- Dropped in related-tickers migration wave:
 --   ticker_related_tickers → market.ticker_related (Golden Source / FDW)
+--
+-- Dropped in ticker-type migration wave:
+--   ticker_types → market.ticker_type (Golden Source / Plugin HTTP)
 
 BEGIN;
 
@@ -46,6 +49,8 @@ DROP TABLE IF EXISTS public.job_massive_backfill CASCADE;
 DROP TABLE IF EXISTS public.reference_us_holidays CASCADE;
 DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE;
 DROP TABLE IF EXISTS public.stock_related_tickers CASCADE;
+DROP TABLE IF EXISTS public.ticker_types CASCADE;
+DROP TABLE IF EXISTS public.ticker_instrument_types CASCADE;
 
 -- Legacy flat fundamentals (names vary by historical DDL; IF EXISTS is safe)
 DROP TABLE IF EXISTS public.stock_financial_balance_sheet CASCADE;

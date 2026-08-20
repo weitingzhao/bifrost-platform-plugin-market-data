@@ -447,6 +447,20 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
+    # --- ticker_type (Polygon ticker types dictionary; replaces public.ticker_types) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.ticker_type (
+            code         text        NOT NULL,
+            description  text,
+            asset_class  text        NOT NULL DEFAULT '',
+            locale       text        NOT NULL DEFAULT '',
+            fetched_at   timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (code, asset_class, locale)
+        )
+        """
+    )
+
 
 def _create_market_analytics_tables(cur: _Cursor) -> None:
     # --- max_pain_daily (RANGE by month on trade_date) ---
@@ -810,6 +824,7 @@ MARKET_TABLES: tuple[str, ...] = (
     "corporate_action",
     "us_market_holiday",
     "ticker_related",
+    "ticker_type",
 )
 
 MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
