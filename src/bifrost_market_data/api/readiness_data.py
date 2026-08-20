@@ -569,39 +569,6 @@ def _view_or_table_exists(conn: Any, schema: str, name: str) -> bool:
         return False
 
 
-_VENDOR_GAP_SQL = """\
-WITH snap AS (
-    SELECT s.symbol, s.close, s.session_date
-    FROM market.stock_snapshot s
-    WHERE s.session_date = (SELECT MAX(session_date) FROM market.stock_snapshot)
-      AND s.close IS NOT NULL
-),
-candidates AS (
-    SELECT
-        u.symbol,
-        sn.session_date,
-        lb.bar_date AS last_bar_date,
-        lb.bar_close AS last_bar_close,
-        sn.close AS snapshot_close,
-        (lb.bar_date IS NOT NULL
-         AND sn.session_date > lb.bar_date
-         AND ABS(lb.bar_close - sn.close) >= 0.0001
-        ) AS is_vendor_gap,
-        (lb.bar_date IS NULL) AS is_fallback_gap
-    FROM market.v_us_equity_universe u
-    JOIN snap sn ON sn.symbol = u.symbol
-    LEFT JOIN LATERAL (
-        SELECT d.bar_date, d.close AS bar_close
-        FROM market.stock_daily d
-        WHERE d.symbol = u.symbol
-        ORDER BY d.bar_date DESC
-        LIMIT 1
-    ) lb ON true
-    WHERE LOWER(COALESCE(u.instrument_type, '')) <> 'warrant'
-)
-"""
-
-
 def query_vendor_gap(
     conn: Any,
     *,
@@ -610,69 +577,103 @@ def query_vendor_gap(
 ) -> dict[str, Any]:
     """Vendor gap detection: snapshot close vs latest bar close divergence.
 
-    Absorbs the CTE from Trade readiness_snapshot.py Step 3.
+    Uses two lightweight queries + Python comparison instead of a heavy CTE
+    to avoid statement_timeout on large stock_daily tables.
     """
     if not table_exists(conn, "market", "stock_snapshot"):
         return {"ok": True, "gap_count": 0, "session_date": None}
 
-    has_universe = table_exists(conn, "market", "v_us_equity_universe") or _view_or_table_exists(conn, "market", "v_us_equity_universe")
+    has_universe = (
+        table_exists(conn, "market", "v_us_equity_universe")
+        or _view_or_table_exists(conn, "market", "v_us_equity_universe")
+    )
     if not has_universe or not table_exists(conn, "market", "stock_daily"):
         return {"ok": True, "gap_count": 0, "session_date": None}
 
     with conn.cursor() as cur:
-        cur.execute("SELECT MAX(session_date) FROM market.stock_snapshot")
-        row = cur.fetchone()
-        latest_sd = row[0] if row else None
-    if latest_sd is None:
+        cur.execute(
+            """
+            SELECT s.symbol, s.close, s.session_date
+            FROM market.stock_snapshot s
+            WHERE s.session_date = (SELECT MAX(session_date) FROM market.stock_snapshot)
+              AND s.close IS NOT NULL
+            """
+        )
+        snap_rows = cur.fetchall() or []
+
+    if not snap_rows:
         return {"ok": True, "gap_count": 0, "session_date": None}
+
+    snap_map: dict[str, tuple[float, Any]] = {}
+    latest_sd = snap_rows[0][2]
+    for sym, close_val, sd in snap_rows:
+        snap_map[sym] = (float(close_val), sd)
 
     session_date_str = latest_sd.isoformat() if hasattr(latest_sd, "isoformat") else str(latest_sd)
 
     with conn.cursor() as cur:
-        cur.execute("SET statement_timeout = '120s'")
-        count_sql = (
-            _VENDOR_GAP_SQL
-            + "SELECT COUNT(*)::bigint FROM candidates WHERE is_vendor_gap OR is_fallback_gap"
+        cur.execute(
+            """
+            SELECT symbol FROM market.v_us_equity_universe
+            WHERE LOWER(COALESCE(instrument_type, '')) <> 'warrant'
+            """
         )
-        cur.execute(count_sql)
-        cnt_row = cur.fetchone()
-    gap_count = int(cnt_row[0] or 0) if cnt_row else 0
+        universe_syms = {r[0] for r in (cur.fetchall() or [])}
+
+    target_symbols = list(universe_syms & set(snap_map.keys()))
+    if not target_symbols:
+        return {"ok": True, "gap_count": 0, "session_date": session_date_str}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (symbol) symbol, bar_date, close
+            FROM market.stock_daily
+            WHERE symbol = ANY(%s)
+            ORDER BY symbol, bar_date DESC
+            """,
+            (target_symbols,),
+        )
+        bar_rows = cur.fetchall() or []
+
+    bar_map: dict[str, tuple[Any, float | None]] = {}
+    for sym, bar_date, bar_close in bar_rows:
+        bar_map[sym] = (bar_date, float(bar_close) if bar_close is not None else None)
+
+    gaps: list[dict[str, Any]] = []
+    for sym in sorted(target_symbols):
+        snap_close, snap_sd = snap_map[sym]
+        bar_entry = bar_map.get(sym)
+
+        if bar_entry is not None:
+            bar_date, bar_close = bar_entry
+            if bar_close is not None and snap_sd > bar_date and abs(bar_close - snap_close) >= 0.0001:
+                gaps.append({
+                    "symbol": sym,
+                    "session_date": session_date_str,
+                    "last_bar_date": bar_date.isoformat() if hasattr(bar_date, "isoformat") else str(bar_date),
+                    "last_bar_close": bar_close,
+                    "snapshot_close": snap_close,
+                    "reason": "vendor_gap",
+                })
+        else:
+            gaps.append({
+                "symbol": sym,
+                "session_date": session_date_str,
+                "last_bar_date": None,
+                "last_bar_close": None,
+                "snapshot_close": snap_close,
+                "reason": "fallback_gap",
+            })
 
     result: dict[str, Any] = {
         "ok": True,
-        "gap_count": gap_count,
+        "gap_count": len(gaps),
         "session_date": session_date_str,
     }
 
     if detail:
-        with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '120s'")
-            detail_sql = (
-                _VENDOR_GAP_SQL
-                + """
-                SELECT
-                    symbol, session_date::text, last_bar_date::text,
-                    last_bar_close, snapshot_close,
-                    CASE WHEN is_vendor_gap THEN 'vendor_gap' ELSE 'fallback_gap' END AS reason
-                FROM candidates
-                WHERE is_vendor_gap OR is_fallback_gap
-                ORDER BY symbol
-                LIMIT %s
-                """
-            )
-            cur.execute(detail_sql, (limit,))
-            rows = cur.fetchall() or []
-        gaps: list[dict[str, Any]] = []
-        for r in rows:
-            gaps.append({
-                "symbol": str(r[0]),
-                "session_date": str(r[1]) if r[1] else None,
-                "last_bar_date": str(r[2]) if r[2] else None,
-                "last_bar_close": float(r[3]) if r[3] is not None else None,
-                "snapshot_close": float(r[4]) if r[4] is not None else None,
-                "reason": str(r[5]),
-            })
-        result["gaps"] = gaps
+        result["gaps"] = gaps[:limit]
 
     return result
 
