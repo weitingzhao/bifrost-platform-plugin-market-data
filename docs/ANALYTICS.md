@@ -1,14 +1,30 @@
 # Market Data Analytics
 
-Derived metrics written by the Market Data Plugin CronJobs into `market_analytics.*`.
+> **Ownership (Wave 2.1 — 2026-08-21):** Daily upsert computation for
+> `market_analytics.*` (max-pain / ATM IV / PCR / IV percentile) has **moved** to
+> **`bifrost-research`** (`engines/volatility/` + CronJobs in `research` NS).
+>
+> See: `bifrost-research/k8s/engines/cronjob-volatility.yaml`
+> (`research-max-pain`, `research-atm-iv-pcr`, `research-iv-percentile`).
+>
+> This Plugin retains:
+> - Pure-function helpers (`analytics/max_pain_math.py`) for live max-pain compute
+> - **Deprecated** read routes under `/market/analytics/*` (still read Golden Source
+>   tables; prefer Research API `:8795` / platform proxy `/api/v1/research/*`)
 
-## Schedules (UTC)
+Derived metrics written into `market_analytics.*` by **Research Engine** CronJobs
+(not by this Plugin's scheduler).
 
-| Slot | Cron | Writes | Notes |
+## Schedules (UTC) — Research NS
+
+| Slot | Cron | Writes | Owner |
 |------|------|--------|-------|
-| `max-pain` | `45 22 * * *` | `max_pain_daily` | From `option_open_interest` |
-| `atm-iv-pcr` | `0 23 * * *` | `atm_iv_daily` + `pcr_daily` | D12=A merged slot |
-| `iv-percentile` | `15 23 * * *` | `iv_percentile_daily` | After ATM IV; D12=A |
+| `max-pain` | `45 22 * * *` | `max_pain_daily` | `bifrost-research` |
+| `atm-iv-pcr` | `0 23 * * *` | `atm_iv_daily` + `pcr_daily` | `bifrost-research` |
+| `iv-percentile` | `15 23 * * *` | `iv_percentile_daily` | `bifrost-research` |
+
+Plugin `scheduler/daily.py` **rejects** these slot names (`MIGRATED_ANALYTICS_SLOTS`)
+so they cannot be re-enqueued here by mistake.
 
 Each slot runs over `lookback_days` recent trading days (default 3) for holiday/gap heal.
 
@@ -22,7 +38,8 @@ Per `(symbol, expiry)` on a trade date:
 
 `max_pain_strike = argmin_K(pain(K))`
 
-Source: `market.option_open_interest` only (no Polygon).
+Source: `market.option_open_interest` only (no Polygon). Live compute still available
+via Plugin `GET /market/analytics/max-pain/compute` (`max_pain_math`).
 
 ### ATM IV (D10=A)
 
@@ -63,7 +80,15 @@ Treat absolute IV levels as vendor-dependent; relative day-over-day changes are 
 
 ## Read API
 
-Plugin routes (prefix `/market`):
+### Preferred — Research API
+
+`GET http://research-api.research.svc.cluster.local:8795/analytics/options/*`
+(or platform proxy `GET /api/v1/research/analytics/options/*`)
+
+### Legacy — Plugin routes (deprecated)
+
+Plugin routes (prefix `/market`) still serve persisted tables for backward compatibility.
+Responses include `Deprecation: true` and `X-Bifrost-Analytics-Owner: bifrost-research`.
 
 | Method | Path | Table / source |
 |--------|------|----------------|

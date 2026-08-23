@@ -9,9 +9,11 @@ import pytest
 
 from bifrost_market_data.scheduler.daily import (
     DEFAULT_IV_RADAR_BENCHMARKS,
+    MIGRATED_ANALYTICS_SLOTS,
     SLOT_NAMES,
     enqueue_slot,
     is_trading_day,
+    option_trades_universe,
     resolve_target_date,
     union_iv_radar_benchmarks,
 )
@@ -152,6 +154,12 @@ class _DailyCursor:
                 rows.append((ticker,))
             self.parent._fetchall = rows
             self.parent._fetchone = None
+        elif "from market.ticker" in q and "instrument_type" in q:
+            self.parent._fetchall = [(s,) for s in self.parent.cs_universe]
+            self.parent._fetchone = None
+        elif "from market.stock_financials" in q and "income_statement" in q:
+            self.parent._fetchall = [(s,) for s in self.parent.income_covered]
+            self.parent._fetchone = None
         elif "from watchlist" in q or "from public.watchlist" in q or "select distinct symbol" in q:
             if self.parent.raise_on_watchlist:
                 raise RuntimeError('relation "public.watchlist" does not exist')
@@ -209,8 +217,12 @@ class _DailyConn:
         atm_iv_hist: list[dict[str, Any]] | None = None,
         raise_on_watchlist: bool = False,
         raise_on_readiness: bool = False,
+        cs_universe: list[str] | None = None,
+        income_covered: list[str] | None = None,
     ) -> None:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
+        self.cs_universe = cs_universe or []
+        self.income_covered = income_covered or []
         self.raise_on_watchlist = raise_on_watchlist
         self.raise_on_readiness = raise_on_readiness
         self.calendar = calendar or {}
@@ -399,6 +411,47 @@ def test_enqueue_option_bars() -> None:
     assert all(j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
 
 
+def test_option_trades_universe_always_includes_spx() -> None:
+    # Truncate to 50 while always keeping SPX even if alphabetically late.
+    many = [f"SYM{i:03d}" for i in range(60)]
+    out = option_trades_universe(many, limit=50)
+    assert len(out) == 50
+    assert "SPX" in out
+    assert out == sorted(out)
+
+
+def test_enqueue_option_trades() -> None:
+    contracts = [
+        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
+        ("O:SPX240719C05000000", "SPX", date(2024, 7, 19)),
+        ("O:MSFT240719C00400000", "MSFT", date(2024, 7, 19)),
+    ]
+    conn = _DailyConn(option_contracts=contracts)
+    result = enqueue_slot(
+        conn,
+        "option-trades",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL", "MSFT"],
+        scheduler_cfg={
+            "slots": {
+                "option-trades": {
+                    "priority": 3,
+                    "max_per_underlying": 40,
+                    "universe_limit": 50,
+                }
+            }
+        },
+    )
+    assert result["enqueued"] == 3
+    assert all(j["kind"] == "option_trades" for j in result["jobs"])
+    assert {j["payload"]["option_ticker"] for j in result["jobs"]} == {
+        "O:AAPL240719C00200000",
+        "O:SPX240719C05000000",
+        "O:MSFT240719C00400000",
+    }
+    assert all(j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
+
+
 def test_enqueue_minute_bars() -> None:
     contracts = [
         ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
@@ -481,20 +534,122 @@ def test_reference_slot_not_skipped_on_holiday() -> None:
     assert result["jobs"][0]["kind"] == "ticker_sync"
 
 
+def test_enqueue_fundamentals_rotate_cs_missing_first() -> None:
+    conn = _DailyConn(
+        cs_universe=["AAA", "BBB", "CCC", "DDD"],
+        income_covered=["AAA", "BBB"],
+    )
+    result = enqueue_slot(
+        conn,
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["WATCH"],
+        scheduler_cfg={
+            "slots": {
+                "fundamentals-rotate": {
+                    "priority": 1,
+                    "batch_size": 2,
+                    "universe": "cs",
+                    "prioritize_missing": True,
+                    "include_ratios": False,
+                    "include_short_interest": False,
+                    "include_short_volume": False,
+                }
+            },
+            "iv_radar_benchmarks": [],
+        },
+    )
+    assert result["enqueued"] == 2
+    batch = [j["payload"]["symbol"] for j in result["jobs"]]
+    assert set(batch) <= {"CCC", "DDD"}
+    assert all(j["kind"] == "financials" for j in result["jobs"])
+
+
+def test_enqueue_fundamentals_rotate_force_on_holiday() -> None:
+    holiday = date(2024, 7, 4)
+    conn = _DailyConn(calendar={holiday: False})
+    skipped = enqueue_slot(
+        conn,
+        "fundamentals-rotate",
+        target_date=holiday,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {"fundamentals-rotate": {"batch_size": 1}},
+            "iv_radar_benchmarks": [],
+        },
+    )
+    assert skipped.get("skipped") is True
+    forced = enqueue_slot(
+        conn,
+        "fundamentals-rotate",
+        target_date=holiday,
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {
+                "fundamentals-rotate": {
+                    "batch_size": 1,
+                    "include_ratios": False,
+                    "include_short_interest": False,
+                    "include_short_volume": False,
+                }
+            },
+            "iv_radar_benchmarks": [],
+        },
+        force=True,
+    )
+    assert forced.get("skipped") is not True
+    assert forced["enqueued"] == 1
+
+
 def test_enqueue_fundamentals_rotate_batch() -> None:
+    # Universe = watchlist ∪ iv_radar_benchmarks. Each batched symbol enqueues
+    # 4 SEPA-supporting kinds: financials, ratios, short_interest, short_volume.
     symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
     result = enqueue_slot(
         _DailyConn(),
         "fundamentals-rotate",
         target_date=date(2024, 6, 20),
         watchlist_symbols=symbols,
-        scheduler_cfg={"slots": {"fundamentals-rotate": {"priority": 1, "batch_size": 2}}},
+        scheduler_cfg={
+            "slots": {"fundamentals-rotate": {"priority": 1, "batch_size": 2}},
+            # Pin benchmarks so the union is deterministic in the test.
+            "iv_radar_benchmarks": ["SPY", "QQQ", "IWM"],
+        },
     )
-    assert result["enqueued"] == 2
-    assert all(j["kind"] == "financials" for j in result["jobs"])
+    # 2 symbols × 4 kinds = 8 jobs
+    assert result["enqueued"] == 8
+    kinds = {j["kind"] for j in result["jobs"]}
+    assert kinds == {"financials", "ratios", "short_interest", "short_volume"}
     batch = {j["payload"]["symbol"] for j in result["jobs"]}
     assert len(batch) == 2
-    assert batch.issubset(set(symbols))
+    expected_universe = set(symbols) | {"SPY", "QQQ", "IWM"}
+    assert batch.issubset(expected_universe)
+
+
+def test_enqueue_fundamentals_rotate_toggle_kinds() -> None:
+    # include_ratios/short_interest/short_volume flags let ops fine-tune what
+    # each rotation batch enqueues (e.g. disable short-interest during backfill).
+    result = enqueue_slot(
+        _DailyConn(),
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {
+                "fundamentals-rotate": {
+                    "priority": 1,
+                    "batch_size": 1,
+                    "include_ratios": False,
+                    "include_short_interest": False,
+                    "include_short_volume": True,
+                }
+            },
+            "iv_radar_benchmarks": [],
+        },
+    )
+    assert result["enqueued"] == 2  # financials + short_volume only
+    kinds = {j["kind"] for j in result["jobs"]}
+    assert kinds == {"financials", "short_volume"}
 
 
 def test_enqueue_related_rotate_batch() -> None:
@@ -528,19 +683,23 @@ def test_enqueue_related_rotate_skipped_on_holiday() -> None:
 
 def test_enqueue_fundamentals_rotate_by_date() -> None:
     symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
+    cfg_base = {
+        "slots": {"fundamentals-rotate": {"batch_size": 2}},
+        "iv_radar_benchmarks": [],
+    }
     r1 = enqueue_slot(
         _DailyConn(),
         "fundamentals-rotate",
         target_date=date(2024, 6, 20),
         watchlist_symbols=symbols,
-        scheduler_cfg={"slots": {"fundamentals-rotate": {"batch_size": 2}}},
+        scheduler_cfg=cfg_base,
     )
     r2 = enqueue_slot(
         _DailyConn(),
         "fundamentals-rotate",
         target_date=date(2024, 6, 21),
         watchlist_symbols=symbols,
-        scheduler_cfg={"slots": {"fundamentals-rotate": {"batch_size": 2}}},
+        scheduler_cfg=cfg_base,
     )
     s1 = {j["payload"]["symbol"] for j in r1["jobs"]}
     s2 = {j["payload"]["symbol"] for j in r2["jobs"]}
@@ -585,6 +744,7 @@ def test_unknown_slot() -> None:
 def test_all_slot_names_covered() -> None:
     assert "stock-eod" in SLOT_NAMES
     assert "option-bars" in SLOT_NAMES
+    assert "option-trades" in SLOT_NAMES
     assert "minute-bars" in SLOT_NAMES
     assert "reference" in SLOT_NAMES
     assert "fundamentals-rotate" in SLOT_NAMES
@@ -594,9 +754,12 @@ def test_all_slot_names_covered() -> None:
     assert "stock-snapshot" in SLOT_NAMES
     assert "stock-movers" in SLOT_NAMES
     assert "oi-gap-heal" in SLOT_NAMES
-    assert "max-pain" in SLOT_NAMES
-    assert "atm-iv-pcr" in SLOT_NAMES
-    assert "iv-percentile" in SLOT_NAMES
+    assert "max-pain" not in SLOT_NAMES
+    assert "atm-iv-pcr" not in SLOT_NAMES
+    assert "iv-percentile" in MIGRATED_ANALYTICS_SLOTS
+    assert MIGRATED_ANALYTICS_SLOTS == frozenset(
+        {"max-pain", "atm-iv-pcr", "iv-percentile"}
+    )
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
 
@@ -835,237 +998,9 @@ def test_oi_gap_heal_runs_on_weekend() -> None:
     assert result["enqueued"] == 0
 
 
-def test_enqueue_max_pain() -> None:
-    """D8=B: max-pain slot computes inline over lookback trading days."""
-    td = date(2024, 6, 20)
-    expiry = date(2025, 6, 20)
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 6, 18): True,
-            date(2024, 6, 19): True,
-            date(2024, 6, 20): True,
-        },
-        oi_rows=[
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "C",
-                "open_interest": 10,
-            },
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "P",
-                "open_interest": 10,
-            },
-            {
-                "trade_date": date(2024, 6, 19),
-                "underlying": "AAPL",
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "C",
-                "open_interest": 5,
-            },
-            {
-                "trade_date": date(2024, 6, 19),
-                "underlying": "AAPL",
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "P",
-                "open_interest": 5,
-            },
-        ],
-    )
-    result = enqueue_slot(
-        conn,
-        "max-pain",
-        target_date=td,
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"max-pain": {"lookback_days": 3}}},
-    )
-    assert result["slot"] == "max-pain"
-    assert result["enqueued"] == 0
-    assert result["lookback_days"] == 3
-    assert result["trading_days"] == ["2024-06-18", "2024-06-19", "2024-06-20"]
-    assert result["rows_written"] == 2  # 19 + 20 (18 has no OI)
-    assert any(
-        "market_analytics.max_pain_daily" in s[0] and "DO UPDATE" in s[0]
-        for s in conn.statements
-        if isinstance(s[0], str) and "INSERT INTO" in s[0]
-    )
-
-
-def test_max_pain_runs_on_holiday_with_lookback() -> None:
-    """Holiday CronJob still runs; lookback only includes trading days."""
-    holiday = date(2024, 7, 4)
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 7, 2): True,
-            date(2024, 7, 3): True,
-            holiday: False,
-        },
-        oi_rows=[],
-    )
-    result = enqueue_slot(
-        conn,
-        "max-pain",
-        target_date=holiday,
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"max-pain": {"lookback_days": 3}}},
-    )
-    assert result.get("skipped") is not True
-    assert result["enqueued"] == 0
-    # lookback=3 ending on holiday → prior weekdays 7/1–7/3 (7/4 closed excluded)
-    assert result["trading_days"] == ["2024-07-01", "2024-07-02", "2024-07-03"]
-
-
-def test_enqueue_atm_iv_pcr() -> None:
-    """D12=A: merged slot computes ATM IV + PCR over lookback trading days."""
-    td = date(2024, 6, 20)
-    expiry = date(2025, 6, 20)
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 6, 18): True,
-            date(2024, 6, 19): True,
-            date(2024, 6, 20): True,
-        },
-        atm_snap_rows=[
-            {
-                "trade_date": td,
-                "option_ticker": "O:AAPL1C",
-                "underlying": "AAPL",
-                "iv": 0.25,
-                "underlying_price": 100.0,
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "C",
-            },
-            {
-                "trade_date": td,
-                "option_ticker": "O:AAPL1P",
-                "underlying": "AAPL",
-                "iv": 0.27,
-                "underlying_price": 100.0,
-                "expiry": expiry,
-                "strike": 100.0,
-                "option_right": "P",
-            },
-        ],
-        oi_rows=[
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "option_right": "P",
-                "open_interest": 200,
-                "expiry": expiry,
-                "strike": 100.0,
-            },
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "option_right": "C",
-                "open_interest": 100,
-                "expiry": expiry,
-                "strike": 100.0,
-            },
-        ],
-        vol_rows=[
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "option_right": "P",
-                "day_volume": 80,
-            },
-            {
-                "trade_date": td,
-                "underlying": "AAPL",
-                "option_right": "C",
-                "day_volume": 40,
-            },
-        ],
-    )
-    result = enqueue_slot(
-        conn,
-        "atm-iv-pcr",
-        target_date=td,
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"atm-iv-pcr": {"lookback_days": 3}}},
-    )
-    assert result["slot"] == "atm-iv-pcr"
-    assert result["enqueued"] == 0
-    assert result["symbols"] == 4  # AAPL ∪ SPY/QQQ/IWM
-    assert result["trading_days"] == ["2024-06-18", "2024-06-19", "2024-06-20"]
-    assert result["atm_rows_written"] == 1
-    assert result["pcr_rows_written"] == 1
-    assert any(
-        "market_analytics.atm_iv_daily" in s[0] and "DO UPDATE" in s[0]
-        for s in conn.statements
-        if isinstance(s[0], str) and "INSERT INTO" in s[0]
-    )
-    assert any(
-        "market_analytics.pcr_daily" in s[0] and "DO UPDATE" in s[0]
-        for s in conn.statements
-        if isinstance(s[0], str) and "INSERT INTO" in s[0]
-    )
-
-
-def test_enqueue_iv_percentile() -> None:
-    """D12=A: iv-percentile slot after ATM IV history exists."""
-    td = date(2024, 6, 20)
-    expiry = date(2025, 6, 20)
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 6, 18): True,
-            date(2024, 6, 19): True,
-            date(2024, 6, 20): True,
-        },
-        atm_iv_hist=[
-            {
-                "symbol": "AAPL",
-                "trade_date": date(2024, 6, 18),
-                "expiry": expiry,
-                "atm_iv": 0.20,
-            },
-            {
-                "symbol": "AAPL",
-                "trade_date": date(2024, 6, 19),
-                "expiry": expiry,
-                "atm_iv": 0.25,
-            },
-            {
-                "symbol": "AAPL",
-                "trade_date": td,
-                "expiry": expiry,
-                "atm_iv": 0.30,
-            },
-        ],
-    )
-    result = enqueue_slot(
-        conn,
-        "iv-percentile",
-        target_date=td,
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={
-            "slots": {
-                "iv-percentile": {"lookback_days": 3, "percentile_window": 252},
-            }
-        },
-    )
-    assert result["slot"] == "iv-percentile"
-    assert result["enqueued"] == 0
-    assert result["symbols"] == 4  # AAPL ∪ SPY/QQQ/IWM
-    assert result["percentile_window"] == 252
-    assert result["rows_written"] == 3  # one row per trading day with hist
-    assert any(
-        "market_analytics.iv_percentile_daily" in s[0] and "DO UPDATE" in s[0]
-        for s in conn.statements
-        if isinstance(s[0], str) and "INSERT INTO" in s[0]
-    )
+def test_migrated_analytics_slots_rejected() -> None:
+    """Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research."""
+    conn = _DailyConn([])
+    for slot in ("max-pain", "atm-iv-pcr", "iv-percentile"):
+        with pytest.raises(ValueError, match="moved to bifrost_research"):
+            enqueue_slot(conn, slot, target_date=date(2024, 6, 20))

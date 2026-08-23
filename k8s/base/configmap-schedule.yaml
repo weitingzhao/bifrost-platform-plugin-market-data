@@ -14,7 +14,10 @@ data:
         SELECT DISTINCT symbol FROM public.watchlist
         WHERE sec_type = 'STK' AND optionable = true
           AND symbol IS NOT NULL AND trim(symbol) <> ''
-      iv_radar_benchmarks: [SPY, QQQ, IWM]
+      # IV Radar / SEPA benchmark universe: ETFs + SPX + M7 mega-caps.
+      # eod-pipeline / option_snapshot / option_open_interest / atm-iv-pcr /
+      # iv-percentile all union this with the watchlist.
+      iv_radar_benchmarks: [SPY, QQQ, IWM, SPX, AAPL, MSFT, GOOG, AMZN, META, NVDA, TSLA]
       slots:
         stock-eod:
           cron: "30 21 * * *"
@@ -37,6 +40,13 @@ data:
           priority: 4
           expiry_days: 60
           max_per_underlying: 40
+        option-trades:
+          cron: "0 23 * * *"
+          priority: 3
+          expiry_days: 60
+          # 2 = smoke/entitlement-safe; raise after Polygon Options Trades entitlement is confirmed
+          max_per_underlying: 2
+          universe_limit: 50
         minute-bars:
           cron: "15 23 * * *"
           priority: 3
@@ -52,7 +62,12 @@ data:
         fundamentals-rotate:
           cron: "0 3 * * *"
           priority: 1
-          batch_size: 40
+          universe: cs
+          prioritize_missing: true
+          batch_size: 5000
+          include_ratios: false
+          include_short_interest: false
+          include_short_volume: false
         related-rotate:
           cron: "30 22 * * *"
           priority: 1
@@ -61,6 +76,7 @@ data:
           cron: "15 2 * * *"
           keep_days: 7
           keep_max: 5000
+          option_trades_keep_days: 30
         stock-snapshot:
           cron: "5 21 * * *"
           priority: 4
@@ -70,16 +86,8 @@ data:
         oi-gap-heal:
           cron: "0 4 * * 6"
           lookback_days: 30
-        max-pain:
-          cron: "45 22 * * *"
-          lookback_days: 3
-        atm-iv-pcr:
-          cron: "0 23 * * *"
-          lookback_days: 3
-        iv-percentile:
-          cron: "15 23 * * *"
-          lookback_days: 3
-          percentile_window: 252
+        # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
+        # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
         readiness-refresh:
           cron: "30 23 * * *"
           priority: 0

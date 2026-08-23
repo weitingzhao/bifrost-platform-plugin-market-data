@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import batch_upsert, parse_date
+from bifrost_market_data.ingest.index_options import (
+    contracts_api_underlying,
+    storage_underlying,
+)
 from bifrost_market_data.worker.claim import JobRow
 
 _COLS = ("underlying", "expiry")
@@ -15,11 +19,14 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
     underlying = str(payload.get("underlying") or payload.get("underlying_ticker") or "").strip().upper()
     if not underlying:
         raise ValueError("option_expiration payload requires underlying")
+    storage = storage_underlying(underlying)
+    api_underlying = contracts_api_underlying(underlying)
+    max_pages = int(payload.get("max_pages") or (80 if storage == "SPX" else 20))
 
     data = await client.fetch_options_contracts(
-        underlying_ticker=underlying,
+        underlying_ticker=api_underlying,
         expired=False,
-        max_pages=int(payload.get("max_pages") or 20),
+        max_pages=max_pages,
     )
     results = list(data.get("results") or [])
     seen: set[Any] = set()
@@ -29,8 +36,7 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
         expiry = parse_date(item.get("expiration_date"))
         if expiry is None:
             continue
-        und = str(item.get("underlying_ticker") or underlying).strip().upper()
-        seen.add((und, expiry))
+        seen.add((storage, expiry))
 
     rows = sorted(seen, key=lambda x: (x[0], x[1]))
     try:
@@ -52,7 +58,7 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
                     SET updated_at = now()
                     WHERE underlying = %s
                     """,
-                    (underlying,),
+                    (storage,),
                 )
         conn.commit()
     except Exception:
@@ -60,7 +66,8 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
         raise
     return {
         "rows_written": n,
-        "underlying": underlying,
+        "underlying": storage,
+        "api_underlying": api_underlying,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }

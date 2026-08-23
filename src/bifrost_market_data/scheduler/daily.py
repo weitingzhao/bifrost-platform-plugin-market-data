@@ -18,6 +18,11 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
+from bifrost_market_data.ingest.index_options import (
+    load_index_option_roots_from_cfg,
+    spot_api_symbol,
+    storage_underlying,
+)
 from bifrost_market_data.scheduler.enqueue import insert_job, trim_old_jobs
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,7 @@ SLOT_NAMES = (
     "corporate",
     "option-refresh",
     "option-bars",
+    "option-trades",
     "minute-bars",
     "calendar",
     "reference",
@@ -41,10 +47,10 @@ SLOT_NAMES = (
     "stock-snapshot",
     "stock-movers",
     "oi-gap-heal",
-    "max-pain",
-    "atm-iv-pcr",
-    "iv-percentile",
 )
+
+# Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
+MIGRATED_ANALYTICS_SLOTS = frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"})
 
 DEFAULT_WATCHLIST_QUERY = """
 SELECT DISTINCT symbol FROM public.watchlist
@@ -52,7 +58,25 @@ WHERE sec_type = 'STK' AND optionable = true
   AND symbol IS NOT NULL AND trim(symbol) <> ''
 """.strip()
 
-# Wave A IV Radar market-weather ETFs — unioned into atm-iv-pcr + iv-percentile only.
+# Same filter as Research dim_universe / Stock Screener Technical.
+CS_UNIVERSE_QUERY = """
+SELECT symbol
+FROM market.ticker
+WHERE instrument_type = 'CS'
+  AND market = 'stocks'
+  AND COALESCE(active, true) = true
+  AND lower(COALESCE(currency, 'usd')) = 'usd'
+  AND symbol IS NOT NULL AND trim(symbol) <> ''
+""".strip()
+
+INCOME_STATEMENT_COVERED_QUERY = """
+SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
+FROM market.stock_financials
+WHERE report_type = 'income_statement'
+  AND symbol IS NOT NULL AND trim(symbol) <> ''
+""".strip()
+
+# Wave A IV Radar market-weather ETFs — unioned into eod-pipeline / option paths.
 DEFAULT_IV_RADAR_BENCHMARKS = ("SPY", "QQQ", "IWM")
 
 
@@ -277,6 +301,84 @@ def resolve_watchlist_with_source(
     return [], "empty"
 
 
+def _rows_to_symbols(rows: Any) -> list[str]:
+    symbols: list[str] = []
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym = row.get("symbol") or next(iter(row.values()), None)
+        else:
+            sym = row[0] if row else None
+        if sym:
+            symbols.append(str(sym).strip().upper())
+    return sorted(set(symbols))
+
+
+def load_cs_universe(conn: Any) -> list[str]:
+    """Active USD common stock universe from ``market.ticker``."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CS_UNIVERSE_QUERY)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:
+        logger.warning("CS universe query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+    return _rows_to_symbols(rows)
+
+
+def load_income_statement_symbols(conn: Any) -> set[str]:
+    """Symbols that already have an income_statement row in stock_financials."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(INCOME_STATEMENT_COVERED_QUERY)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:
+        logger.warning("income-statement coverage query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return set()
+    return set(_rows_to_symbols(rows))
+
+
+def _rotate_symbols(symbols: Sequence[str], day_s: str) -> list[str]:
+    items = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if not items:
+        return []
+    offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(items)
+    return items[offset:] + items[:offset]
+
+
+def resolve_fundamentals_rotate_symbols(
+    conn: Any,
+    *,
+    watchlist_symbols: Sequence[str],
+    scheduler_cfg: Mapping[str, Any],
+    slot_cfg: Mapping[str, Any],
+    day_s: str,
+) -> list[str]:
+    """CS universe (or watchlist fallback), missing income statements first."""
+    universe_mode = str(slot_cfg.get("universe") or "watchlist").strip().lower()
+    if universe_mode == "cs":
+        cs = load_cs_universe(conn)
+        pool = union_iv_radar_benchmarks(cs or watchlist_symbols, scheduler_cfg)
+    else:
+        pool = union_iv_radar_benchmarks(watchlist_symbols, scheduler_cfg)
+
+    prioritize_missing = bool(slot_cfg.get("prioritize_missing", True))
+    if not prioritize_missing or not pool:
+        return _rotate_symbols(pool, day_s)
+
+    covered = load_income_statement_symbols(conn)
+    missing = [s for s in pool if s not in covered]
+    have = [s for s in pool if s in covered]
+    return _rotate_symbols(missing, day_s) + _rotate_symbols(have, day_s)
+
+
 def union_iv_radar_benchmarks(
     symbols: Sequence[str],
     scheduler_cfg: Mapping[str, Any] | None = None,
@@ -293,6 +395,28 @@ def union_iv_radar_benchmarks(
     merged = {str(s).strip().upper() for s in symbols if str(s).strip()}
     merged.update(benches)
     return sorted(merged)
+
+
+def option_trades_universe(
+    symbols: Sequence[str],
+    *,
+    limit: int = 50,
+    always_include: str = "SPX",
+) -> list[str]:
+    """SPX ∪ watchlist — sorted union truncated to ``limit``, always keep SPX.
+
+    Owner-locked tape universe (plugin-options-tape): daily REST ingest only.
+    """
+    cap = max(1, int(limit))
+    must = str(always_include or "SPX").strip().upper() or "SPX"
+    merged = {str(s).strip().upper() for s in symbols if str(s).strip()}
+    merged.add(must)
+    sorted_syms = sorted(merged)
+    if len(sorted_syms) <= cap:
+        return sorted_syms
+    others = [s for s in sorted_syms if s != must]
+    keep = others[: cap - 1]
+    return sorted([*keep, must])
 
 
 def load_option_tickers(
@@ -394,9 +518,20 @@ def enqueue_slot(
     target_date: date | None = None,
     watchlist_symbols: Sequence[str] | None = None,
     scheduler_cfg: Mapping[str, Any] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Generate jobs for one schedule slot. Returns summary dict."""
+    """Generate jobs for one schedule slot. Returns summary dict.
+
+    ``force=True`` runs holiday-gated slots on weekends (used for CS financials catch-up).
+    """
     slot_key = str(slot).strip().lower()
+    if slot_key in MIGRATED_ANALYTICS_SLOTS:
+        msg = (
+            f"slot {slot_key!r} moved to bifrost_research.scheduler.volatility "
+            "(Research NS); plugin no longer computes market_analytics upserts"
+        )
+        logger.error(msg)
+        raise ValueError(msg)
     if slot_key not in SLOT_NAMES:
         raise ValueError(f"unknown slot: {slot!r} (expected one of {SLOT_NAMES})")
 
@@ -410,7 +545,36 @@ def enqueue_slot(
         keep_days = int(scfg.get("keep_days") or 7)
         keep_max = int(scfg.get("keep_max") or 5000)
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
-        return {"slot": slot_key, "trimmed": deleted, "enqueued": 0, "deduped": 0}
+        trades_keep = int(scfg.get("option_trades_keep_days") or 30)
+        partitions_dropped = 0
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT data_ops.drop_day_partitions_older_than('market', 'option_trades', %s)",
+                    (trades_keep,),
+                )
+                row = cur.fetchone() if hasattr(cur, "fetchone") else None
+            if row is not None:
+                partitions_dropped = int(row[0] if not isinstance(row, Mapping) else next(iter(row.values())))
+            if hasattr(conn, "commit"):
+                conn.commit()
+            # Re-create near-term day partitions after drops.
+            with conn.cursor() as cur:
+                cur.execute("SELECT data_ops.ensure_day_partitions('market', 'option_trades', 35, 2)")
+            if hasattr(conn, "commit"):
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 — retention best-effort
+            logger.warning("option_trades partition retention failed: %s", exc)
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        return {
+            "slot": slot_key,
+            "trimmed": deleted,
+            "option_trades_partitions_dropped": partitions_dropped,
+            "option_trades_keep_days": trades_keep,
+            "enqueued": 0,
+            "deduped": 0,
+        }
 
     if slot_key == "readiness-refresh":
         rows_updated = _run_readiness_refresh(conn)
@@ -462,197 +626,20 @@ def enqueue_slot(
             **extract_result,
         }
 
-    if slot_key == "max-pain":
-        # D8=B: today + lookback_days trading days for gap heal after holidays.
-        # Inline DB compute from market.option_open_interest (no Polygon).
-        from bifrost_market_data.analytics.max_pain import compute_max_pain_for_date
-        from bifrost_market_data.quality import fetch_recent_trading_days
-
-        lookback = int(scfg.get("lookback_days") or 3)
-        symbols = (
-            list(watchlist_symbols)
-            if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg)
-        )
-        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
-        if not trading_days:
-            return {
-                "slot": slot_key,
-                "lookback_days": lookback,
-                "symbols": len(symbols),
-                "skipped": True,
-                "reason": "no trading days",
-                "enqueued": 0,
-                "deduped": 0,
-            }
-        day_results: list[dict[str, Any]] = []
-        total_written = 0
-        total_groups = 0
-        for td in trading_days:
-            one = compute_max_pain_for_date(
-                conn,
-                trade_date=td,
-                underlyings=symbols or None,
-            )
-            day_results.append(one)
-            total_written += int(one.get("rows_written") or 0)
-            total_groups += int(one.get("groups") or 0)
-        logger.info(
-            "max-pain lookback=%s days=%s..%s groups=%s rows_written=%s",
-            lookback,
-            trading_days[0].isoformat(),
-            trading_days[-1].isoformat(),
-            total_groups,
-            total_written,
-        )
-        return {
-            "slot": slot_key,
-            "lookback_days": lookback,
-            "symbols": len(symbols),
-            "trading_days": [d.isoformat() for d in trading_days],
-            "groups": total_groups,
-            "rows_written": total_written,
-            "days": day_results,
-            "enqueued": 0,
-            "deduped": 0,
-        }
-
-    if slot_key == "atm-iv-pcr":
-        # D12=A: merged ATM IV + PCR over lookback trading days (inline, no Polygon).
-        from bifrost_market_data.analytics.atm_iv import compute_atm_iv_for_date
-        from bifrost_market_data.analytics.pcr import compute_pcr_for_date
-        from bifrost_market_data.quality import fetch_recent_trading_days
-
-        lookback = int(scfg.get("lookback_days") or 3)
-        symbols = union_iv_radar_benchmarks(
-            list(watchlist_symbols)
-            if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg),
-            cfg,
-        )
-        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
-        if not trading_days:
-            return {
-                "slot": slot_key,
-                "lookback_days": lookback,
-                "symbols": len(symbols),
-                "skipped": True,
-                "reason": "no trading days",
-                "enqueued": 0,
-                "deduped": 0,
-            }
-        atm_days: list[dict[str, Any]] = []
-        pcr_days: list[dict[str, Any]] = []
-        atm_written = 0
-        pcr_written = 0
-        for td in trading_days:
-            atm_one = compute_atm_iv_for_date(
-                conn,
-                trade_date=td,
-                underlyings=symbols or None,
-            )
-            pcr_one = compute_pcr_for_date(
-                conn,
-                trade_date=td,
-                underlyings=symbols or None,
-            )
-            atm_days.append(atm_one)
-            pcr_days.append(pcr_one)
-            atm_written += int(atm_one.get("rows_written") or 0)
-            pcr_written += int(pcr_one.get("rows_written") or 0)
-        logger.info(
-            "atm-iv-pcr lookback=%s days=%s..%s atm_rows=%s pcr_rows=%s",
-            lookback,
-            trading_days[0].isoformat(),
-            trading_days[-1].isoformat(),
-            atm_written,
-            pcr_written,
-        )
-        return {
-            "slot": slot_key,
-            "lookback_days": lookback,
-            "symbols": len(symbols),
-            "trading_days": [d.isoformat() for d in trading_days],
-            "atm_rows_written": atm_written,
-            "pcr_rows_written": pcr_written,
-            "atm_days": atm_days,
-            "pcr_days": pcr_days,
-            "enqueued": 0,
-            "deduped": 0,
-        }
-
-    if slot_key == "iv-percentile":
-        # D12=A: after atm-iv-pcr; reads market_analytics.atm_iv_daily.
-        from bifrost_market_data.analytics.iv_percentile import (
-            DEFAULT_PERCENTILE_WINDOW,
-            compute_iv_percentile_for_date,
-        )
-        from bifrost_market_data.quality import fetch_recent_trading_days
-
-        lookback = int(scfg.get("lookback_days") or 3)
-        pct_window = int(scfg.get("percentile_window") or DEFAULT_PERCENTILE_WINDOW)
-        symbols = union_iv_radar_benchmarks(
-            list(watchlist_symbols)
-            if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg),
-            cfg,
-        )
-        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
-        if not trading_days:
-            return {
-                "slot": slot_key,
-                "lookback_days": lookback,
-                "percentile_window": pct_window,
-                "symbols": len(symbols),
-                "skipped": True,
-                "reason": "no trading days",
-                "enqueued": 0,
-                "deduped": 0,
-            }
-        day_results: list[dict[str, Any]] = []
-        total_written = 0
-        for td in trading_days:
-            one = compute_iv_percentile_for_date(
-                conn,
-                trade_date=td,
-                underlyings=symbols or None,
-                percentile_window=pct_window,
-            )
-            day_results.append(one)
-            total_written += int(one.get("rows_written") or 0)
-        logger.info(
-            "iv-percentile lookback=%s window=%s days=%s..%s rows_written=%s",
-            lookback,
-            pct_window,
-            trading_days[0].isoformat(),
-            trading_days[-1].isoformat(),
-            total_written,
-        )
-        return {
-            "slot": slot_key,
-            "lookback_days": lookback,
-            "percentile_window": pct_window,
-            "symbols": len(symbols),
-            "trading_days": [d.isoformat() for d in trading_days],
-            "rows_written": total_written,
-            "days": day_results,
-            "enqueued": 0,
-            "deduped": 0,
-        }
-
     skip_on_holiday = slot_key in (
         "stock-eod",
         "eod-pipeline",
         "universe-daily",
         "corporate",
         "option-bars",
+        "option-trades",
         "minute-bars",
         "fundamentals-rotate",
         "related-rotate",
         "stock-snapshot",
         "stock-movers",
     )
-    if skip_on_holiday and not is_trading_day(conn, day):
+    if skip_on_holiday and not force and not is_trading_day(conn, day):
         logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
         return {
             "slot": slot_key,
@@ -671,6 +658,7 @@ def enqueue_slot(
         "corporate",
         "option-refresh",
         "option-bars",
+        "option-trades",
         "minute-bars",
         "fundamentals-rotate",
         "related-rotate",
@@ -702,8 +690,23 @@ def enqueue_slot(
     elif slot_key == "eod-pipeline":
         pipeline_syms = union_iv_radar_benchmarks(symbols, cfg)
         for sym in pipeline_syms:
-            _add("option_snapshot", {"underlying": sym})
-            _add("option_open_interest", {"underlying": sym, "trade_date": day_s})
+            storage = storage_underlying(sym)
+            _add("option_snapshot", {"underlying": storage})
+            _add("option_open_interest", {"underlying": storage, "trade_date": day_s})
+        # Index spot (I:SPX → store as SPX) so Research GEX has a close.
+        for root in load_index_option_roots_from_cfg(cfg):
+            spot = spot_api_symbol(root)
+            if not spot:
+                continue
+            _add(
+                "stock_daily",
+                {
+                    "symbol": spot,
+                    "storage_symbol": root,
+                    "from": day_s,
+                    "to": day_s,
+                },
+            )
 
     elif slot_key == "universe-daily":
         _add(
@@ -745,6 +748,30 @@ def enqueue_slot(
         )
         for ot in tickers:
             _add("option_daily", {"option_ticker": ot, "from": day_s, "to": day_s})
+
+    elif slot_key == "option-trades":
+        # Daily REST tape (not WebSocket). Universe: SPX ∪ watchlist top 50.
+        universe_limit = int(scfg.get("universe_limit") or 50)
+        underlyings = option_trades_universe(symbols, limit=universe_limit)
+        expiry_days = int(scfg.get("expiry_days") or 60)
+        max_per = int(scfg.get("max_per_underlying") or 40)
+        tickers = load_option_tickers(
+            conn,
+            underlyings,
+            as_of=day,
+            expiry_days=expiry_days,
+            max_per_underlying=max_per,
+        )
+        for ot in tickers:
+            _add(
+                "option_trades",
+                {
+                    "option_ticker": ot,
+                    "from": day_s,
+                    "to": day_s,
+                    "trade_date": day_s,
+                },
+            )
 
     elif slot_key == "minute-bars":
         for sym in symbols:
@@ -795,16 +822,29 @@ def enqueue_slot(
         _add("ticker_sync", {"mode": "universe"}, pri=priority)
 
     elif slot_key == "fundamentals-rotate":
-        # Per-symbol financials with deterministic daily rotation (not full universe).
+        # Per-symbol financials (+ optional SEPA extras) with deterministic rotation.
+        # universe=cs → market.ticker CS (Stock Screener); watchlist remains the
+        # fallback when ticker table is empty. Missing income_statement first.
         batch_size = int(scfg.get("batch_size") or 40)
-        if symbols:
-            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
-            rotated = symbols[offset:] + symbols[:offset]
-            batch = rotated[: max(0, batch_size)]
-        else:
-            batch = []
+        include_ratios = bool(scfg.get("include_ratios", True))
+        include_short_interest = bool(scfg.get("include_short_interest", True))
+        include_short_volume = bool(scfg.get("include_short_volume", True))
+        rotated = resolve_fundamentals_rotate_symbols(
+            conn,
+            watchlist_symbols=symbols,
+            scheduler_cfg=cfg,
+            slot_cfg=scfg,
+            day_s=day_s,
+        )
+        batch = rotated[: max(0, batch_size)]
         for sym in batch:
             _add("financials", {"symbol": sym}, pri=priority)
+            if include_ratios:
+                _add("ratios", {"symbol": sym}, pri=priority)
+            if include_short_interest:
+                _add("short_interest", {"symbol": sym}, pri=priority)
+            if include_short_volume:
+                _add("short_volume", {"symbol": sym}, pri=priority)
 
     elif slot_key == "related-rotate":
         # Per-symbol related-companies with deterministic daily rotation.
@@ -860,6 +900,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Comma-separated symbol override (skips watchlist query)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run holiday-gated slots on weekends/holidays (CS financials catch-up)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -905,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
             target_date=resolve_target_date(args.date),
             watchlist_symbols=symbols_override,
             scheduler_cfg=scheduler_cfg,
+            force=bool(args.force),
         )
     finally:
         conn.close()

@@ -46,3 +46,5 @@ worker:
   pool: stocks           # stocks | options
   concurrency: 4
   poll_interval_sec: 5
+  job_timeout_sec: 900     # fail a live handler that hangs
+  stale_running_sec: 1200  # reclaim running rows after worker crash / Recreate

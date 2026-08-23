@@ -5,8 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from bifrost_market_data.scheduler.cronutil import iso_z, next_fires, previous_fire
+from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
 from bifrost_market_data.scheduler.daily import load_schedule
+
+# Swimlane horizon (UTC). Drain lookback is longer so weekend catch-up bars clip in.
+SWIMLANE_PAST = timedelta(hours=24)
+SWIMLANE_FUTURE = timedelta(hours=6)
+DRAIN_LOOKBACK = timedelta(hours=48)
 
 # Slot → job kinds created by enqueue_slot (for plan-vs-actual).
 # Empty list → slot is inline / analytics; use freshness_dimension when set.
@@ -20,6 +25,7 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "corporate": {"kinds": ["splits", "dividends"], "freshness": None},
     "option-refresh": {"kinds": ["option_contract", "option_expiration"], "freshness": None},
     "option-bars": {"kinds": ["option_daily"], "freshness": None},
+    "option-trades": {"kinds": ["option_trades"], "freshness": "option_trades"},
     "minute-bars": {"kinds": ["stock_minute", "option_minute"], "freshness": None},
     "calendar": {"kinds": ["calendar"], "freshness": "calendar"},
     "reference": {"kinds": ["ticker_sync"], "freshness": None},
@@ -28,9 +34,24 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
     "stock-movers": {"kinds": ["stock_movers"], "freshness": None},
     "oi-gap-heal": {"kinds": [], "freshness": "option_open_interest", "inline": True},
-    "max-pain": {"kinds": [], "freshness": None, "inline": True},
-    "atm-iv-pcr": {"kinds": [], "freshness": None, "inline": True},
-    "iv-percentile": {"kinds": [], "freshness": None, "inline": True},
+    "max-pain": {
+        "kinds": [],
+        "freshness": None,
+        "inline": True,
+        "migrated": True,
+    },
+    "atm-iv-pcr": {
+        "kinds": [],
+        "freshness": None,
+        "inline": True,
+        "migrated": True,
+    },
+    "iv-percentile": {
+        "kinds": [],
+        "freshness": None,
+        "inline": True,
+        "migrated": True,
+    },
     "readiness-refresh": {"kinds": [], "freshness": None, "inline": True},
     "trim": {"kinds": [], "freshness": None, "inline": True},
 }
@@ -42,6 +63,7 @@ SLOT_NOTES: dict[str, str] = {
     "corporate": "Splits / dividends",
     "option-refresh": "Option contracts / expirations",
     "option-bars": "Option daily bars",
+    "option-trades": "Option trades tape (REST)",
     "minute-bars": "Stock/option minutes",
     "calendar": "US trading calendar",
     "reference": "Ticker sync",
@@ -50,12 +72,16 @@ SLOT_NOTES: dict[str, str] = {
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
     "oi-gap-heal": "OI extract from snapshots (inline)",
-    "max-pain": "Max Pain analytics (inline)",
-    "atm-iv-pcr": "ATM IV + PCR (inline)",
-    "iv-percentile": "IV Percentile (inline)",
+    "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
+    "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
+    "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",
     "readiness-refresh": "Readiness rollup (inline)",
     "trim": "Trim old jobs (inline)",
 }
+
+MIGRATED_SLOT_IDS = frozenset(
+    sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("migrated")
+)
 
 
 def _count_jobs_in_window(
@@ -225,6 +251,78 @@ def _throughput(conn: Any, now: datetime) -> dict[str, Any]:
     }
 
 
+def _kind_activity(conn: Any, since: datetime) -> dict[str, dict[str, Any]]:
+    """Per-kind first enqueue / last finish / still-active — for swimlane drain bars."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT kind,
+                   MIN(created_at) AS first_created,
+                   MAX(finished_at) AS last_finished,
+                   COUNT(*) FILTER (
+                       WHERE status IN ('pending', 'running')
+                   )::bigint AS active
+            FROM data_ops.job_ingest
+            WHERE created_at >= %s
+               OR status IN ('pending', 'running')
+            GROUP BY kind
+            """,
+            (since,),
+        )
+        raw = cur.fetchall() or []
+    out: dict[str, dict[str, Any]] = {}
+    for row in raw:
+        if isinstance(row, Mapping):
+            kind = str(row.get("kind") or "")
+            first = row.get("first_created")
+            last = row.get("last_finished")
+            active = int(row.get("active") or 0)
+        else:
+            kind = str(row[0] or "")
+            first = row[1]
+            last = row[2]
+            active = int(row[3] or 0)
+        if not kind:
+            continue
+        out[kind] = {
+            "first_created": first if isinstance(first, datetime) else None,
+            "last_finished": last if isinstance(last, datetime) else None,
+            "active": active,
+        }
+    return out
+
+
+def _slot_drain(
+    kinds: list[str],
+    activity: Mapping[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not kinds:
+        return None
+    firsts: list[datetime] = []
+    lasts: list[datetime] = []
+    active = 0
+    for kind in kinds:
+        row = activity.get(kind)
+        if row is None:
+            continue
+        first = row.get("first_created")
+        last = row.get("last_finished")
+        if isinstance(first, datetime):
+            firsts.append(first)
+        if isinstance(last, datetime):
+            lasts.append(last)
+        active += int(row.get("active") or 0)
+    if not firsts and active <= 0:
+        return None
+    started = min(firsts) if firsts else None
+    ended = max(lasts) if lasts and active <= 0 else None
+    return {
+        "started_at": iso_z(started),
+        "ended_at": iso_z(ended),
+        "active": active > 0,
+    }
+
+
 def _oldest_pending_age_sec(conn: Any, now: datetime) -> float | None:
     with conn.cursor() as cur:
         cur.execute(
@@ -253,11 +351,38 @@ def _slot_adherence(
     now: datetime,
     grace_minutes: int,
     freshness: Mapping[str, dict[str, Any]],
+    activity: Mapping[str, dict[str, Any]] | None = None,
+    horizon_start: datetime | None = None,
+    horizon_end: datetime | None = None,
 ) -> dict[str, Any]:
     evidence = SLOT_EVIDENCE.get(slot_id, {"kinds": [], "freshness": None})
     kinds = list(evidence.get("kinds") or [])
     fresh_dim = evidence.get("freshness")
     inline = bool(evidence.get("inline"))
+    migrated = bool(evidence.get("migrated"))
+    fires_iso: list[str] = []
+    if cron and horizon_start is not None and horizon_end is not None:
+        try:
+            fires_iso = [iso_z(t) for t in iter_cron_fires(cron, start=horizon_start, end=horizon_end)]
+        except ValueError:
+            fires_iso = []
+    drain = _slot_drain(kinds, activity or {})
+    if migrated:
+        return {
+            "slot": slot_id,
+            "cron": cron or None,
+            "note": SLOT_NOTES.get(slot_id, "moved to Research"),
+            "ok": True,
+            "adherence": "migrated",
+            "detail": "moved to Research (bifrost_research.scheduler.volatility)",
+            "last_fire": None,
+            "next_fires": [],
+            "inline": inline,
+            "migrated": True,
+            "evidence_kinds": kinds,
+            "fires_in_window": [],
+            "drain": None,
+        }
     try:
         last = previous_fire(cron, before=now)
         nxt = next_fires(cron, after=now, count=3)
@@ -271,6 +396,8 @@ def _slot_adherence(
             "detail": str(exc),
             "next_fires": [],
             "last_fire": None,
+            "fires_in_window": fires_iso,
+            "drain": drain,
         }
 
     last_iso = iso_z(last)
@@ -287,6 +414,8 @@ def _slot_adherence(
             "next_fires": next_iso,
             "inline": inline,
             "evidence_kinds": kinds,
+            "fires_in_window": fires_iso,
+            "drain": drain,
         }
 
     grace_end = last + timedelta(minutes=grace_minutes)
@@ -337,6 +466,8 @@ def _slot_adherence(
         "jobs_in_window": counts,
         "freshness_dimension": fresh_dim,
         "freshness_last_run_at": fresh_last,
+        "fires_in_window": fires_iso,
+        "drain": drain,
     }
 
 
@@ -355,6 +486,9 @@ def build_queue_dashboard(
     throughput = _throughput(conn, now_utc)
     oldest = _oldest_pending_age_sec(conn, now_utc)
     freshness = _freshness_map(conn)
+    horizon_start = now_utc - SWIMLANE_PAST
+    horizon_end = now_utc + SWIMLANE_FUTURE
+    activity = _kind_activity(conn, now_utc - DRAIN_LOOKBACK)
 
     eta_min: float | None = None
     if throughput["jobs_per_min_15m"] > 0 and queue["pending"] > 0:
@@ -367,12 +501,14 @@ def build_queue_dashboard(
         slots_cfg = {}
 
     plan: list[dict[str, Any]] = []
+    active_slot_ids: set[str] = set()
     for slot_id, scfg in sorted(slots_cfg.items()):
         if not isinstance(scfg, dict):
             continue
         cron = str(scfg.get("cron") or "").strip()
         if not cron:
             continue
+        active_slot_ids.add(str(slot_id))
         plan.append(
             _slot_adherence(
                 conn,
@@ -381,6 +517,27 @@ def build_queue_dashboard(
                 now=now_utc,
                 grace_minutes=grace_minutes,
                 freshness=freshness,
+                activity=activity,
+                horizon_start=horizon_start,
+                horizon_end=horizon_end,
+            )
+        )
+
+    # Surface migrated analytics slots even when removed from schedule.yaml.
+    for slot_id in sorted(MIGRATED_SLOT_IDS):
+        if slot_id in active_slot_ids:
+            continue
+        plan.append(
+            _slot_adherence(
+                conn,
+                slot_id=slot_id,
+                cron="",
+                now=now_utc,
+                grace_minutes=grace_minutes,
+                freshness=freshness,
+                activity=activity,
+                horizon_start=horizon_start,
+                horizon_end=horizon_end,
             )
         )
 
@@ -427,6 +584,10 @@ def build_queue_dashboard(
             "due": due,
             "missed": missed,
             "grace_minutes": grace_minutes,
+            "horizon": {
+                "start": iso_z(horizon_start),
+                "end": iso_z(horizon_end),
+            },
             "slots": plan,
         },
     }

@@ -1,13 +1,32 @@
-"""Analytics read routes — Max Pain, ATM IV, PCR, IV Percentile (P3–P4)."""
+"""Analytics read routes — Max Pain, ATM IV, PCR, IV Percentile.
+
+Wave 2.1: daily upsert ownership moved to Research API ``:8795``
+(``/analytics/options/*`` via ``bifrost_research``). This Plugin keeps DB **read**
+endpoints on the same Golden Source ``market_analytics.*`` tables for FE/Plugin
+consumers during transition, plus live max-pain compute from OI.
+"""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import Any, Mapping, Sequence
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+# Deprecation notice: Research owns scheduled compute + canonical write path.
+_RESEARCH_OWNER_HEADER = (
+    "Research API :8795 /analytics/options/* "
+    "(bifrost_research) owns market_analytics upserts; "
+    "Plugin keeps Golden Source read + live max-pain compute"
+)
+
+
+def _deprecation_headers(response: Response) -> None:
+    response.headers["X-Bifrost-Analytics-Owner"] = "bifrost-research"
+    response.headers["Deprecation"] = "true"
+    response.headers["X-Bifrost-Analytics-Note"] = _RESEARCH_OWNER_HEADER
 
 
 def _connect():
@@ -284,6 +303,7 @@ def query_iv_percentile(
 
 @router.get("/max-pain")
 def max_pain(
+    response: Response,
     symbol: str | None = Query(None, description="Underlying symbol filter"),
     expiry: date | None = Query(None, description="Option expiry YYYY-MM-DD"),
     trade_date: date | None = Query(None, description="Trade date (default: latest for symbol)"),
@@ -294,7 +314,11 @@ def max_pain(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted Max Pain from ``market_analytics.max_pain_daily`` (D9=A)."""
+    """Read persisted Max Pain from ``market_analytics.max_pain_daily``.
+
+    Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
+    """
+    _deprecation_headers(response)
     try:
         conn = _connect()
     except Exception as exc:
@@ -324,6 +348,7 @@ def max_pain(
 
 @router.get("/atm-iv")
 def atm_iv(
+    response: Response,
     symbol: str | None = Query(None, description="Underlying symbol filter"),
     expiry: date | None = Query(None, description="Option expiry YYYY-MM-DD"),
     trade_date: date | None = Query(None, description="Trade date (default: latest for symbol)"),
@@ -334,7 +359,11 @@ def atm_iv(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted ATM IV from ``market_analytics.atm_iv_daily``."""
+    """Read persisted ATM IV from ``market_analytics.atm_iv_daily``.
+
+    Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
+    """
+    _deprecation_headers(response)
     try:
         conn = _connect()
     except Exception as exc:
@@ -364,6 +393,7 @@ def atm_iv(
 
 @router.get("/pcr")
 def pcr(
+    response: Response,
     symbol: str | None = Query(None, description="Underlying symbol filter"),
     trade_date: date | None = Query(None, description="Trade date (default: latest for symbol)"),
     lookback_days: int | None = Query(
@@ -373,7 +403,11 @@ def pcr(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted Put/Call Ratio from ``market_analytics.pcr_daily``."""
+    """Read persisted Put/Call Ratio from ``market_analytics.pcr_daily``.
+
+    Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
+    """
+    _deprecation_headers(response)
     try:
         conn = _connect()
     except Exception as exc:
@@ -401,6 +435,7 @@ def pcr(
 
 @router.get("/iv-percentile")
 def iv_percentile(
+    response: Response,
     symbol: str | None = Query(None, description="Underlying symbol filter"),
     trade_date: date | None = Query(None, description="Trade date (default: latest for symbol)"),
     lookback_days: int | None = Query(
@@ -410,7 +445,11 @@ def iv_percentile(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted IV percentile/rank from ``market_analytics.iv_percentile_daily``."""
+    """Read persisted IV percentile/rank from ``market_analytics.iv_percentile_daily``.
+
+    Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
+    """
+    _deprecation_headers(response)
     try:
         conn = _connect()
     except Exception as exc:
@@ -446,6 +485,38 @@ def _parse_expiry_param(expiry: str) -> date:
     return d
 
 
+def _fetch_oi_rows_for_date(
+    conn: Any,
+    trade_date: date,
+    *,
+    underlyings: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Load OI rows for one trade_date (optional underlying filter)."""
+    cols = ("underlying", "expiry", "strike", "option_right", "open_interest")
+    syms = [str(s).strip().upper() for s in (underlyings or []) if str(s).strip()]
+    with conn.cursor() as cur:
+        if syms:
+            cur.execute(
+                """
+                SELECT underlying, expiry, strike, option_right, open_interest
+                FROM market.option_open_interest
+                WHERE trade_date = %s AND underlying = ANY(%s)
+                """,
+                (trade_date, syms),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT underlying, expiry, strike, option_right, open_interest
+                FROM market.option_open_interest
+                WHERE trade_date = %s
+                """,
+                (trade_date,),
+            )
+        raw = cur.fetchall() if hasattr(cur, "fetchall") else []
+    return [_row_dict(r, cols) for r in (raw or [])]
+
+
 def compute_max_pain_live(
     conn: Any,
     *,
@@ -454,9 +525,8 @@ def compute_max_pain_live(
     trade_date: date | None = None,
 ) -> dict[str, Any]:
     """Live max-pain from OI (does not require persisted analytics row)."""
-    from bifrost_market_data.analytics.max_pain import (
+    from bifrost_market_data.analytics.max_pain_math import (
         compute_max_pain_curve,
-        fetch_oi_rows_for_date,
         strike_map_for_expiry,
     )
 
@@ -478,7 +548,7 @@ def compute_max_pain_live(
         if td is None:
             return {"ok": False, "error": "No OI rows for symbol/expiry", "symbol": sym}
 
-    oi_rows = fetch_oi_rows_for_date(conn, td, underlyings=[sym])
+    oi_rows = _fetch_oi_rows_for_date(conn, td, underlyings=[sym])
     skmap = strike_map_for_expiry(oi_rows, expiry)
     if not skmap:
         return {
@@ -510,7 +580,7 @@ def compute_max_pain_history(
     lookback_days: int = 90,
 ) -> dict[str, Any]:
     """Per-trade-date max pain series recomputed from OI."""
-    from bifrost_market_data.analytics.max_pain import (
+    from bifrost_market_data.analytics.max_pain_math import (
         compute_max_pain_curve,
         strike_map_for_expiry,
     )
@@ -601,11 +671,13 @@ def compute_max_pain_history(
 
 @router.get("/max-pain/compute")
 def max_pain_compute(
+    response: Response,
     symbol: str = Query(..., description="Underlying symbol"),
     expiry: str = Query(..., description="Expiration YYYYMMDD or YYYY-MM-DD"),
     trade_date: date | None = Query(None, description="OI as-of date (default: latest)"),
 ) -> dict[str, Any]:
     """Live Max Pain from ``market.option_open_interest`` (not table-only read)."""
+    _deprecation_headers(response)
     exp = _parse_expiry_param(expiry)
     try:
         conn = _connect()
@@ -624,11 +696,13 @@ def max_pain_compute(
 
 @router.get("/max-pain/compute/history")
 def max_pain_compute_history(
+    response: Response,
     symbol: str = Query(..., description="Underlying symbol"),
     expiry: str = Query(..., description="Expiration YYYYMMDD or YYYY-MM-DD"),
     lookback_days: int = Query(90, ge=7, le=365),
 ) -> dict[str, Any]:
     """Per-trade-date max pain series recomputed from OI."""
+    _deprecation_headers(response)
     exp = _parse_expiry_param(expiry)
     try:
         conn = _connect()
@@ -647,10 +721,12 @@ def max_pain_compute_history(
 
 @router.get("/atm-iv/term")
 def atm_iv_term(
+    response: Response,
     symbol: str = Query(..., description="Underlying symbol"),
     trade_date: date | None = Query(None, description="Trade date (default: latest)"),
 ) -> dict[str, Any]:
     """ATM IV term structure from persisted ``market_analytics.atm_iv_daily``."""
+    _deprecation_headers(response)
     try:
         conn = _connect()
     except Exception as exc:

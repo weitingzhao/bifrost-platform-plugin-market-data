@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import iso_value, require_db, table_exists
 
@@ -19,14 +19,70 @@ def query_bar_aggregate(
     conn: Any,
     *,
     window_days: int = 420,
+    summary: bool = False,
 ) -> dict[str, Any]:
     """Per-symbol bar aggregate stats from market.stock_daily within a date window.
 
     Returns: bar_rows, first_bar_date, last_bar_date, null_close_rows, null_volume_rows
     per symbol. Used by readiness snapshot bars CTE.
+
+    When summary=True, return only totals (for Ops Console readiness KPI) — avoids
+    ~1–2 MiB per-symbol JSON that can starve concurrent readiness probes.
     """
     if not table_exists(conn, "market", "stock_daily"):
+        if summary:
+            return {
+                "ok": True,
+                "summary": True,
+                "symbol_count": 0,
+                "total_bars": 0,
+                "null_close_rows": 0,
+                "null_volume_rows": 0,
+            }
         return {"ok": True, "symbols": {}}
+
+    if summary:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT UPPER(TRIM(symbol)))::integer AS symbol_count,
+                    COUNT(*)::integer AS total_bars,
+                    COUNT(*) FILTER (WHERE close IS NULL)::integer AS null_close_rows,
+                    COUNT(*) FILTER (WHERE volume IS NULL)::integer AS null_volume_rows
+                FROM market.stock_daily
+                WHERE bar_date >= (CURRENT_DATE - %s)::date
+                  AND bar_date <= CURRENT_DATE
+                """,
+                (window_days,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return {
+                "ok": True,
+                "summary": True,
+                "symbol_count": 0,
+                "total_bars": 0,
+                "null_close_rows": 0,
+                "null_volume_rows": 0,
+            }
+        if hasattr(row, "keys"):
+            return {
+                "ok": True,
+                "summary": True,
+                "symbol_count": int(row["symbol_count"] or 0),
+                "total_bars": int(row["total_bars"] or 0),
+                "null_close_rows": int(row["null_close_rows"] or 0),
+                "null_volume_rows": int(row["null_volume_rows"] or 0),
+            }
+        return {
+            "ok": True,
+            "summary": True,
+            "symbol_count": int(row[0] or 0),
+            "total_bars": int(row[1] or 0),
+            "null_close_rows": int(row[2] or 0),
+            "null_volume_rows": int(row[3] or 0),
+        }
 
     with conn.cursor() as cur:
         cur.execute(
@@ -398,11 +454,17 @@ def query_financials_by_instrument_type(
 @router.get("/bar-aggregate")
 def readiness_bar_aggregate(
     window_days: int = Query(420, ge=1, le=800),
+    summary: bool = Query(
+        False,
+        description="If true, return totals only (no per-symbol map) for Ops Console KPI",
+    ),
 ) -> dict[str, Any]:
     """Per-symbol stock_daily aggregate stats within a date window."""
     conn = require_db()
     try:
-        return query_bar_aggregate(conn, window_days=window_days)
+        return query_bar_aggregate(conn, window_days=window_days, summary=summary)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"bar-aggregate failed: {exc}") from exc
     finally:
         conn.close()
 
@@ -468,6 +530,9 @@ def readiness_date_coverage(
     conn = require_db()
     try:
         return query_date_coverage(conn, days_back=days_back, min_symbol_threshold=min_symbols)
+    except Exception as exc:
+        # Prefer JSON detail over plain-text "Internal Server Error" (breaks Console r.json()).
+        raise HTTPException(status_code=500, detail=f"date-coverage failed: {exc}") from exc
     finally:
         conn.close()
 
@@ -641,8 +706,15 @@ def query_vendor_gap(
         bar_map[sym] = (bar_date, float(bar_close) if bar_close is not None else None)
 
     gaps: list[dict[str, Any]] = []
+    zero_snapshot = 0
     for sym in sorted(target_symbols):
         snap_close, snap_sd = snap_map[sym]
+        # Zero / missing snapshot close is common for SPACs / pre-open names —
+        # not an actionable bar-vs-snapshot price divergence for producer readiness.
+        if snap_close is None or abs(float(snap_close)) < 1e-9:
+            zero_snapshot += 1
+            continue
+
         bar_entry = bar_map.get(sym)
 
         if bar_entry is not None:
@@ -669,6 +741,7 @@ def query_vendor_gap(
     result: dict[str, Any] = {
         "ok": True,
         "gap_count": len(gaps),
+        "zero_snapshot_count": zero_snapshot,
         "session_date": session_date_str,
     }
 

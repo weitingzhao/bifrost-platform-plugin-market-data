@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -14,7 +15,13 @@ from bifrost_market_data.freshness import (
     rows_written_from_result,
     update_freshness,
 )
-from bifrost_market_data.worker.claim import JobRow, claim_job, mark_done, mark_failed
+from bifrost_market_data.worker.claim import (
+    JobRow,
+    claim_job,
+    mark_done,
+    mark_failed,
+    reclaim_stale_running,
+)
 from bifrost_market_data.worker.health import HealthState, start_health_server
 
 logger = logging.getLogger(__name__)
@@ -30,13 +37,18 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
         "stock_movers",
         "ticker_sync",
         "financials",
+        "ratios",
+        "short_interest",
+        "short_volume",
         "splits",
         "dividends",
         "calendar",
+        "ticker_related",
     ),
     "options": (
         "option_daily",
         "option_minute",
+        "option_trades",
         "option_snapshot",
         "option_contract",
         "option_expiration",
@@ -103,6 +115,7 @@ async def process_one_job(
     *,
     handlers: Mapping[str, Handler],
     health: HealthState | None = None,
+    timeout_sec: float | None = None,
 ) -> None:
     """Dispatch a claimed job and persist done/failed outcome."""
     handler = handlers.get(job.kind)
@@ -121,7 +134,10 @@ async def process_one_job(
         return
 
     try:
-        result = await _run_handler(handler, job)
+        if timeout_sec is not None and timeout_sec > 0:
+            result = await asyncio.wait_for(_run_handler(handler, job), timeout=timeout_sec)
+        else:
+            result = await _run_handler(handler, job)
         mark_done(conn, job.id, result)
         try:
             update_freshness(
@@ -139,6 +155,18 @@ async def process_one_job(
         if health is not None:
             health.record_done()
         logger.info("job %s kind=%s done", job.id, job.kind)
+    except TimeoutError:
+        err = f"job_timeout after {float(timeout_sec or 0):.0f}s"
+        logger.error("job %s kind=%s %s", job.id, job.kind, err)
+        mark_failed(
+            conn,
+            job.id,
+            err,
+            attempts=job.attempts,
+            max_attempts=job.max_attempts,
+        )
+        if health is not None:
+            health.record_failed()
     except Exception as e:
         logger.exception("job %s kind=%s failed: %s", job.id, job.kind, e)
         mark_failed(
@@ -161,6 +189,7 @@ async def run_loop(
     health_port: int = 8080,
     connect: Callable[[], Any] | None = None,
     claim_fn: Callable[..., JobRow | None] = claim_job,
+    reclaim_fn: Callable[..., dict[str, int]] | None = reclaim_stale_running,
     poll_interval_sec: float | None = None,
     concurrency: int | None = None,
     polygon_client: Any | None = None,
@@ -183,6 +212,9 @@ async def run_loop(
         concurrency if concurrency is not None else worker_cfg.get("concurrency", 1)
     )
     max_concurrency = max(1, max_concurrency)
+    job_timeout_sec = float(worker_cfg.get("job_timeout_sec", 900))
+    stale_running_sec = int(worker_cfg.get("stale_running_sec", 1200))
+    reclaim_every_sec = max(interval, 15.0)
 
     stop = shutdown_event or asyncio.Event()
     health = HealthState(pool=pool_name)
@@ -210,11 +242,14 @@ async def run_loop(
     in_flight: set[asyncio.Task[None]] = set()
 
     logger.info(
-        "worker loop starting pool=%s kinds=%s concurrency=%s poll=%.1fs",
+        "worker loop starting pool=%s kinds=%s concurrency=%s poll=%.1fs "
+        "job_timeout=%.0fs stale_running=%ss",
         pool_name,
         ",".join(kinds),
         max_concurrency,
         interval,
+        job_timeout_sec,
+        stale_running_sec,
     )
 
     async def claim_and_run() -> bool:
@@ -234,7 +269,13 @@ async def run_loop(
 
             async def _run(job_row: JobRow = job, c: Any = conn) -> None:
                 try:
-                    await process_one_job(c, job_row, handlers=registry, health=health)
+                    await process_one_job(
+                        c,
+                        job_row,
+                        handlers=registry,
+                        health=health,
+                        timeout_sec=job_timeout_sec,
+                    )
                 finally:
                     try:
                         await asyncio.to_thread(c.close)
@@ -255,9 +296,44 @@ async def run_loop(
             sem.release()
             raise
 
+    last_reclaim = 0.0
+
+    async def reclaim_once() -> None:
+        if reclaim_fn is None:
+            return
+        conn = None
+        try:
+            conn = await asyncio.to_thread(open_conn)
+            stats = await asyncio.to_thread(
+                reclaim_fn,
+                conn,
+                stale_after_sec=stale_running_sec,
+                kinds=list(kinds),
+            )
+            n = int((stats or {}).get("reclaimed") or 0)
+            if n > 0:
+                logger.warning(
+                    "reclaimed %s stale running jobs pending=%s failed=%s",
+                    n,
+                    (stats or {}).get("pending"),
+                    (stats or {}).get("failed"),
+                )
+        except Exception:
+            logger.exception("stale running reclaim failed")
+        finally:
+            if conn is not None:
+                try:
+                    await asyncio.to_thread(conn.close)
+                except Exception:
+                    pass
+
     try:
         while not stop.is_set():
             try:
+                now = time.monotonic()
+                if now - last_reclaim >= reclaim_every_sec:
+                    await reclaim_once()
+                    last_reclaim = now
                 claimed_any = False
                 for _ in range(max_concurrency):
                     if stop.is_set():

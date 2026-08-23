@@ -30,6 +30,8 @@ async def handle_stock_daily(job: JobRow, client: Any, conn: Any) -> Mapping[str
     symbol = str(payload.get("symbol") or "").strip().upper()
     if not symbol:
         raise ValueError("stock_daily payload requires symbol")
+    # Optional storage override (index spot: fetch I:SPX, store as SPX).
+    storage_symbol = str(payload.get("storage_symbol") or symbol).strip().upper() or symbol
     from_value = payload.get("from") or payload.get("from_value")
     to_value = payload.get("to") or payload.get("to_value")
     if from_value is None or to_value is None:
@@ -49,7 +51,7 @@ async def handle_stock_daily(job: JobRow, client: Any, conn: Any) -> Mapping[str
             continue
         rows.append(
             (
-                symbol,
+                storage_symbol,
                 epoch_ms_to_date(bar["t"]),
                 as_float(bar.get("o")),
                 as_float(bar.get("h")),
@@ -72,7 +74,8 @@ async def handle_stock_daily(job: JobRow, client: Any, conn: Any) -> Mapping[str
     )
     return {
         "rows_written": n,
-        "symbol": symbol,
+        "symbol": storage_symbol,
+        "api_symbol": symbol,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }

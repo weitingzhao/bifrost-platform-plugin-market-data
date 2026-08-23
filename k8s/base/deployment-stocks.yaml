@@ -11,9 +11,12 @@ metadata:
     bifrost.dev/session-label: Market Data Stocks
     bifrost.dev/session-group: market-data
 spec:
-  replicas: 1
+  replicas: 3
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: polygon-worker-stocks
@@ -24,7 +27,7 @@ spec:
         bifrost.market-data/pool: stocks
         app.kubernetes.io/part-of: bifrost-market-data
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 180
       containers:
         - name: worker
           image: bifrost-market-data:0.1.0

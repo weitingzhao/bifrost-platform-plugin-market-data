@@ -177,6 +177,73 @@ def mark_done(conn: _Connection, job_id: int, result: Mapping[str, Any] | None =
         raise
 
 
+def reclaim_stale_running(
+    conn: _Connection,
+    *,
+    stale_after_sec: int,
+    kinds: Sequence[str] | None = None,
+) -> dict[str, int]:
+    """Re-queue abandoned ``running`` rows so retry can happen after a crash.
+
+    Claim already increments ``attempts``. If the worker dies before
+    ``mark_done`` / ``mark_failed``, the row stays ``running`` forever.
+    Jobs still under ``max_attempts`` go back to ``pending``; exhausted
+    jobs become ``failed``.
+    """
+    stale_after_sec = max(30, int(stale_after_sec))
+    kinds_list = [str(k) for k in (kinds or []) if str(k).strip()]
+    kind_sql = "AND kind = ANY(%s)" if kinds_list else ""
+    params: list[Any] = [stale_after_sec]
+    if kinds_list:
+        params.append(list(kinds_list))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE data_ops.job_ingest
+                SET status = CASE
+                        WHEN attempts >= max_attempts THEN 'failed'
+                        ELSE 'pending'
+                    END,
+                    result = jsonb_build_object(
+                        'error', 'stale_running: abandoned after started_at',
+                        'attempts', attempts,
+                        'reclaimed', true
+                    ),
+                    finished_at = CASE
+                        WHEN attempts >= max_attempts THEN now()
+                        ELSE NULL
+                    END,
+                    started_at = CASE
+                        WHEN attempts >= max_attempts THEN started_at
+                        ELSE NULL
+                    END,
+                    updated_at = now()
+                WHERE status = 'running'
+                  AND started_at IS NOT NULL
+                  AND started_at < now() - make_interval(secs => %s)
+                  {kind_sql}
+                RETURNING id, status
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall() or []
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    pending = 0
+    failed = 0
+    for row in rows:
+        status = row[1] if not isinstance(row, Mapping) else row.get("status")
+        if status == "failed":
+            failed += 1
+        else:
+            pending += 1
+    return {"reclaimed": pending + failed, "pending": pending, "failed": failed}
+
+
 def mark_failed(
     conn: _Connection,
     job_id: int,

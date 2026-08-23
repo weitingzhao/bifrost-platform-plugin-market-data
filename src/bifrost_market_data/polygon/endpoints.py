@@ -83,7 +83,8 @@ def options_contracts_params(
 
 
 def options_snapshot_path(underlying: str) -> str:
-    enc = quote(str(underlying).strip().upper(), safe="")
+    # Keep ':' for index tickers (I:SPX); quote only unsafe path chars.
+    enc = quote(str(underlying).strip().upper(), safe=":")
     return f"/v3/snapshot/options/{enc}"
 
 

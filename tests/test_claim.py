@@ -13,6 +13,7 @@ from bifrost_market_data.worker.claim import (
     job_row_from_record,
     mark_done,
     mark_failed,
+    reclaim_stale_running,
 )
 
 
@@ -28,6 +29,11 @@ class _FakeCursor:
         if not self.fetch_results:
             return None
         return self.fetch_results.pop(0)
+
+    def fetchall(self) -> list[Any]:
+        rows = list(self.fetch_results)
+        self.fetch_results.clear()
+        return rows
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -141,6 +147,21 @@ def test_mark_failed_permanent_when_attempts_exhausted() -> None:
     sql, params = conn.cur.statements[0]
     assert params[0] == "failed"
     assert "finished_at = now()" in sql
+
+
+def test_reclaim_stale_running_requeues_and_fails() -> None:
+    conn = _FakeConn(fetch_results=[(11, "pending"), (12, "failed")])
+    stats = reclaim_stale_running(
+        conn,
+        stale_after_sec=1200,
+        kinds=["option_snapshot", "option_open_interest"],
+    )
+    assert stats == {"reclaimed": 2, "pending": 1, "failed": 1}
+    assert conn.committed
+    sql, params = conn.cur.statements[0]
+    assert "stale_running" in sql
+    assert params[0] == 1200
+    assert params[1] == ["option_snapshot", "option_open_interest"]
 
 
 def test_claim_rolls_back_on_error() -> None:

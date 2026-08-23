@@ -17,6 +17,7 @@ resources:
   - pdb.yaml
   - cronjob-daily.yaml
   - cronjob-option-bars.yaml
+  - cronjob-option-trades.yaml
   - cronjob-options-refresh.yaml
   - cronjob-reference.yaml
   - cronjob-readiness-refresh.yaml
@@ -32,4 +33,4 @@ labels:
 images:
   - name: bifrost-market-data
     newName: 192.168.10.73:30500/bifrost-market-data
-    newTag: "0.7.0"
+    newTag: "0.7.6"

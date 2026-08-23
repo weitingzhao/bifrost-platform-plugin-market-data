@@ -43,6 +43,7 @@ def _job(
 
 def test_kinds_for_pool() -> None:
     assert "stock_daily" in kinds_for_pool("stocks")
+    assert "ticker_related" in kinds_for_pool("stocks")
     assert "option_snapshot" in kinds_for_pool("options")
     with pytest.raises(ValueError):
         kinds_for_pool("unknown")
@@ -154,6 +155,7 @@ async def test_run_loop_claim_dispatch_and_shutdown(monkeypatch: pytest.MonkeyPa
         health_port=0,  # ephemeral
         connect=_Conn,
         claim_fn=claim_fn,
+        reclaim_fn=None,
         poll_interval_sec=0.05,
         concurrency=1,
     )
@@ -190,8 +192,33 @@ async def test_run_loop_sleeps_when_idle(monkeypatch: pytest.MonkeyPatch) -> Non
         health_port=0,
         connect=_Conn,
         claim_fn=claim_fn,
+        reclaim_fn=None,
         poll_interval_sec=0.05,
         concurrency=1,
     )
     await stopper
     assert claim_count["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_process_one_job_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    failed: list[str] = []
+
+    def _fail(conn: Any, job_id: int, error_msg: str, *, attempts: int, max_attempts: int) -> str:
+        failed.append(error_msg)
+        return "pending"
+
+    monkeypatch.setattr("bifrost_market_data.worker.loop.mark_failed", _fail)
+    monkeypatch.setattr("bifrost_market_data.worker.loop.mark_done", lambda *a, **k: None)
+
+    async def hang(_job: JobRow) -> dict[str, Any]:
+        await asyncio.sleep(1)
+        return {"ok": True}
+
+    await process_one_job(
+        MagicMock(),
+        _job(),
+        handlers={"stock_daily": hang},
+        timeout_sec=0.05,
+    )
+    assert failed and "job_timeout" in failed[0]

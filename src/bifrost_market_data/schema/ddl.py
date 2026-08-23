@@ -6,6 +6,10 @@ Design principles:
 - option_ticker = Polygon native key
 - Partitioned history tables with auto-extend helper
 - market_analytics holds derived daily analytics (max pain, ATM IV, PCR, IV percentile)
+
+Wave 2.1: Research owns market_analytics DDL going forward
+(``bifrost_research.schema.ddl``). This module keeps ``_create_market_analytics_tables``
+for Plugin ``db-init`` compatibility only.
 """
 
 from __future__ import annotations
@@ -205,6 +209,42 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
         CREATE INDEX IF NOT EXISTS option_minute_underlying_period_time
         ON market.option_minute (underlying, period, bar_time DESC)
+        """
+    )
+
+    # --- option_trades (daily REST tape; 30d day-partition retention) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market.option_trades (
+            option_ticker      text        NOT NULL,
+            underlying         text        NOT NULL,
+            expiry             date        NOT NULL,
+            strike             double precision NOT NULL,
+            option_right       char(1)     NOT NULL,
+            trade_date         date        NOT NULL,
+            sip_ts             timestamptz NOT NULL,
+            sequence_number    bigint      NOT NULL,
+            price              double precision,
+            size               bigint,
+            exchange           integer,
+            conditions         integer[],
+            correction         integer,
+            participant_ts     timestamptz,
+            fetched_at         timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (option_ticker, trade_date, sip_ts, sequence_number)
+        ) PARTITION BY RANGE (trade_date)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_trades_underlying_date
+        ON market.option_trades (underlying, trade_date DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_trades_underlying_sip
+        ON market.option_trades (underlying, sip_ts DESC)
         """
     )
 
@@ -463,6 +503,11 @@ def _create_market_tables(cur: _Cursor) -> None:
 
 
 def _create_market_analytics_tables(cur: _Cursor) -> None:
+    """Create market_analytics.* tables (db-init compat).
+
+    Research owns DDL going forward — see ``bifrost_research.schema.ddl``.
+    Kept here so Plugin ``make db-init`` still bootstraps Golden Source tables.
+    """
     # --- max_pain_daily (RANGE by month on trade_date) ---
     cur.execute(
         """
@@ -785,6 +830,97 @@ def _create_partition_helper(cur: _Cursor) -> None:
         $$
         """
     )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION data_ops.ensure_day_partitions(
+            p_schema text,
+            p_table text,
+            p_days_back integer DEFAULT 35,
+            p_days_forward integer DEFAULT 2
+        ) RETURNS void
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          d_start date;
+          d_end date;
+          cur_d date;
+          part_name text;
+          parent regclass;
+        BEGIN
+          parent := to_regclass(format('%I.%I', p_schema, p_table));
+          IF parent IS NULL THEN
+            RETURN;
+          END IF;
+          d_start := CURRENT_DATE - p_days_back;
+          d_end := CURRENT_DATE + p_days_forward + 1;
+          cur_d := d_start;
+          WHILE cur_d < d_end LOOP
+            part_name := p_table || '_d' || to_char(cur_d, 'YYYYMMDD');
+            IF to_regclass(format('%I.%I', p_schema, part_name)) IS NULL THEN
+              EXECUTE format(
+                'CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES FROM (%L) TO (%L)',
+                p_schema, part_name, p_schema, p_table,
+                cur_d, (cur_d + interval '1 day')::date
+              );
+            END IF;
+            cur_d := (cur_d + interval '1 day')::date;
+          END LOOP;
+          IF to_regclass(format('%I.%I', p_schema, p_table || '_default')) IS NULL THEN
+            EXECUTE format(
+              'CREATE TABLE %I.%I PARTITION OF %I.%I DEFAULT',
+              p_schema, p_table || '_default', p_schema, p_table
+            );
+          END IF;
+        END;
+        $$
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION data_ops.drop_day_partitions_older_than(
+            p_schema text,
+            p_table text,
+            p_keep_days integer DEFAULT 30
+        ) RETURNS integer
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          cutoff date;
+          r record;
+          dropped integer := 0;
+          part_day date;
+          suffix text;
+        BEGIN
+          cutoff := CURRENT_DATE - p_keep_days;
+          FOR r IN
+            SELECT c.relname AS part_name
+            FROM pg_inherits i
+            JOIN pg_class c ON c.oid = i.inhrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_class p ON p.oid = i.inhparent
+            JOIN pg_namespace pn ON pn.oid = p.relnamespace
+            WHERE pn.nspname = p_schema
+              AND p.relname = p_table
+              AND n.nspname = p_schema
+              AND c.relname LIKE (p_table || '_d%')
+              AND c.relname <> (p_table || '_default')
+          LOOP
+            suffix := substring(r.part_name from length(p_table) + 3);
+            BEGIN
+              part_day := to_date(suffix, 'YYYYMMDD');
+            EXCEPTION WHEN others THEN
+              CONTINUE;
+            END;
+            IF part_day < cutoff THEN
+              EXECUTE format('DROP TABLE IF EXISTS %I.%I', p_schema, r.part_name);
+              dropped := dropped + 1;
+            END IF;
+          END LOOP;
+          RETURN dropped;
+        END;
+        $$
+        """
+    )
 
 
 def _ensure_partitions(cur: _Cursor) -> None:
@@ -793,6 +929,8 @@ def _ensure_partitions(cur: _Cursor) -> None:
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_daily', 12, 4)")
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_minute', 12, 4)")
     cur.execute("SELECT data_ops.ensure_month_partitions('market', 'option_snapshot', 12, 4)")
+    # Tape: day partitions + ~35d window; trim drops partitions older than 30d.
+    cur.execute("SELECT data_ops.ensure_day_partitions('market', 'option_trades', 35, 2)")
     cur.execute(
         "SELECT data_ops.ensure_month_partitions('market_analytics', 'max_pain_daily', 12, 4)"
     )
@@ -815,6 +953,7 @@ MARKET_TABLES: tuple[str, ...] = (
     "stock_movers",
     "option_daily",
     "option_minute",
+    "option_trades",
     "option_contract",
     "option_snapshot",
     "option_expiration",

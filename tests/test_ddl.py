@@ -61,7 +61,10 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
         assert name in blob, f"missing view {name}"
     assert "ensure_year_partitions" in blob
     assert "ensure_month_partitions" in blob
+    assert "ensure_day_partitions" in blob
+    assert "drop_day_partitions_older_than" in blob
     assert "SELECT data_ops.ensure_year_partitions('market', 'stock_daily'" in blob
+    assert "SELECT data_ops.ensure_day_partitions('market', 'option_trades'" in blob
     assert (
         "SELECT data_ops.ensure_month_partitions('market_analytics', 'max_pain_daily'"
         in blob
@@ -82,9 +85,10 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 
 
 def test_expected_object_counts() -> None:
-    assert len(MARKET_TABLES) == 16
+    assert len(MARKET_TABLES) == 17
     assert "stock_snapshot" in MARKET_TABLES
     assert "stock_movers" in MARKET_TABLES
+    assert "option_trades" in MARKET_TABLES
     assert "us_market_holiday" in MARKET_TABLES
     assert "ticker_related" in MARKET_TABLES
     assert "ticker_type" in MARKET_TABLES

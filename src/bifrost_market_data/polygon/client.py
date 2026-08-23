@@ -681,8 +681,19 @@ class PolygonClient:
         return data
 
     async def fetch_option_trades(self, options_ticker: str, **params: Any) -> dict[str, Any]:
+        """GET /v3/trades/{optionsTicker} with next_url pagination.
+
+        Pass ``max_pages`` (default 50) to bound REST page walks for busy contracts.
+        """
         path = ep.option_trades_path(options_ticker)
-        data = await self._request(path, ep.option_ticks_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected option trades payload", body=data, url=path)
-        return data
+        max_pages = int(params.pop("max_pages", 50) or 50)
+        tick_keys = (
+            "timestamp_gte",
+            "timestamp_lte",
+            "limit",
+            "sort",
+            "order",
+        )
+        tick_params = {k: params[k] for k in tick_keys if k in params and params[k] is not None}
+        query = ep.option_ticks_params(**tick_params)
+        return await self._paginate(path, query, max_pages=max_pages)

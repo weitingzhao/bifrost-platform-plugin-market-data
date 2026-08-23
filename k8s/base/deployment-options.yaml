@@ -13,7 +13,10 @@ metadata:
 spec:
   replicas: 4
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: polygon-worker-options
@@ -24,7 +27,7 @@ spec:
         bifrost.market-data/pool: options
         app.kubernetes.io/part-of: bifrost-market-data
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 180
       containers:
         - name: worker
           image: bifrost-market-data:0.1.0

@@ -40,3 +40,5 @@ data:
       pool: stocks
       concurrency: 4
       poll_interval_sec: 5
+      job_timeout_sec: 900
+      stale_running_sec: 1200

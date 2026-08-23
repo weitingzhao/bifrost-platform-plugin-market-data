@@ -11,6 +11,11 @@ from bifrost_market_data.ingest._upsert import (
     parse_date,
     parse_option_right,
 )
+from bifrost_market_data.ingest.index_options import (
+    contracts_api_underlying,
+    is_index_option_underlying,
+    storage_underlying,
+)
 from bifrost_market_data.worker.claim import JobRow
 
 _CONTRACT_COLS = (
@@ -31,14 +36,19 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
     underlying = str(payload.get("underlying") or payload.get("underlying_ticker") or "").strip().upper()
     if not underlying:
         raise ValueError("option_contract payload requires underlying")
+    storage = storage_underlying(underlying)
+    api_underlying = contracts_api_underlying(underlying)
     expired = payload.get("expired")
     if expired is None:
         expired = False
+    # Index chains (SPX) are large — allow a higher page budget when mapped.
+    max_pages = int(payload.get("max_pages") or (80 if is_index_option_underlying(storage) else 20))
 
     data = await client.fetch_options_contracts(
-        underlying_ticker=underlying,
+        underlying_ticker=api_underlying,
         expired=bool(expired),
         expiration_date=payload.get("expiration_date"),
+        max_pages=max_pages,
     )
     results = list(data.get("results") or [])
     contract_rows: list[tuple[Any, ...]] = []
@@ -56,7 +66,7 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
             right = parse_option_right(item.get("contract_type"))
         except ValueError:
             continue
-        und = str(item.get("underlying_ticker") or underlying).strip().upper()
+        und = storage
         style = item.get("exercise_style")
         style_s = str(style).strip().lower() if style else None
         spc = as_int(item.get("shares_per_contract"))
@@ -113,7 +123,7 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
                     SET updated_at = now()
                     WHERE underlying = %s
                     """,
-                    (underlying,),
+                    (storage,),
                 )
         conn.commit()
     except Exception:
@@ -123,7 +133,8 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
     return {
         "rows_written": n,
         "expirations_written": n_exp,
-        "underlying": underlying,
+        "underlying": storage,
+        "api_underlying": api_underlying,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }

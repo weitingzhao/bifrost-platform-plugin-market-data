@@ -16,6 +16,10 @@ from bifrost_market_data.ingest._upsert import (
     parse_option_right,
     parse_option_ticker,
 )
+from bifrost_market_data.ingest.index_options import (
+    snapshot_api_underlying,
+    storage_underlying,
+)
 from bifrost_market_data.worker.claim import JobRow
 
 _SNAPSHOT_COLS = (
@@ -76,7 +80,7 @@ def _snapshot_ts(item: Mapping[str, Any]) -> datetime:
     return daily_snapshot_anchor()
 
 
-def _contract_parts(item: Mapping[str, Any], underlying: str) -> dict[str, Any] | None:
+def _contract_parts(item: Mapping[str, Any], storage: str) -> dict[str, Any] | None:
     details = item.get("details") if isinstance(item.get("details"), dict) else {}
     ticker = str(details.get("ticker") or item.get("ticker") or "").strip().upper()
     if not ticker:
@@ -87,11 +91,8 @@ def _contract_parts(item: Mapping[str, Any], underlying: str) -> dict[str, Any] 
         right = parse_option_right(details.get("contract_type"))
     except ValueError:
         right = None
-    und = str(
-        (item.get("underlying_asset") or {}).get("ticker")
-        if isinstance(item.get("underlying_asset"), dict)
-        else underlying
-    ).strip().upper() or underlying
+    # Always persist canonical storage underlying (SPX not I:SPX / SPXW).
+    und = storage
 
     if expiry is None or strike is None or right is None:
         try:
@@ -99,7 +100,6 @@ def _contract_parts(item: Mapping[str, Any], underlying: str) -> dict[str, Any] 
             expiry = expiry or parsed["expiry"]
             strike = strike if strike is not None else parsed["strike"]
             right = right or parsed["option_right"]
-            und = und or parsed["underlying"]
         except ValueError:
             return None
     if expiry is None or strike is None or right is None:
@@ -126,11 +126,13 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     underlying = str(payload.get("underlying") or "").strip().upper()
     if not underlying:
         raise ValueError("option_snapshot payload requires underlying")
+    storage = storage_underlying(underlying)
+    api_underlying = snapshot_api_underlying(underlying)
     expiration_date = payload.get("expiration_date")
     contract_type = payload.get("contract_type")
 
     data = await client.fetch_options_snapshot(
-        underlying,
+        api_underlying,
         expiration_date=expiration_date,
         contract_type=contract_type,
     )
@@ -142,7 +144,7 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     for item in results:
         if not isinstance(item, dict):
             continue
-        parts = _contract_parts(item, underlying)
+        parts = _contract_parts(item, storage)
         if parts is None:
             continue
         greeks = item.get("greeks") if isinstance(item.get("greeks"), dict) else {}
@@ -221,7 +223,8 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     return {
         "rows_written": n,
         "contracts_written": n_contracts,
-        "underlying": underlying,
+        "underlying": storage,
+        "api_underlying": api_underlying,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }

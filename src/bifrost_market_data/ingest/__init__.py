@@ -9,12 +9,18 @@ from bifrost_market_data.ingest._upsert import make_handler
 from bifrost_market_data.ingest.calendar import handle_calendar
 from bifrost_market_data.ingest.corporate_action import handle_dividends, handle_splits
 from bifrost_market_data.ingest.financials import handle_financials
+from bifrost_market_data.ingest.financials_ext import (
+    handle_ratios,
+    handle_short_interest,
+    handle_short_volume,
+)
 from bifrost_market_data.ingest.option_contract import handle_option_contract
 from bifrost_market_data.ingest.option_daily import handle_option_daily
 from bifrost_market_data.ingest.option_expiration import handle_option_expiration
 from bifrost_market_data.ingest.option_minute import handle_option_minute
 from bifrost_market_data.ingest.option_oi import handle_option_open_interest
 from bifrost_market_data.ingest.option_snapshot import handle_option_snapshot
+from bifrost_market_data.ingest.option_trades import handle_option_trades
 from bifrost_market_data.ingest.stock_daily import handle_stock_daily
 from bifrost_market_data.ingest.stock_daily_grouped import handle_stock_daily_grouped
 from bifrost_market_data.ingest.stock_minute import handle_stock_minute
@@ -35,6 +41,7 @@ _RAW_HANDLERS: dict[str, Any] = {
     "stock_movers": handle_stock_movers,
     "option_daily": handle_option_daily,
     "option_minute": handle_option_minute,
+    "option_trades": handle_option_trades,
     "option_snapshot": handle_option_snapshot,
     "option_contract": handle_option_contract,
     "option_expiration": handle_option_expiration,
@@ -43,6 +50,9 @@ _RAW_HANDLERS: dict[str, Any] = {
     "ticker_related": handle_ticker_related,
     "ticker_type": handle_ticker_type,
     "financials": handle_financials,
+    "ratios": handle_ratios,
+    "short_interest": handle_short_interest,
+    "short_volume": handle_short_volume,
     "splits": handle_splits,
     "dividends": handle_dividends,
     "calendar": handle_calendar,
@@ -75,6 +85,7 @@ __all__ = [
     "handle_stock_movers",
     "handle_option_daily",
     "handle_option_minute",
+    "handle_option_trades",
     "handle_option_snapshot",
     "handle_option_contract",
     "handle_option_expiration",
@@ -83,6 +94,9 @@ __all__ = [
     "handle_ticker_related",
     "handle_ticker_type",
     "handle_financials",
+    "handle_ratios",
+    "handle_short_interest",
+    "handle_short_volume",
     "handle_splits",
     "handle_dividends",
     "handle_calendar",

@@ -12,9 +12,12 @@ scheduler:
       AND symbol IS NOT NULL AND trim(symbol) <> ''
   # Optional hard-coded override (skips DB query when set):
   # watchlist_symbols: [AAPL, MSFT, TSLA]
-  # Wave A IV Radar: unioned into atm-iv-pcr, iv-percentile, eod-pipeline,
-  # and option-refresh (always included in the refresh batch). Not global watchlist_query.
-  iv_radar_benchmarks: [SPY, QQQ, IWM]
+  # Wave A IV Radar: unioned into eod-pipeline and option-refresh
+  # (always included in the refresh batch). Analytics upserts moved to Research.
+  # SPX = index options (Polygon dual-ticker: snapshot I:SPX, contracts SPX).
+  iv_radar_benchmarks: [SPY, QQQ, IWM, SPX]
+  # Explicit index-option roots (optional; inferred from benchmarks when omitted).
+  # index_option_underlyings: [SPX]
 
   slots:
     stock-eod:
@@ -38,6 +41,14 @@ scheduler:
       priority: 4
       expiry_days: 60
       max_per_underlying: 40
+    # Daily REST options tape (NOT WebSocket). Universe: SPX ∪ watchlist top 50.
+    option-trades:
+      cron: "0 23 * * *"
+      priority: 3
+      expiry_days: 60
+      # 2 = smoke/entitlement-safe; raise after Polygon Options Trades entitlement is confirmed
+      max_per_underlying: 2
+      universe_limit: 50
     minute-bars:
       cron: "15 23 * * *"
       priority: 3
@@ -53,7 +64,15 @@ scheduler:
     fundamentals-rotate:
       cron: "0 3 * * *"
       priority: 1
-      batch_size: 40
+      # CS common-stock universe (same as Stock Screener). Catch-up prefers
+      # names missing income_statement; financials-only keeps Polygon budget
+      # on the screener path (ratios/short remain optional).
+      universe: cs
+      prioritize_missing: true
+      batch_size: 5000
+      include_ratios: false
+      include_short_interest: false
+      include_short_volume: false
     related-rotate:
       cron: "30 22 * * *"
       priority: 1
@@ -62,6 +81,7 @@ scheduler:
       cron: "15 2 * * *"
       keep_days: 7
       keep_max: 5000
+      option_trades_keep_days: 30
     readiness-refresh:
       cron: "30 23 * * *"
       priority: 0
@@ -75,16 +95,5 @@ scheduler:
       # D6=B: weekly re-scan recent days; DB-to-DB extract fills OI gaps
       cron: "0 4 * * 6"
       lookback_days: 14
-    max-pain:
-      # D8=B: daily Max Pain from OI; lookback heals holiday/gap days
-      cron: "45 22 * * *"
-      lookback_days: 3
-    atm-iv-pcr:
-      # D12=A: merged ATM IV + PCR at 23:00 UTC
-      cron: "0 23 * * *"
-      lookback_days: 3
-    iv-percentile:
-      # D12=A: after atm-iv-pcr; depends on atm_iv_daily
-      cron: "15 23 * * *"
-      lookback_days: 3
-      percentile_window: 252
+    # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
+    # (bifrost_research.scheduler.volatility). Plugin no longer schedules these.

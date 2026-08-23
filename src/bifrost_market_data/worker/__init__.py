@@ -1,6 +1,12 @@
 """Asyncio worker loop — PG-as-broker job claim (P3) + ingest dispatch (P4)."""
 
-from bifrost_market_data.worker.claim import JobRow, claim_job, mark_done, mark_failed
+from bifrost_market_data.worker.claim import (
+    JobRow,
+    claim_job,
+    mark_done,
+    mark_failed,
+    reclaim_stale_running,
+)
 from bifrost_market_data.worker.health import HealthState, start_health_server
 from bifrost_market_data.worker.loop import (
     POOL_KINDS,
@@ -12,9 +18,9 @@ from bifrost_market_data.worker.loop import (
 from bifrost_market_data.worker.runner import main
 
 __all__ = [
-    "JobRow",
     "POOL_KINDS",
     "HealthState",
+    "JobRow",
     "build_default_handlers",
     "claim_job",
     "kinds_for_pool",
@@ -22,6 +28,7 @@ __all__ = [
     "mark_done",
     "mark_failed",
     "process_one_job",
+    "reclaim_stale_running",
     "run_loop",
     "start_health_server",
 ]

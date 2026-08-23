@@ -14,6 +14,10 @@ from bifrost_market_data.ingest._upsert import (
     parse_option_right,
     parse_option_ticker,
 )
+from bifrost_market_data.ingest.index_options import (
+    snapshot_api_underlying,
+    storage_underlying,
+)
 from bifrost_market_data.worker.claim import JobRow
 
 _COLS = (
@@ -32,12 +36,14 @@ async def handle_option_open_interest(job: JobRow, client: Any, conn: Any) -> Ma
     underlying = str(payload.get("underlying") or "").strip().upper()
     if not underlying:
         raise ValueError("option_open_interest payload requires underlying")
+    storage = storage_underlying(underlying)
+    api_underlying = snapshot_api_underlying(underlying)
     trade_date = parse_date(payload.get("trade_date"))
     if trade_date is None:
         trade_date = daily_snapshot_anchor().date()  # NY calendar date (tz-aware .date())
 
     data = await client.fetch_options_snapshot(
-        underlying,
+        api_underlying,
         expiration_date=payload.get("expiration_date"),
         contract_type=payload.get("contract_type"),
     )
@@ -60,18 +66,13 @@ async def handle_option_open_interest(job: JobRow, client: Any, conn: Any) -> Ma
             right = parse_option_right(details.get("contract_type"))
         except ValueError:
             right = None
-        und = underlying
-        ua = item.get("underlying_asset")
-        if isinstance(ua, dict) and ua.get("ticker"):
-            und = str(ua["ticker"]).strip().upper()
-
+        und = storage
         if expiry is None or strike is None or right is None:
             try:
                 parsed = parse_option_ticker(ticker)
                 expiry = expiry or parsed["expiry"]
                 strike = strike if strike is not None else parsed["strike"]
                 right = right or parsed["option_right"]
-                und = und or parsed["underlying"]
             except ValueError:
                 continue
         if expiry is None or strike is None or right is None:
@@ -90,7 +91,8 @@ async def handle_option_open_interest(job: JobRow, client: Any, conn: Any) -> Ma
     )
     return {
         "rows_written": n,
-        "underlying": underlying,
+        "underlying": storage,
+        "api_underlying": api_underlying,
         "trade_date": trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),

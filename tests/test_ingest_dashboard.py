@@ -41,7 +41,9 @@ class _DashCur:
     def execute(self, query: str, params: Any = None) -> None:
         q = query.lower()
         self.parent.statements.append((query, params))
-        if "where status in ('pending', 'running')" in q and "group by kind" in q:
+        if "min(created_at)" in q and "group by kind" in q:
+            self._rows = list(self.parent.activity_rows)
+        elif "where status in ('pending', 'running')" in q and "group by kind" in q:
             self._rows = list(self.parent.queue_rows)
         elif "finished_at >=" in q:
             self._rows = list(self.parent.finished_rows)
@@ -83,6 +85,14 @@ class _DashConn:
             ("calendar", datetime(2026, 8, 16, 22, 0, tzinfo=timezone.utc), 1, "ok"),
         ]
         self.window_rows = [("done", 5)]
+        self.activity_rows = [
+            (
+                "stock_daily",
+                datetime(2026, 8, 16, 21, 30, tzinfo=timezone.utc),
+                datetime(2026, 8, 16, 22, 10, tzinfo=timezone.utc),
+                12,
+            ),
+        ]
 
     def cursor(self) -> _DashCur:
         return _DashCur(self)
@@ -114,5 +124,16 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["queue"]["scheduled_future"] == 0
     assert report["queue"]["running"] == 2
     assert report["throughput"]["done_last_15m"] == 30
-    assert len(report["schedule"]["slots"]) == 2
+    assert len(report["schedule"]["slots"]) == 5  # 2 active + 3 migrated
+    migrated = [s for s in report["schedule"]["slots"] if s.get("migrated")]
+    assert len(migrated) == 3
+    assert all(s["adherence"] == "migrated" for s in migrated)
+    assert all("moved to Research" in s["note"] for s in migrated)
     assert all("next_fires" in s for s in report["schedule"]["slots"])
+    assert report["schedule"]["horizon"]["start"] == "2026-08-16T20:30:00Z"
+    assert report["schedule"]["horizon"]["end"] == "2026-08-18T02:30:00Z"
+    stock = next(s for s in report["schedule"]["slots"] if s["slot"] == "stock-eod")
+    assert "2026-08-16T21:30:00Z" in (stock.get("fires_in_window") or [])
+    assert stock["drain"]["started_at"] == "2026-08-16T21:30:00Z"
+    assert stock["drain"]["active"] is True
+    assert stock["drain"]["ended_at"] is None

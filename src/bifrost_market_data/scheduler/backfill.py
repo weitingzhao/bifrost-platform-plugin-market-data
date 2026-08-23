@@ -9,9 +9,16 @@ from bifrost_market_data.scheduler.enqueue import insert_job
 
 # Kinds that require a date range and are chunked by day/range.
 # stock_daily / stock_minute: symbols = equity tickers
-# option_daily / option_minute: symbols = option_tickers (O:...)
+# option_daily / option_minute / option_trades: symbols = option_tickers (O:...)
 _DATE_RANGE_KINDS = frozenset(
-    {"stock_daily", "option_daily", "stock_daily_grouped", "stock_minute", "option_minute"}
+    {
+        "stock_daily",
+        "option_daily",
+        "option_trades",
+        "stock_daily_grouped",
+        "stock_minute",
+        "option_minute",
+    }
 )
 
 # Kinds that enqueue one job per symbol (no date range).
@@ -80,7 +87,12 @@ def enqueue_backfill(
         )
 
     if chunk_days is None:
-        chunk_days = 30 if kind_s in ("stock_minute", "option_minute") else 365
+        if kind_s in ("stock_minute", "option_minute"):
+            chunk_days = 30
+        elif kind_s == "option_trades":
+            chunk_days = 1  # tape volume is high — one day per job
+        else:
+            chunk_days = 365
 
     syms = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
     enqueued = 0
@@ -181,6 +193,13 @@ def enqueue_backfill(
                     "to": end.isoformat(),
                     "multiplier": 1,
                     "timespan": "minute",
+                }
+            elif kind_s == "option_trades":
+                payload = {
+                    "option_ticker": sym,
+                    "from": start.isoformat(),
+                    "to": end.isoformat(),
+                    "trade_date": start.isoformat(),
                 }
             else:
                 # option_daily

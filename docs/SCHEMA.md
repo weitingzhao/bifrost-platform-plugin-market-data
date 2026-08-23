@@ -38,7 +38,7 @@ psql -f scripts/create_roles.sql
 |-----------|--------|
 | Time | Calendar `date` for daily bars (NY trade date semantics at ingest); `timestamptz` UTC for intraday / snapshots |
 | Identity | `symbol` uppercase TRIM at write time; options keyed by Polygon `option_ticker` (`O:AAPL250620C00150000`) |
-| Partitioning | Year for `stock_daily`; month for minute / option daily / snapshot / analytics; **no partition** for `stock_snapshot` / `stock_movers` (daily upsert by session_date) |
+| Partitioning | Year for `stock_daily`; month for minute / option daily / snapshot / analytics; **day** for `option_trades` (30d retention); **no partition** for `stock_snapshot` / `stock_movers` (daily upsert by session_date) |
 | Fundamentals | One jsonb table (`stock_financials`) instead of six flat tables |
 | Jobs | `data_ops.job_ingest` is the broker (`SELECT FOR UPDATE SKIP LOCKED` in P3) |
 | Analytics | Derived daily metrics in `market_analytics.*` (computed from `market.*`; no live vendor calls in DDL) |
@@ -138,6 +138,31 @@ Replaces `public.option_day`.
 Replaces `public.option_min`. Same contract identity as option_daily plus `period` + `bar_time`.
 
 **PK:** `(option_ticker, period, bar_time)`
+
+### `market.option_trades`
+
+Daily REST options tape from Polygon `GET /v3/trades/{optionsTicker}` (not WebSocket).
+Used by Research Order Flow when present (`data_source=option_trades_tape`).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| option_ticker | text | Polygon native key; PK part |
+| underlying / expiry / strike / option_right | | contract identity |
+| trade_date | date | NY session date; **day** RANGE partition key |
+| sip_ts | timestamptz | SIP receive time (from ns) |
+| sequence_number | bigint | per-ticker sequence; PK part |
+| price / size | | print price and size |
+| exchange | integer | Polygon exchange id |
+| conditions | integer[] | condition codes |
+| correction | integer | correction indicator |
+| participant_ts | timestamptz | exchange timestamp |
+| fetched_at | timestamptz | ingest wall clock |
+
+**PK:** `(option_ticker, trade_date, sip_ts, sequence_number)`  
+**Partitions:** `option_trades_dYYYYMMDD` + default via `data_ops.ensure_day_partitions`  
+**Retention:** 30 days — `trim` slot calls `data_ops.drop_day_partitions_older_than(..., 30)`  
+**Job kind:** `option_trades` · slot `option-trades` (~23:00 UTC)  
+**Universe:** SPX ∪ Trade watchlist (sorted union truncated to 50, always include SPX)
 
 ### `market.option_contract`
 
@@ -305,14 +330,14 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date, expiry)`  
 **Index:** `(symbol, trade_date DESC)`
 
-**Computation path (P3 / D7=A, D8=B):**
+**Computation path (owned by bifrost-research since Wave 2.1):**
 
 1. Source: `market.option_open_interest` for each trading day in lookback (`lookback_days=3`).
 2. Group by `(underlying, expiry)`; build strike → (call_oi, put_oi).
 3. `pain(K) = Σ [ OI_call(s)·max(0,K−s)·100 + OI_put(s)·max(0,s−K)·100 ]`; `max_pain_strike = argmin_K(pain(K))`.
 4. Upsert into this table (`ON CONFLICT DO UPDATE` refreshes `computed_at`).
-5. Scheduler slot `max-pain` (CronJob `45 22 * * *` UTC) runs inline DB compute — no Polygon.
-6. Read API: `GET /market/analytics/max-pain` (D9=A).
+5. Research CronJob `research-max-pain` (`45 22 * * *` UTC) — see `bifrost-research/k8s/engines/cronjob-volatility.yaml`.
+6. Read API: Research `/analytics/options/max-pain` (preferred); Plugin `GET /market/analytics/max-pain` deprecated.
 
 ### `market_analytics.atm_iv_daily`
 
@@ -330,13 +355,13 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date, expiry)`  
 **Index:** `(symbol, trade_date DESC)`
 
-**Computation path (P4 / D10=A):**
+**Computation path (owned by bifrost-research since Wave 2.1):**
 
 1. Source: `market.v_option_snapshot_with_stock` (last snap per ticker on NY day) JOIN `option_contract`.
 2. Group by `(underlying, expiry)`; spot = median `underlying_price`; nearest strike call/put IV avg.
 3. Upsert (`ON CONFLICT DO UPDATE`); `iv_source='snapshot'`.
-4. Scheduler slot `atm-iv-pcr` (`0 23 * * *` UTC) with PCR.
-5. Read API: `GET /market/analytics/atm-iv`.
+4. Research CronJob `research-atm-iv-pcr` (`0 23 * * *` UTC) with PCR.
+5. Read API: Research `/analytics/options/atm-iv` (preferred); Plugin route deprecated.
 6. **Black-box:** `iv` is Polygon precomputed — see `docs/ANALYTICS.md`.
 
 ### `market_analytics.pcr_daily`
@@ -354,11 +379,11 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date)`  
 **Index:** `(symbol, trade_date DESC)`
 
-**Computation path (P4 / D11=A):**
+**Computation path (owned by bifrost-research since Wave 2.1):**
 
 1. OI totals from `market.option_open_interest` for `trade_date`.
 2. Volume totals from last `option_snapshot.day_volume` per ticker (NY day) + `option_contract` right.
-3. Upsert via slot `atm-iv-pcr`; read `GET /market/analytics/pcr`.
+3. Upsert via Research CronJob `research-atm-iv-pcr`; read Research `/analytics/options/pcr` (preferred).
 
 ### `market_analytics.iv_percentile_daily`
 
@@ -375,12 +400,12 @@ Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
 **PK:** `(symbol, trade_date)`  
 **Index:** `(symbol, trade_date DESC)`
 
-**Computation path (P4 / D12=A):**
+**Computation path (owned by bifrost-research since Wave 2.1):**
 
 1. Source: `market_analytics.atm_iv_daily` history (~252 trading days).
 2. Current IV = median of per-expiry `atm_iv` on `trade_date`.
-3. Percentile / rank vs lookback window; slot `iv-percentile` at `15 23 * * *` UTC.
-4. Read API: `GET /market/analytics/iv-percentile`.
+3. Percentile / rank vs lookback window; Research CronJob `research-iv-percentile` at `15 23 * * *` UTC.
+4. Read API: Research `/analytics/options/iv-percentile` (preferred); Plugin route deprecated.
 
 ---
 
@@ -493,8 +518,10 @@ FastAPI app: `src/bifrost_market_data/api/app.py`. OpenAPI at `/docs`.
 
 - `stock_readiness_daily`, `cache_stock_snapshot`
 - Legacy `report_option_max_pain_daily` / `report_option_atm_iv_daily` (replaced by `market_analytics.*`)
-- `option_trades` (Developer tier)
 - `job_bars_backfill`, `job_sepa_phase4`, IB bars paths
+
+> **Note:** `market.option_trades` is now in-scope (plugin-options-tape / Operate Queue) —
+> day-partitioned REST tape with 30d retention; see table section above.
 
 ---
 
