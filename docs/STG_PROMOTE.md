@@ -39,7 +39,7 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 
 **Image**: `bifrost-market-data:0.1.2` (`k8s/base` `newTag`) — includes scheduler slots `reference` + `fundamentals-rotate`.
 
-**Readiness rollup** (Platform Gallery optional KPI): reads `public.stock_readiness_daily`. After P9, `public.v_us_equity_universe.tickers_id` is a synthetic `hashtext(symbol)` (bifrost-core ≥0.5.2) so `included_in_universe` / `fund_cache_valid` can be non-zero. There is no separate `fund_cache` table — validity is derived from `fundamental_eval` + `fund_cache_expire_at`.
+**Readiness rollup** (Platform Gallery optional KPI): **RETIRED** — `public.stock_readiness_daily` dropped from Trade DB (core 0.10.7+); `market-data-readiness-refresh` CronJob remains **suspend**. SEPA readiness KPIs use Golden Source `dw_stock.mart_sepa_*` via Research API / Plugin `/market/readiness/*`.
 
 ### `price_ready` gap (DEV, 2026-08-02)
 
