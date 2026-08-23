@@ -1,4 +1,4 @@
-"""Ingest job enqueue + status routes (D15=A — write data_ops.job_ingest directly)."""
+"""Ingest job enqueue + status routes (D15=A — write ops_jobs.job_ingest directly)."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def get_job(conn: Any, job_id: int) -> dict[str, Any] | None:
             SELECT id, kind, payload, payload_hash, priority, status, result,
                    attempts, max_attempts, created_at, updated_at,
                    started_at, finished_at
-            FROM data_ops.job_ingest
+            FROM ops_jobs.job_ingest
             WHERE id = %s
             """,
             (int(job_id),),
@@ -81,7 +81,7 @@ def get_job(conn: Any, job_id: int) -> dict[str, Any] | None:
 def enqueue_job(
     body: dict[str, Any] = Body(...),
 ) -> dict[str, Any]:
-    """Insert a pending job into ``data_ops.job_ingest`` (no Celery — D15=A).
+    """Insert a pending job into ``ops_jobs.job_ingest`` (no Celery — D15=A).
 
     Body: ``{ "kind": "<handler kind>", "payload": {...}, "priority": 0 }``
     """
@@ -120,7 +120,7 @@ def enqueue_job(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id FROM data_ops.job_ingest
+                    SELECT id FROM ops_jobs.job_ingest
                     WHERE kind = %s AND payload_hash = %s
                       AND status IN ('pending', 'running')
                     ORDER BY id DESC
@@ -152,7 +152,7 @@ def enqueue_job(
 def get_ingest_job(
     job_id: str = Path(..., description="Job id (numeric)"),
 ) -> dict[str, Any]:
-    """Return a single ``data_ops.job_ingest`` row."""
+    """Return a single ``ops_jobs.job_ingest`` row."""
     try:
         jid = int(str(job_id).strip())
     except ValueError as exc:
@@ -192,7 +192,7 @@ def list_ingest_jobs(
                 SELECT id, kind, payload, payload_hash, priority, status, result,
                        attempts, max_attempts, created_at, updated_at,
                        started_at, finished_at
-                FROM data_ops.job_ingest
+                FROM ops_jobs.job_ingest
                 {where}
                 ORDER BY id DESC
                 LIMIT %s
@@ -240,7 +240,7 @@ def ingest_queue_summary() -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT kind, status, COUNT(*)::bigint AS n
-                FROM data_ops.job_ingest
+                FROM ops_jobs.job_ingest
                 WHERE status IN ('pending', 'running')
                 GROUP BY kind, status
                 ORDER BY kind, status

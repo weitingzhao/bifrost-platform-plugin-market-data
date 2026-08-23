@@ -35,7 +35,7 @@ class _DummyCursor:
         self._fetch_result: Any = None
 
     def execute(self, sql: str, params: Any = None) -> None:
-        if "SELECT 1 FROM market.ticker" in sql:
+        if "SELECT 1 FROM raw_market.ticker" in sql:
             self._fetch_result = None
         else:
             self._fetch_result = None
@@ -91,7 +91,7 @@ class TestUpsertSingle:
         _patch(monkeypatch)
 
         def execute_with_exists(self, sql, params=None):
-            if "SELECT 1 FROM market.ticker" in sql:
+            if "SELECT 1 FROM raw_market.ticker" in sql:
                 self._fetch_result = (1,)
             else:
                 self._fetch_result = None
@@ -136,7 +136,7 @@ class TestUpsertSingle:
         orig_execute = _DummyCursor.execute
 
         def capture_execute(self, sql, params=None):
-            if params and "INSERT INTO market.ticker" in sql:
+            if params and "INSERT INTO raw_market.ticker" in sql:
                 captured.append(params)
             orig_execute(self, sql, params)
 
@@ -157,7 +157,7 @@ class TestUpsertSingle:
         orig_execute = _DummyCursor.execute
 
         def capture_execute(self, sql, params=None):
-            if params and "INSERT INTO market.ticker" in sql:
+            if params and "INSERT INTO raw_market.ticker" in sql:
                 captured.append(params)
             orig_execute(self, sql, params)
 

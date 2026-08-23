@@ -1,4 +1,4 @@
-"""SELECT FOR UPDATE SKIP LOCKED job claim against data_ops.job_ingest."""
+"""SELECT FOR UPDATE SKIP LOCKED job claim against ops_jobs.job_ingest."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class _Connection(Protocol):
 
 @dataclass(frozen=True)
 class JobRow:
-    """One row from data_ops.job_ingest after claim."""
+    """One row from ops_jobs.job_ingest after claim."""
 
     id: int
     kind: str
@@ -116,7 +116,7 @@ def claim_job(conn: _Connection, pool_kinds: Sequence[str]) -> JobRow | None:
             cur.execute(
                 f"""
                 SELECT {_JOB_COLUMNS}
-                FROM data_ops.job_ingest
+                FROM ops_jobs.job_ingest
                 WHERE status = 'pending'
                   AND kind = ANY(%s)
                 ORDER BY priority DESC, created_at ASC
@@ -133,7 +133,7 @@ def claim_job(conn: _Connection, pool_kinds: Sequence[str]) -> JobRow | None:
             job_id = int(row[0] if not isinstance(row, Mapping) else row["id"])
             cur.execute(
                 f"""
-                UPDATE data_ops.job_ingest
+                UPDATE ops_jobs.job_ingest
                 SET status = 'running',
                     attempts = attempts + 1,
                     started_at = now(),
@@ -162,7 +162,7 @@ def mark_done(conn: _Connection, job_id: int, result: Mapping[str, Any] | None =
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE data_ops.job_ingest
+                UPDATE ops_jobs.job_ingest
                 SET status = 'done',
                     result = %s::jsonb,
                     finished_at = now(),
@@ -200,7 +200,7 @@ def reclaim_stale_running(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                UPDATE data_ops.job_ingest
+                UPDATE ops_jobs.job_ingest
                 SET status = CASE
                         WHEN attempts >= max_attempts THEN 'failed'
                         ELSE 'pending'
@@ -263,7 +263,7 @@ def mark_failed(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                UPDATE data_ops.job_ingest
+                UPDATE ops_jobs.job_ingest
                 SET status = %s,
                     result = %s::jsonb,
                     finished_at = {finished_sql},

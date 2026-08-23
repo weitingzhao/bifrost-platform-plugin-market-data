@@ -62,7 +62,7 @@ def query_pcr_aggregate(
                                THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS put_oi,
                            SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('C', 'CALL')
                                THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS call_oi
-                    FROM market.option_open_interest
+                    FROM raw_market.option_open_interest
                     WHERE underlying = %s
                       AND trade_date >= (CURRENT_DATE - %s)
                     GROUP BY trade_date
@@ -92,8 +92,8 @@ def query_pcr_aggregate(
                         oc.option_right,
                         COALESCE(os.open_interest, 0)::bigint AS open_interest,
                         DATE(timezone('America/New_York', os.snapshot_ts)) AS trade_date
-                      FROM market.option_contract oc
-                      INNER JOIN market.option_snapshot os
+                      FROM raw_market.option_contract oc
+                      INNER JOIN raw_market.option_snapshot os
                         ON os.option_ticker = oc.option_ticker
                       WHERE UPPER(TRIM(oc.underlying)) = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)
@@ -135,8 +135,8 @@ def query_pcr_aggregate(
                         oc.option_right,
                         COALESCE(os.day_volume, 0)::bigint AS day_volume,
                         DATE(timezone('America/New_York', os.snapshot_ts)) AS trade_date
-                      FROM market.option_contract oc
-                      INNER JOIN market.option_snapshot os
+                      FROM raw_market.option_contract oc
+                      INNER JOIN raw_market.option_snapshot os
                         ON os.option_ticker = oc.option_ticker
                       WHERE UPPER(TRIM(oc.underlying)) = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)

@@ -40,7 +40,7 @@ FROM (
     underlying,
     open_interest,
     (snapshot_ts AT TIME ZONE 'America/New_York')::date AS trade_date
-  FROM market.option_snapshot
+  FROM raw_market.option_snapshot
   WHERE open_interest IS NOT NULL
     AND (snapshot_ts AT TIME ZONE 'America/New_York')::date >= %s
     AND (snapshot_ts AT TIME ZONE 'America/New_York')::date <= %s
@@ -49,7 +49,7 @@ FROM (
     (snapshot_ts AT TIME ZONE 'America/New_York')::date,
     snapshot_ts DESC
 ) s
-LEFT JOIN market.option_contract c ON c.option_ticker = s.option_ticker
+LEFT JOIN raw_market.option_contract c ON c.option_ticker = s.option_ticker
 """.strip()
 
 _SELECT_SQL_FILTERED = """
@@ -71,7 +71,7 @@ FROM (
     underlying,
     open_interest,
     (snapshot_ts AT TIME ZONE 'America/New_York')::date AS trade_date
-  FROM market.option_snapshot
+  FROM raw_market.option_snapshot
   WHERE open_interest IS NOT NULL
     AND (snapshot_ts AT TIME ZONE 'America/New_York')::date >= %s
     AND (snapshot_ts AT TIME ZONE 'America/New_York')::date <= %s
@@ -81,7 +81,7 @@ FROM (
     (snapshot_ts AT TIME ZONE 'America/New_York')::date,
     snapshot_ts DESC
 ) s
-LEFT JOIN market.option_contract c ON c.option_ticker = s.option_ticker
+LEFT JOIN raw_market.option_contract c ON c.option_ticker = s.option_ticker
 """.strip()
 
 

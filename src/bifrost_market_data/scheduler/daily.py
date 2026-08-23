@@ -1,4 +1,4 @@
-"""Daily / EOD job generation — CronJob-driven enqueue into data_ops.job_ingest."""
+"""Daily / EOD job generation — CronJob-driven enqueue into ops_jobs.job_ingest."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ WHERE sec_type = 'STK' AND optionable = true
 # Same filter as Research dim_universe / Stock Screener Technical.
 CS_UNIVERSE_QUERY = """
 SELECT symbol
-FROM market.ticker
+FROM raw_market.ticker
 WHERE instrument_type = 'CS'
   AND market = 'stocks'
   AND COALESCE(active, true) = true
@@ -71,7 +71,7 @@ WHERE instrument_type = 'CS'
 
 INCOME_STATEMENT_COVERED_QUERY = """
 SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
-FROM market.stock_financials
+FROM raw_market.stock_financials
 WHERE report_type = 'income_statement'
   AND symbol IS NOT NULL AND trim(symbol) <> ''
 """.strip()
@@ -231,7 +231,7 @@ def _option_contract_underlyings(conn: Any, *, limit: int = 200) -> list[str]:
             cur.execute(
                 """
                 SELECT UPPER(TRIM(underlying)) AS sym
-                FROM market.option_contract
+                FROM raw_market.option_contract
                 WHERE TRIM(COALESCE(underlying, '')) <> ''
                 GROUP BY UPPER(TRIM(underlying))
                 ORDER BY COUNT(*) DESC, sym ASC
@@ -449,7 +449,7 @@ def load_option_tickers(
                   PARTITION BY underlying
                   ORDER BY expiry ASC, strike ASC, option_right ASC
                 ) AS rn
-              FROM market.option_contract
+              FROM raw_market.option_contract
               WHERE underlying = ANY(%s)
                 AND expiry >= %s
                 AND expiry <= %s
@@ -550,7 +550,7 @@ def enqueue_slot(
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT data_ops.drop_day_partitions_older_than('market', 'option_trades', %s)",
+                    "SELECT ops_jobs.drop_day_partitions_older_than('market', 'option_trades', %s)",
                     (trades_keep,),
                 )
                 row = cur.fetchone() if hasattr(cur, "fetchone") else None
@@ -560,7 +560,7 @@ def enqueue_slot(
                 conn.commit()
             # Re-create near-term day partitions after drops.
             with conn.cursor() as cur:
-                cur.execute("SELECT data_ops.ensure_day_partitions('market', 'option_trades', 35, 2)")
+                cur.execute("SELECT ops_jobs.ensure_day_partitions('market', 'option_trades', 35, 2)")
             if hasattr(conn, "commit"):
                 conn.commit()
         except Exception as exc:  # noqa: BLE001 — retention best-effort
@@ -774,17 +774,19 @@ def enqueue_slot(
             )
 
     elif slot_key == "minute-bars":
+        # Stock intraday: 1min / 5min / 1hour (replaces retired Trade stocks_ib Celery path).
         for sym in symbols:
-            _add(
-                "stock_minute",
-                {
-                    "symbol": sym,
-                    "from": day_s,
-                    "to": day_s,
-                    "multiplier": 1,
-                    "timespan": "minute",
-                },
-            )
+            for multiplier, timespan in ((1, "minute"), (5, "minute"), (1, "hour")):
+                _add(
+                    "stock_minute",
+                    {
+                        "symbol": sym,
+                        "from": day_s,
+                        "to": day_s,
+                        "multiplier": multiplier,
+                        "timespan": timespan,
+                    },
+                )
         # Option minute bars: rotate a bounded batch of near-term contracts.
         expiry_days = int(scfg.get("expiry_days") or 45)
         max_per = int(scfg.get("max_per_underlying") or 10)

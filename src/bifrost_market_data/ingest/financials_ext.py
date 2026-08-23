@@ -39,7 +39,7 @@ def _upsert_rows(conn: Any, rows: list[tuple[Any, ...]]) -> int:
     if not rows:
         return 0
     sql = """
-        INSERT INTO market.stock_financials
+        INSERT INTO raw_market.stock_financials
             (symbol, report_type, period_date, period_type, fiscal_year, fiscal_quarter, data)
         VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
         ON CONFLICT (symbol, report_type, period_date, period_type) DO UPDATE SET

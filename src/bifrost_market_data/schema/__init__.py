@@ -1,4 +1,4 @@
-"""PostgreSQL schema DDL for market.*, market_analytics.*, and data_ops.*."""
+"""PostgreSQL schema DDL for market.*, features_daily.*, and ops_jobs.*."""
 
 from bifrost_market_data.schema.ddl import (
     DATA_OPS_TABLES,

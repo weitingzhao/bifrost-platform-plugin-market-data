@@ -56,7 +56,7 @@ def query_expirations(conn: Any, symbol: str) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT expiry FROM market.option_expiration
+                SELECT expiry FROM raw_market.option_expiration
                 WHERE underlying = %s
                 ORDER BY expiry ASC
                 """,
@@ -74,7 +74,7 @@ def query_expirations(conn: Any, symbol: str) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT expiry FROM market.option_contract
+                SELECT DISTINCT expiry FROM raw_market.option_contract
                 WHERE underlying = %s
                 ORDER BY expiry ASC
                 """,
@@ -103,7 +103,7 @@ def query_expirations(conn: Any, symbol: str) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT strike FROM market.option_contract
+                SELECT DISTINCT strike FROM raw_market.option_contract
                 WHERE underlying = %s AND expiry = %s
                 ORDER BY strike ASC
                 """,
@@ -144,7 +144,7 @@ def query_snapshots(
     if expiration is not None:
         if table_exists(conn, "market", "option_contract"):
             join_sql = """
-                JOIN market.option_contract c
+                JOIN raw_market.option_contract c
                   ON c.option_ticker = s.option_ticker
             """
             where_extra = " AND c.expiry = %s"
@@ -161,7 +161,7 @@ def query_snapshots(
                s.fetched_at
         FROM (
             SELECT DISTINCT ON (option_ticker) *
-            FROM market.option_snapshot
+            FROM raw_market.option_snapshot
             WHERE underlying = %s
             ORDER BY option_ticker, snapshot_ts DESC
         ) s
@@ -230,7 +230,7 @@ def query_oi(
             f"""
             SELECT option_ticker, underlying, expiry, strike, option_right,
                    trade_date, open_interest, fetched_at
-            FROM market.option_open_interest
+            FROM raw_market.option_open_interest
             WHERE {' AND '.join(clauses)}
             ORDER BY trade_date DESC, expiry ASC, strike ASC
             LIMIT %s
@@ -375,7 +375,7 @@ def relative_value(
                 cur.execute(
                     """
                     SELECT option_ticker, strike, option_right
-                    FROM market.option_contract
+                    FROM raw_market.option_contract
                     WHERE option_ticker = ANY(%s)
                     """,
                     (tickers,),
@@ -459,7 +459,7 @@ _CHAIN_SELECT = """
 _IB_CONTRACT_JOIN = """
     FROM unnest(%s::text[], %s::date[], %s::text[], %s::float8[], %s::text[])
       AS req(underlying, expiry, option_right, strike, ib_key)
-    JOIN market.option_contract oc
+    JOIN raw_market.option_contract oc
       ON oc.underlying = req.underlying
      AND oc.expiry = req.expiry
      AND oc.option_right = req.option_right
@@ -533,8 +533,8 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
                 cur.execute(
                     f"""
                     SELECT {_CHAIN_SELECT}
-                    FROM market.v_option_chain_latest s
-                    JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                    FROM raw_market.v_option_chain_latest s
+                    JOIN raw_market.option_contract oc ON oc.option_ticker = s.option_ticker
                     WHERE s.option_ticker = ANY(%s)
                     """,
                     (polygon,),
@@ -544,8 +544,8 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
                     f"""
                     SELECT DISTINCT ON (s.option_ticker)
                         {_CHAIN_SELECT}
-                    FROM market.option_snapshot s
-                    JOIN market.option_contract oc ON oc.option_ticker = s.option_ticker
+                    FROM raw_market.option_snapshot s
+                    JOIN raw_market.option_contract oc ON oc.option_ticker = s.option_ticker
                     WHERE s.option_ticker = ANY(%s)
                     ORDER BY s.option_ticker, s.snapshot_ts DESC
                     """,
@@ -569,7 +569,7 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
                     f"""
                     SELECT {select_ib}
                     {_IB_CONTRACT_JOIN}
-                    JOIN market.v_option_chain_latest s ON s.option_ticker = oc.option_ticker
+                    JOIN raw_market.v_option_chain_latest s ON s.option_ticker = oc.option_ticker
                     """,
                     ib_params,
                 )
@@ -579,7 +579,7 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
                     SELECT DISTINCT ON (oc.option_ticker)
                         {select_ib}
                     {_IB_CONTRACT_JOIN}
-                    JOIN market.option_snapshot s ON s.option_ticker = oc.option_ticker
+                    JOIN raw_market.option_snapshot s ON s.option_ticker = oc.option_ticker
                     ORDER BY oc.option_ticker, s.snapshot_ts DESC
                     """,
                     ib_params,
@@ -677,7 +677,7 @@ def _fetch_chain_eod(
                   oc.strike AS _strike,
                   oc.option_right AS _option_right
                 FROM {snapshot_table} v
-                JOIN market.option_contract oc ON oc.option_ticker = v.option_ticker
+                JOIN raw_market.option_contract oc ON oc.option_ticker = v.option_ticker
                 WHERE v.option_ticker = ANY(%s)
                   AND v.snapshot_ts >= %s
                 ORDER BY
@@ -814,7 +814,7 @@ def option_contracts(
             cur.execute(
                 f"""
                 SELECT option_ticker, underlying, expiry, strike, option_right
-                FROM market.option_contract
+                FROM raw_market.option_contract
                 WHERE {' AND '.join(clauses)}
                 ORDER BY expiry, strike, option_right
                 """,
@@ -860,7 +860,7 @@ def option_strikes(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT strike FROM market.option_contract
+                SELECT DISTINCT strike FROM raw_market.option_contract
                 WHERE underlying = %s AND expiry = %s
                 ORDER BY strike
                 """,
@@ -891,7 +891,7 @@ def option_expirations_yyyymmdd(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT expiry FROM market.option_contract
+                SELECT DISTINCT expiry FROM raw_market.option_contract
                 WHERE underlying = %s
                 ORDER BY expiry
                 """,

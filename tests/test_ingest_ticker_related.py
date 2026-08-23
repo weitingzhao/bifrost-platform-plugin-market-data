@@ -29,7 +29,7 @@ async def test_ticker_related_writes_peers() -> None:
     assert result["rows_written"] == 2
     assert result["peers"] == 2
     assert conn.committed == 1
-    delete_sqls = [s[0] for s in conn.statements if "DELETE FROM market.ticker_related" in s[0]]
+    delete_sqls = [s[0] for s in conn.statements if "DELETE FROM raw_market.ticker_related" in s[0]]
     assert len(delete_sqls) == 1
     assert "market.ticker_related" in conn.upsert_sqls()[0]
     rows = conn.statements[1][1]
@@ -59,5 +59,5 @@ async def test_ticker_related_empty_results_clears() -> None:
     )
     assert result["rows_written"] == 0
     assert result["peers"] == 0
-    assert any("DELETE FROM market.ticker_related" in s[0] for s in conn.statements)
+    assert any("DELETE FROM raw_market.ticker_related" in s[0] for s in conn.statements)
     assert conn.committed == 1

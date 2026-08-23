@@ -97,7 +97,7 @@ def _count_jobs_in_window(
         cur.execute(
             """
             SELECT status, COUNT(*)::bigint AS n
-            FROM data_ops.job_ingest
+            FROM ops_jobs.job_ingest
             WHERE kind = ANY(%s)
               AND created_at >= %s
               AND created_at < %s
@@ -128,7 +128,7 @@ def _freshness_map(conn: Any) -> dict[str, dict[str, Any]]:
             cur.execute(
                 """
                 SELECT dimension, last_run_at, rows_written, status
-                FROM data_ops.ingest_freshness
+                FROM ops_jobs.ingest_freshness
                 """
             )
             rows = cur.fetchall() or []
@@ -166,7 +166,7 @@ def _queue_composition(conn: Any) -> dict[str, Any]:
         cur.execute(
             """
             SELECT kind, status, COUNT(*)::bigint AS n
-            FROM data_ops.job_ingest
+            FROM ops_jobs.job_ingest
             WHERE status IN ('pending', 'running')
             GROUP BY kind, status
             ORDER BY kind, status
@@ -219,7 +219,7 @@ def _throughput(conn: Any, now: datetime) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT status, COUNT(*)::bigint AS n
-                FROM data_ops.job_ingest
+                FROM ops_jobs.job_ingest
                 WHERE finished_at >= %s
                   AND status IN ('done', 'failed')
                 GROUP BY status
@@ -262,7 +262,7 @@ def _kind_activity(conn: Any, since: datetime) -> dict[str, dict[str, Any]]:
                    COUNT(*) FILTER (
                        WHERE status IN ('pending', 'running')
                    )::bigint AS active
-            FROM data_ops.job_ingest
+            FROM ops_jobs.job_ingest
             WHERE created_at >= %s
                OR status IN ('pending', 'running')
             GROUP BY kind
@@ -328,7 +328,7 @@ def _oldest_pending_age_sec(conn: Any, now: datetime) -> float | None:
         cur.execute(
             """
             SELECT MIN(created_at)
-            FROM data_ops.job_ingest
+            FROM ops_jobs.job_ingest
             WHERE status = 'pending'
             """
         )

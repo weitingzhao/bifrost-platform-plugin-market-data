@@ -43,7 +43,7 @@ class _QCur:
         elif "from market.option_open_interest" in q:
             self._rows = list(self.parent.oi_rows)
             self._one = None
-        elif "from data_ops.ingest_freshness" in q:
+        elif "from ops_jobs.ingest_freshness" in q:
             self._rows = list(self.parent.freshness_rows)
             self._one = None
         elif "from public.watchlist" in q or "watchlist" in q:

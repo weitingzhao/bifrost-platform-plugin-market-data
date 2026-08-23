@@ -50,7 +50,7 @@ def query_bar_aggregate(
                     COUNT(*)::integer AS total_bars,
                     COUNT(*) FILTER (WHERE close IS NULL)::integer AS null_close_rows,
                     COUNT(*) FILTER (WHERE volume IS NULL)::integer AS null_volume_rows
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE bar_date >= (CURRENT_DATE - %s)::date
                   AND bar_date <= CURRENT_DATE
                 """,
@@ -94,7 +94,7 @@ def query_bar_aggregate(
                 MAX(bar_date)::text AS last_bar_date,
                 COUNT(*) FILTER (WHERE close IS NULL)::integer AS null_close_rows,
                 COUNT(*) FILTER (WHERE volume IS NULL)::integer AS null_volume_rows
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE bar_date >= (CURRENT_DATE - %s)::date
               AND bar_date <= CURRENT_DATE
             GROUP BY UPPER(TRIM(symbol))
@@ -147,7 +147,7 @@ def query_latest_bar_per_symbol(
                     UPPER(TRIM(symbol)) AS symbol,
                     bar_date::text AS bar_date,
                     close
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                   AND bar_date >= (CURRENT_DATE - %s)::date
                 ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
@@ -163,7 +163,7 @@ def query_latest_bar_per_symbol(
                     UPPER(TRIM(symbol)) AS symbol,
                     bar_date::text AS bar_date,
                     close
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE bar_date >= (CURRENT_DATE - %s)::date
                 ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
                 """,
@@ -202,7 +202,7 @@ def query_latest_bar_full_history(
                 UPPER(TRIM(symbol)) AS symbol,
                 bar_date::text AS bar_date,
                 close
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE UPPER(TRIM(symbol)) = ANY(%s)
             ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
             """,
@@ -245,7 +245,7 @@ def query_financials_coverage_symbols(conn: Any) -> dict[str, Any]:
             SELECT UPPER(TRIM(symbol)) AS symbol,
                    COUNT(*) FILTER (WHERE LOWER(period_type) = 'quarterly')::integer AS q_count,
                    COUNT(*) FILTER (WHERE LOWER(period_type) = 'annual')::integer AS a_count
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'income_statement'
             GROUP BY UPPER(TRIM(symbol))
             """
@@ -262,7 +262,7 @@ def query_financials_coverage_symbols(conn: Any) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE report_type = %s
                 """,
                 (rtype,),
@@ -352,7 +352,7 @@ def query_financials_fill_rate(
                 cur.execute(
                     f"""
                     SELECT {agg_parts}
-                    FROM market.stock_financials t
+                    FROM raw_market.stock_financials t
                     WHERE t.report_type = %s {universe_filter}
                     """,
                     tuple(params),
@@ -393,7 +393,7 @@ def query_date_coverage(
             SELECT
                 bar_date::text AS dt,
                 COUNT(DISTINCT UPPER(TRIM(symbol)))::int AS symbol_count
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE bar_date >= (CURRENT_DATE - %s)::date
               AND bar_date <= (CURRENT_DATE - 1)::date
             GROUP BY bar_date
@@ -437,7 +437,7 @@ def query_financials_by_instrument_type(
     with conn.cursor() as cur:
         for col, rtype in specs:
             cur.execute(
-                "SELECT COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint FROM market.stock_financials WHERE report_type = %s",
+                "SELECT COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint FROM raw_market.stock_financials WHERE report_type = %s",
                 (rtype,),
             )
             row = cur.fetchone()
@@ -562,7 +562,7 @@ def query_snapshot_coverage(conn: Any) -> dict[str, Any]:
         return {"ok": True, "row_count": 0, "last_fetched_at": None, "session_date": None, "by_instrument_type": []}
 
     with conn.cursor() as cur:
-        cur.execute("SELECT MAX(session_date) FROM market.stock_snapshot")
+        cur.execute("SELECT MAX(session_date) FROM raw_market.stock_snapshot")
         row = cur.fetchone()
         latest_sd = row[0] if row else None
 
@@ -573,7 +573,7 @@ def query_snapshot_coverage(conn: Any) -> dict[str, Any]:
         cur.execute(
             """
             SELECT COUNT(*)::bigint, MAX(fetched_at)
-            FROM market.stock_snapshot
+            FROM raw_market.stock_snapshot
             WHERE session_date = %s
             """,
             (latest_sd,),
@@ -592,8 +592,8 @@ def query_snapshot_coverage(conn: Any) -> dict[str, Any]:
                     COALESCE(u.instrument_type, 'UNKNOWN') AS code,
                     COUNT(s.symbol)::bigint AS snapshot_row_count,
                     COUNT(u.symbol)::bigint AS universe_ticker_count
-                FROM market.v_us_equity_universe u
-                LEFT JOIN market.stock_snapshot s
+                FROM raw_market.v_us_equity_universe u
+                LEFT JOIN raw_market.stock_snapshot s
                     ON UPPER(TRIM(s.symbol)) = UPPER(TRIM(u.symbol))
                    AND s.session_date = %s
                 GROUP BY COALESCE(u.instrument_type, 'UNKNOWN')
@@ -659,8 +659,8 @@ def query_vendor_gap(
         cur.execute(
             """
             SELECT s.symbol, s.close, s.session_date
-            FROM market.stock_snapshot s
-            WHERE s.session_date = (SELECT MAX(session_date) FROM market.stock_snapshot)
+            FROM raw_market.stock_snapshot s
+            WHERE s.session_date = (SELECT MAX(session_date) FROM raw_market.stock_snapshot)
               AND s.close IS NOT NULL
             """
         )
@@ -679,7 +679,7 @@ def query_vendor_gap(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT symbol FROM market.v_us_equity_universe
+            SELECT symbol FROM raw_market.v_us_equity_universe
             WHERE LOWER(COALESCE(instrument_type, '')) <> 'warrant'
             """
         )
@@ -693,7 +693,7 @@ def query_vendor_gap(
         cur.execute(
             """
             SELECT DISTINCT ON (symbol) symbol, bar_date, close
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE symbol = ANY(%s)
             ORDER BY symbol, bar_date DESC
             """,

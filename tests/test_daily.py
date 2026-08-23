@@ -117,7 +117,7 @@ class _DailyCursor:
                     )
                 self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif "from market_analytics.atm_iv_daily" in q:
+        elif "from features_daily.atm_iv_daily" in q:
             from_d = params[0] if params else None
             to_d = params[1] if params and len(params) > 1 else None
             underlyings = set(params[2]) if params and len(params) > 2 else None
@@ -474,12 +474,13 @@ def test_enqueue_minute_bars() -> None:
         },
     )
     kinds = [j["kind"] for j in result["jobs"]]
-    assert kinds.count("stock_minute") == 1
+    assert kinds.count("stock_minute") == 3
     assert kinds.count("option_minute") == 2
-    stock = next(j for j in result["jobs"] if j["kind"] == "stock_minute")
-    assert stock["payload"]["symbol"] == "AAPL"
-    assert stock["payload"]["from"] == "2024-06-20"
-    assert stock["payload"]["timespan"] == "minute"
+    stock_jobs = [j for j in result["jobs"] if j["kind"] == "stock_minute"]
+    assert {j["payload"]["symbol"] for j in stock_jobs} == {"AAPL"}
+    assert {j["payload"]["from"] for j in stock_jobs} == {"2024-06-20"}
+    stock_timespans = {(j["payload"]["multiplier"], j["payload"]["timespan"]) for j in stock_jobs}
+    assert stock_timespans == {(1, "minute"), (5, "minute"), (1, "hour")}
 
 
 def test_skip_non_trading_day() -> None:

@@ -97,7 +97,7 @@ def test_batch_upsert_executemany() -> None:
     )
     assert n == 1
     sql = cur.executemany.call_args[0][0]
-    assert "INSERT INTO market.stock_daily" in sql
+    assert "INSERT INTO raw_market.stock_daily" in sql
     assert "ON CONFLICT (symbol, bar_date)" in sql
     assert "fetched_at = now()" in sql
     conn.commit.assert_called_once()

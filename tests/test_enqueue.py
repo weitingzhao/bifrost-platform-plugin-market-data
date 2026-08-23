@@ -79,7 +79,7 @@ def test_insert_job_returns_id() -> None:
     assert job_id == 1
     assert conn.committed == 1
     sql = conn.statements[0][0]
-    assert "INSERT INTO data_ops.job_ingest" in sql
+    assert "INSERT INTO ops_jobs.job_ingest" in sql
     assert "ON CONFLICT (kind, payload_hash)" in sql
     assert "DO NOTHING" in sql
     assert "RETURNING id" in sql
@@ -99,4 +99,4 @@ def test_trim_old_jobs() -> None:
     n = trim_old_jobs(conn, keep_days=7, keep_max=5000)
     assert n == 6  # two DELETE statements × rowcount 3
     assert conn.committed == 1
-    assert any("DELETE FROM data_ops.job_ingest" in s[0] for s in conn.statements)
+    assert any("DELETE FROM ops_jobs.job_ingest" in s[0] for s in conn.statements)

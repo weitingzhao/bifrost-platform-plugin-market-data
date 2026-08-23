@@ -98,11 +98,11 @@ def delete_bars(
         deleted_minute = 0
         with conn.cursor() as cur:
             if delete_daily:
-                cur.execute("DELETE FROM market.stock_daily WHERE symbol = %s", (sym,))
+                cur.execute("DELETE FROM raw_market.stock_daily WHERE symbol = %s", (sym,))
                 deleted_daily = cur.rowcount
             if period_list:
                 cur.execute(
-                    "DELETE FROM market.stock_minute WHERE symbol = %s AND period = ANY(%s)",
+                    "DELETE FROM raw_market.stock_minute WHERE symbol = %s AND period = ANY(%s)",
                     (sym, period_list),
                 )
                 deleted_minute = cur.rowcount
@@ -118,7 +118,7 @@ def delete_bars(
 def _upsert_daily(conn: Any, rows: list[tuple[Any, ...]]) -> int:
     """UPSERT into market.stock_daily with ON CONFLICT (symbol, bar_date) DO UPDATE."""
     sql = (
-        "INSERT INTO market.stock_daily (symbol, bar_date, open, high, low, close, volume, fetched_at) "
+        "INSERT INTO raw_market.stock_daily (symbol, bar_date, open, high, low, close, volume, fetched_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, now()) "
         "ON CONFLICT (symbol, bar_date) DO UPDATE SET "
         "open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, "
@@ -133,7 +133,7 @@ def _upsert_daily(conn: Any, rows: list[tuple[Any, ...]]) -> int:
 def _upsert_minute(conn: Any, rows: list[tuple[Any, ...]]) -> int:
     """UPSERT into market.stock_minute with ON CONFLICT (symbol, period, bar_time) DO UPDATE."""
     sql = (
-        "INSERT INTO market.stock_minute (symbol, period, bar_time, open, high, low, close, volume, fetched_at) "
+        "INSERT INTO raw_market.stock_minute (symbol, period, bar_time, open, high, low, close, volume, fetched_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) "
         "ON CONFLICT (symbol, period, bar_time) DO UPDATE SET "
         "open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, "

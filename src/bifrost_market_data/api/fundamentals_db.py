@@ -73,7 +73,7 @@ def query_short_interest(
                 ROW_NUMBER() OVER (
                   PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
                 ) AS rn
-              FROM market.stock_financials
+              FROM raw_market.stock_financials
               WHERE UPPER(TRIM(symbol)) = ANY(%s)
                 AND report_type = 'short_interest'
             ) sub
@@ -132,7 +132,7 @@ def query_short_volume(
                 ROW_NUMBER() OVER (
                   PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
                 ) AS rn
-              FROM market.stock_financials
+              FROM raw_market.stock_financials
               WHERE UPPER(TRIM(symbol)) = ANY(%s)
                 AND report_type = 'short_volume'
             ) sub
@@ -196,7 +196,7 @@ def query_financials(
         cur.execute(
             f"""
             SELECT symbol, report_type, period_date, period_type, data, fetched_at
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE {" AND ".join(clauses)}
             ORDER BY period_date DESC
             LIMIT %s

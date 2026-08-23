@@ -40,28 +40,28 @@ _MARKET_TICKER_COLS = (
 )
 
 _UPSERT_UPDATE_PARTS = [
-    "name = COALESCE(EXCLUDED.name, market.ticker.name)",
-    "market = COALESCE(EXCLUDED.market, market.ticker.market)",
-    "locale = COALESCE(EXCLUDED.locale, market.ticker.locale)",
-    "primary_exchange = COALESCE(EXCLUDED.primary_exchange, market.ticker.primary_exchange)",
-    "instrument_type = COALESCE(EXCLUDED.instrument_type, market.ticker.instrument_type)",
-    "active = COALESCE(EXCLUDED.active, market.ticker.active)",
-    "currency = COALESCE(EXCLUDED.currency, market.ticker.currency)",
-    "cik = COALESCE(EXCLUDED.cik, market.ticker.cik)",
-    "composite_figi = COALESCE(EXCLUDED.composite_figi, market.ticker.composite_figi)",
-    "sic_code = COALESCE(EXCLUDED.sic_code, market.ticker.sic_code)",
-    "sector = COALESCE(EXCLUDED.sector, market.ticker.sector)",
-    "industry = COALESCE(EXCLUDED.industry, market.ticker.industry)",
-    "market_cap = COALESCE(EXCLUDED.market_cap, market.ticker.market_cap)",
-    "list_date = COALESCE(EXCLUDED.list_date, market.ticker.list_date)",
-    "homepage_url = COALESCE(EXCLUDED.homepage_url, market.ticker.homepage_url)",
-    "total_employees = COALESCE(EXCLUDED.total_employees, market.ticker.total_employees)",
-    "description = COALESCE(EXCLUDED.description, market.ticker.description)",
+    "name = COALESCE(EXCLUDED.name, raw_market.ticker.name)",
+    "market = COALESCE(EXCLUDED.market, raw_market.ticker.market)",
+    "locale = COALESCE(EXCLUDED.locale, raw_market.ticker.locale)",
+    "primary_exchange = COALESCE(EXCLUDED.primary_exchange, raw_market.ticker.primary_exchange)",
+    "instrument_type = COALESCE(EXCLUDED.instrument_type, raw_market.ticker.instrument_type)",
+    "active = COALESCE(EXCLUDED.active, raw_market.ticker.active)",
+    "currency = COALESCE(EXCLUDED.currency, raw_market.ticker.currency)",
+    "cik = COALESCE(EXCLUDED.cik, raw_market.ticker.cik)",
+    "composite_figi = COALESCE(EXCLUDED.composite_figi, raw_market.ticker.composite_figi)",
+    "sic_code = COALESCE(EXCLUDED.sic_code, raw_market.ticker.sic_code)",
+    "sector = COALESCE(EXCLUDED.sector, raw_market.ticker.sector)",
+    "industry = COALESCE(EXCLUDED.industry, raw_market.ticker.industry)",
+    "market_cap = COALESCE(EXCLUDED.market_cap, raw_market.ticker.market_cap)",
+    "list_date = COALESCE(EXCLUDED.list_date, raw_market.ticker.list_date)",
+    "homepage_url = COALESCE(EXCLUDED.homepage_url, raw_market.ticker.homepage_url)",
+    "total_employees = COALESCE(EXCLUDED.total_employees, raw_market.ticker.total_employees)",
+    "description = COALESCE(EXCLUDED.description, raw_market.ticker.description)",
     "updated_at = EXCLUDED.updated_at",
 ]
 
 _UPSERT_SQL = (
-    f"INSERT INTO market.ticker ({', '.join(_MARKET_TICKER_COLS)}) "
+    f"INSERT INTO raw_market.ticker ({', '.join(_MARKET_TICKER_COLS)}) "
     f"VALUES ({', '.join(['%s'] * len(_MARKET_TICKER_COLS))}) "
     f"ON CONFLICT (symbol) DO UPDATE SET {', '.join(_UPSERT_UPDATE_PARTS)}"
 )
@@ -165,7 +165,7 @@ def _upsert_single(conn: Any, body: TickerUpsertBody) -> str:
     """UPSERT one row, return 'inserted' or 'updated'."""
     sym = _normalize_symbol(body.symbol)
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM market.ticker WHERE symbol = %s", (sym,))
+        cur.execute("SELECT 1 FROM raw_market.ticker WHERE symbol = %s", (sym,))
         existed = cur.fetchone() is not None
         cur.execute(_UPSERT_SQL, _row_values(body))
     conn.commit()
@@ -191,7 +191,7 @@ def _upsert_overview(conn: Any, body: TickerOverviewBody) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE market.ticker SET
+            UPDATE raw_market.ticker SET
               sector        = COALESCE(NULLIF(%s, ''), sector),
               industry      = COALESCE(NULLIF(%s, ''), industry),
               primary_exchange = COALESCE(%s, primary_exchange),
@@ -227,7 +227,7 @@ def _upsert_overview(conn: Any, body: TickerOverviewBody) -> bool:
 
 @router.post("/upsert", dependencies=[Depends(require_write_token)])
 def upsert_ticker(body: TickerUpsertBody) -> dict[str, Any]:
-    """UPSERT a single ticker into ``market.ticker``."""
+    """UPSERT a single ticker into ``raw_market.ticker``."""
     sym = _normalize_symbol(body.symbol)
     if not sym:
         raise HTTPException(status_code=400, detail="symbol is required")
@@ -243,7 +243,7 @@ def upsert_ticker(body: TickerUpsertBody) -> dict[str, Any]:
 
 @router.post("/upsert-batch", dependencies=[Depends(require_write_token)])
 def upsert_ticker_batch(body: TickerBatchUpsertBody) -> dict[str, Any]:
-    """Batch UPSERT tickers into ``market.ticker``."""
+    """Batch UPSERT tickers into ``raw_market.ticker``."""
     if not body.tickers:
         raise HTTPException(status_code=400, detail="tickers list is empty")
     conn = require_db()
@@ -258,7 +258,7 @@ def upsert_ticker_batch(body: TickerBatchUpsertBody) -> dict[str, Any]:
 
 @router.post("/upsert-overview", dependencies=[Depends(require_write_token)])
 def upsert_ticker_overview(body: TickerOverviewBody) -> dict[str, Any]:
-    """Merge overview fields into ``market.ticker`` (COALESCE/NULLIF semantics)."""
+    """Merge overview fields into ``raw_market.ticker`` (COALESCE/NULLIF semantics)."""
     sym = _normalize_symbol(body.symbol)
     if not sym:
         raise HTTPException(status_code=400, detail="symbol is required")
@@ -268,7 +268,7 @@ def upsert_ticker_overview(body: TickerOverviewBody) -> dict[str, Any]:
         if not found:
             raise HTTPException(
                 status_code=404,
-                detail=f"ticker {sym} not found in market.ticker",
+                detail=f"ticker {sym} not found in raw_market.ticker",
             )
         return {"ok": True, "symbol": sym}
     except HTTPException:

@@ -98,7 +98,7 @@ def query_financials_batch(
                         PARTITION BY UPPER(TRIM(symbol))
                         ORDER BY period_date DESC
                     ) AS rn
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE {" AND ".join(clauses)}
             ) ranked
             WHERE rn <= %s
@@ -168,7 +168,7 @@ def query_income_rows_for_sepa(
                     fiscal_quarter,
                     period_date AS period_end,
                     data
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE UPPER(TRIM(symbol)) = %s
                   AND report_type = 'income_statement'
                   AND lower(period_type) = %s
@@ -231,7 +231,7 @@ def query_financials_ext_batch(
                             PARTITION BY UPPER(TRIM(symbol))
                             ORDER BY period_date DESC
                         ) AS rn
-                    FROM market.stock_financials
+                    FROM raw_market.stock_financials
                     WHERE UPPER(TRIM(symbol)) = ANY(%s)
                       AND report_type = %s
                       AND lower(period_type) = %s
@@ -252,7 +252,7 @@ def query_financials_ext_batch(
                     fiscal_quarter,
                     period_date AS period_end,
                     data
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                   AND report_type = %s
                   AND lower(period_type) = %s
@@ -290,7 +290,7 @@ def query_ratios_latest_batch(
                 UPPER(TRIM(symbol)) AS symbol,
                 period_date AS date,
                 data
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE UPPER(TRIM(symbol)) = ANY(%s)
               AND report_type = 'ratios'
             ORDER BY UPPER(TRIM(symbol)), period_date DESC
@@ -332,7 +332,7 @@ def query_short_interest_latest_batch(
                         PARTITION BY UPPER(TRIM(symbol))
                         ORDER BY period_date DESC
                     ) AS rn
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                   AND report_type = 'short_interest'
             ) ranked
@@ -384,7 +384,7 @@ def query_short_volume_recent_batch(
                         PARTITION BY UPPER(TRIM(symbol))
                         ORDER BY period_date DESC
                     ) AS rn
-                FROM market.stock_financials
+                FROM raw_market.stock_financials
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                   AND report_type = 'short_volume'
             ) ranked
@@ -466,18 +466,18 @@ _INSTRUMENT_TYPES = "('CS', 'ADRC', 'PFD')"
 _GAP_SQLS: dict[str, str] = {
     "income_statement": f"""
         WITH u AS (
-            SELECT symbol FROM market.v_us_equity_universe
+            SELECT symbol FROM raw_market.v_us_equity_universe
             WHERE upper(coalesce(instrument_type, '')) IN {_INSTRUMENT_TYPES}
         ),
         q AS (
             SELECT symbol, count(*)::int AS n
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'income_statement' AND lower(period_type) = 'quarterly'
             GROUP BY symbol
         ),
         a AS (
             SELECT symbol, count(*)::int AS n
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'income_statement' AND lower(period_type) = 'annual'
             GROUP BY symbol
         )
@@ -489,12 +489,12 @@ _GAP_SQLS: dict[str, str] = {
     """,
     "balance_sheet": f"""
         WITH u AS (
-            SELECT symbol FROM market.v_us_equity_universe
+            SELECT symbol FROM raw_market.v_us_equity_universe
             WHERE upper(coalesce(instrument_type, '')) IN {_INSTRUMENT_TYPES}
         ),
         q AS (
             SELECT symbol, count(*)::int AS n
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'balance_sheet' AND lower(period_type) = 'quarterly'
             GROUP BY symbol
         )
@@ -505,12 +505,12 @@ _GAP_SQLS: dict[str, str] = {
     """,
     "cash_flow_statement": f"""
         WITH u AS (
-            SELECT symbol FROM market.v_us_equity_universe
+            SELECT symbol FROM raw_market.v_us_equity_universe
             WHERE upper(coalesce(instrument_type, '')) IN {_INSTRUMENT_TYPES}
         ),
         q AS (
             SELECT symbol, count(*)::int AS n
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'cash_flow_statement' AND lower(period_type) = 'quarterly'
             GROUP BY symbol
         )
@@ -521,12 +521,12 @@ _GAP_SQLS: dict[str, str] = {
     """,
     "ratios": f"""
         WITH u AS (
-            SELECT symbol FROM market.v_us_equity_universe
+            SELECT symbol FROM raw_market.v_us_equity_universe
             WHERE upper(coalesce(instrument_type, '')) IN {_INSTRUMENT_TYPES}
         ),
         q AS (
             SELECT symbol, count(*)::int AS n, max(period_date) AS mx
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'ratios'
             GROUP BY symbol
         )
@@ -536,10 +536,10 @@ _GAP_SQLS: dict[str, str] = {
         ORDER BY u.symbol LIMIT %s
     """,
     "short_interest": """
-        WITH u AS (SELECT symbol FROM market.v_us_equity_universe),
+        WITH u AS (SELECT symbol FROM raw_market.v_us_equity_universe),
         h AS (
             SELECT symbol, count(*)::int AS n, max(period_date) AS mx
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'short_interest'
             GROUP BY symbol
         )
@@ -549,10 +549,10 @@ _GAP_SQLS: dict[str, str] = {
         ORDER BY u.symbol LIMIT %s
     """,
     "short_volume": """
-        WITH u AS (SELECT symbol FROM market.v_us_equity_universe),
+        WITH u AS (SELECT symbol FROM raw_market.v_us_equity_universe),
         d AS (
             SELECT symbol, count(*)::int AS n, max(period_date) AS mx
-            FROM market.stock_financials
+            FROM raw_market.stock_financials
             WHERE report_type = 'short_volume'
             GROUP BY symbol
         )

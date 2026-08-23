@@ -38,7 +38,7 @@ def _analytics_metric_summary(conn: Any, table: str) -> dict[str, Any] | None:
                     COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
                     COUNT(DISTINCT trade_date)::bigint AS days,
                     MAX(trade_date) AS latest
-                FROM market_analytics.{table}
+                FROM features_daily.{table}
                 """
             )
             row = cur.fetchone()
@@ -68,7 +68,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                         COUNT(*)::bigint AS total_rows,
                         MIN(bar_date) AS min_date,
                         MAX(bar_date) AS max_date
-                    FROM market.stock_daily
+                    FROM raw_market.stock_daily
                     """
                 )
                 row = cur.fetchone()
@@ -104,7 +104,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                         COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS underlyings,
                         COUNT(*)::bigint AS total_contracts,
                         COUNT(DISTINCT expiry)::bigint AS total_expiries
-                    FROM market.option_contract
+                    FROM raw_market.option_contract
                     """
                 )
                 row = cur.fetchone()
@@ -122,7 +122,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                     SELECT
                         COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
                         MAX(snapshot_ts)::date AS latest
-                    FROM market.option_snapshot
+                    FROM raw_market.option_snapshot
                     """
                 )
                 row = cur.fetchone()
@@ -139,7 +139,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                     SELECT
                         COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
                         MAX(trade_date) AS latest
-                    FROM market.option_open_interest
+                    FROM raw_market.option_open_interest
                     """
                 )
                 row = cur.fetchone()
@@ -198,7 +198,7 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT dimension, last_run_at, rows_written, status, updated_at
-                    FROM data_ops.ingest_freshness
+                    FROM ops_jobs.ingest_freshness
                     ORDER BY dimension ASC
                     """
                 )
@@ -235,7 +235,7 @@ def query_watchlist_coverage(conn: Any, *, limit: int = 80) -> dict[str, Any]:
                         COUNT(*)::bigint AS contract_count,
                         COUNT(DISTINCT expiry)::bigint AS expiries,
                         MAX(updated_at) AS newest_contract_ts
-                    FROM market.option_contract
+                    FROM raw_market.option_contract
                     WHERE UPPER(TRIM(underlying)) = ANY(%s)
                     GROUP BY UPPER(TRIM(underlying))
                     """,
@@ -287,7 +287,7 @@ def query_greeks_coverage(
             SELECT DISTINCT ON (option_ticker)
                 UPPER(TRIM(underlying)) AS symbol,
                 iv, delta, gamma, theta, vega, snapshot_ts
-            FROM market.option_snapshot
+            FROM raw_market.option_snapshot
             {where}
             ORDER BY option_ticker, snapshot_ts DESC
         )
@@ -327,7 +327,7 @@ def query_contracts_coverage(conn: Any, *, limit: int = 100) -> dict[str, Any]:
                 MIN(expiry) AS min_expiry,
                 MAX(expiry) AS max_expiry,
                 MAX(updated_at) AS newest_updated_at
-            FROM market.option_contract
+            FROM raw_market.option_contract
             GROUP BY UPPER(TRIM(underlying))
             ORDER BY contract_count DESC, symbol ASC
             LIMIT %s
@@ -370,7 +370,7 @@ def query_option_contracts_reference_gap(
                 option_right,
                 exercise_style,
                 shares_per_contract
-            FROM market.option_contract
+            FROM raw_market.option_contract
             WHERE UPPER(TRIM(underlying)) = %s
               AND (
                     TRIM(COALESCE(option_ticker, '')) = ''
@@ -422,7 +422,7 @@ def query_option_snapshots_contracts_gap(
             """
             WITH recent_snaps AS (
                 SELECT DISTINCT option_ticker
-                FROM market.option_snapshot
+                FROM raw_market.option_snapshot
                 WHERE UPPER(TRIM(underlying)) = %s
                   AND snapshot_ts >= NOW() - (%s || ' days')::interval
             )
@@ -432,7 +432,7 @@ def query_option_snapshots_contracts_gap(
                 c.strike,
                 c.option_right,
                 c.updated_at
-            FROM market.option_contract c
+            FROM raw_market.option_contract c
             LEFT JOIN recent_snaps s ON s.option_ticker = c.option_ticker
             WHERE UPPER(TRIM(c.underlying)) = %s
               AND s.option_ticker IS NULL
@@ -444,7 +444,7 @@ def query_option_snapshots_contracts_gap(
         raw = cur.fetchall() or []
         cur.execute(
             """
-            SELECT COUNT(*)::bigint FROM market.option_contract
+            SELECT COUNT(*)::bigint FROM raw_market.option_contract
             WHERE UPPER(TRIM(underlying)) = %s
             """,
             (sym,),
@@ -480,7 +480,7 @@ def query_option_bars_contracts_gap(
             """
             WITH recent_bars AS (
                 SELECT DISTINCT option_ticker
-                FROM market.option_daily
+                FROM raw_market.option_daily
                 WHERE UPPER(TRIM(underlying)) = %s
                   AND bar_date >= CURRENT_DATE - (%s || ' days')::interval
             )
@@ -489,7 +489,7 @@ def query_option_bars_contracts_gap(
                 c.expiry,
                 c.strike,
                 c.option_right
-            FROM market.option_contract c
+            FROM raw_market.option_contract c
             LEFT JOIN recent_bars b ON b.option_ticker = c.option_ticker
             WHERE UPPER(TRIM(c.underlying)) = %s
               AND b.option_ticker IS NULL
@@ -528,7 +528,7 @@ def query_bar_quality_detail(
             SELECT
                 bar_date,
                 open, high, low, close, volume, vwap
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE UPPER(TRIM(symbol)) = %s
               AND bar_date >= CURRENT_DATE - (%s || ' days')::interval
             ORDER BY bar_date DESC
@@ -542,7 +542,7 @@ def query_bar_quality_detail(
                 COUNT(*)::bigint,
                 MIN(bar_date),
                 MAX(bar_date)
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE UPPER(TRIM(symbol)) = %s
             """,
             (sym,),
@@ -587,7 +587,7 @@ def query_snapshot_quality_detail(
                 )
                     DATE(timezone('America/New_York', snapshot_ts)) AS snap_day,
                     iv, delta, gamma, theta, vega, open_interest, day_close
-                FROM market.option_snapshot
+                FROM raw_market.option_snapshot
                 WHERE UPPER(TRIM(underlying)) = %s
                   AND snapshot_ts >= NOW() - (%s || ' days')::interval
                 ORDER BY DATE(timezone('America/New_York', snapshot_ts)),
@@ -649,7 +649,7 @@ def query_stock_day_gap(
             cur.execute(
                 """
                 SELECT bar_date
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE UPPER(TRIM(symbol)) = %s
                   AND bar_date >= %s
                 """,

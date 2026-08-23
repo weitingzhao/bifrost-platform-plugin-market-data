@@ -1,4 +1,4 @@
-"""Tests for data_ops.ingest_freshness UPSERT helpers."""
+"""Tests for ops_jobs.ingest_freshness UPSERT helpers."""
 
 from __future__ import annotations
 

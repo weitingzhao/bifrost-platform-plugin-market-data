@@ -54,7 +54,7 @@ def query_daily_bars(
         cur.execute(
             """
             SELECT symbol, bar_date, open, high, low, close, volume
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE symbol = ANY(%s)
               AND bar_date >= (CURRENT_DATE - %s * INTERVAL '1 day')
             ORDER BY symbol, bar_date ASC
@@ -80,7 +80,7 @@ def query_daily_close(
         cur.execute(
             """
             SELECT symbol, bar_date, close
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE symbol = ANY(%s)
               AND bar_date >= (CURRENT_DATE - %s * INTERVAL '1 day')
               AND close IS NOT NULL
@@ -103,7 +103,7 @@ def query_spy_close(conn: Any, *, days: int) -> list[float]:
         cur.execute(
             """
             SELECT close
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE symbol = 'SPY'
               AND bar_date >= (CURRENT_DATE - %s * INTERVAL '1 day')
               AND close IS NOT NULL
@@ -208,7 +208,7 @@ def query_bars(
                 """
                 SELECT symbol, '1 D' AS period, extract(epoch from bar_date) AS time,
                        open, high, low, close, volume
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE symbol = %s
                 ORDER BY bar_date DESC NULLS LAST
                 LIMIT %s
@@ -222,7 +222,7 @@ def query_bars(
                 """
                 SELECT symbol, %s AS period, extract(epoch from bar_time) AS time,
                        open, high, low, close, volume
-                FROM market.stock_minute
+                FROM raw_market.stock_minute
                 WHERE symbol = %s AND period = %s
                 ORDER BY bar_time DESC NULLS LAST
                 LIMIT %s
@@ -249,7 +249,7 @@ def query_bars_latest(
             cur.execute(
                 """
                 SELECT extract(epoch from bar_date) AS t
-                FROM market.stock_daily WHERE symbol = %s
+                FROM raw_market.stock_daily WHERE symbol = %s
                 ORDER BY bar_date DESC LIMIT 1
                 """,
                 (symbol,),
@@ -260,7 +260,7 @@ def query_bars_latest(
             cur.execute(
                 """
                 SELECT extract(epoch from bar_time) AS t
-                FROM market.stock_minute WHERE symbol = %s AND period = %s
+                FROM raw_market.stock_minute WHERE symbol = %s AND period = %s
                 ORDER BY bar_time DESC LIMIT 1
                 """,
                 (symbol, _minute_period_db(per)),
@@ -289,7 +289,7 @@ def query_bar_times_in_range(
             cur.execute(
                 """
                 SELECT extract(epoch from bar_date) AS t
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE symbol = %s
                   AND bar_date >= to_timestamp(%s)::date
                   AND bar_date <= to_timestamp(%s)::date
@@ -303,7 +303,7 @@ def query_bar_times_in_range(
             cur.execute(
                 """
                 SELECT extract(epoch from bar_time) AS t
-                FROM market.stock_minute
+                FROM raw_market.stock_minute
                 WHERE symbol = %s AND period = %s
                   AND bar_time >= to_timestamp(%s)
                   AND bar_time <= to_timestamp(%s)
@@ -333,7 +333,7 @@ def query_bars_benchmark(
             WITH ordered AS (
                 SELECT symbol, bar_date, close,
                        LEAD(close) OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS prev_close
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE symbol = ANY(%s) AND bar_date <= %s
             )
             SELECT DISTINCT ON (symbol) symbol,
@@ -371,7 +371,7 @@ def query_fallback_price(
         cur.execute(
             """
             SELECT bar_date, close, extract(epoch from bar_date) AS bar_time_epoch
-            FROM market.stock_daily
+            FROM raw_market.stock_daily
             WHERE symbol = %s
             ORDER BY bar_date DESC
             LIMIT 3
@@ -413,14 +413,14 @@ def query_bars_stats(
     out: dict[str, Any] = {"stock_day": 0, "stock_min": {}}
     if table_exists(conn, "market", "stock_daily"):
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM market.stock_daily WHERE symbol = %s", (symbol,))
+            cur.execute("SELECT COUNT(*) FROM raw_market.stock_daily WHERE symbol = %s", (symbol,))
             row = cur.fetchone()
             out["stock_day"] = int(row[0]) if row and row[0] is not None else 0
     if table_exists(conn, "market", "stock_minute"):
         with conn.cursor() as cur:
             for api_per in ("1 min", "5 mins", "1 hour"):
                 cur.execute(
-                    "SELECT COUNT(*) FROM market.stock_minute WHERE symbol = %s AND period = %s",
+                    "SELECT COUNT(*) FROM raw_market.stock_minute WHERE symbol = %s AND period = %s",
                     (symbol, _minute_period_db(api_per)),
                 )
                 r = cur.fetchone()
@@ -450,7 +450,7 @@ def query_bars_coverage(
                        MAX(bar_date)::text AS max_day,
                        extract(epoch from MIN(bar_date)) AS min_ts,
                        extract(epoch from MAX(bar_date)) AS max_ts
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                 GROUP BY UPPER(TRIM(symbol))
                 """,
@@ -477,7 +477,7 @@ def query_bars_coverage(
                        COUNT(*)::bigint AS cnt,
                        extract(epoch from MIN(bar_time)) AS min_ts,
                        extract(epoch from MAX(bar_time)) AS max_ts
-                FROM market.stock_minute
+                FROM raw_market.stock_minute
                 WHERE UPPER(TRIM(symbol)) = ANY(%s)
                   AND period = ANY(%s)
                 GROUP BY UPPER(TRIM(symbol)), period
@@ -518,7 +518,7 @@ def query_caret_symbols(conn: Any) -> list[str]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT symbol FROM market.stock_daily
+                SELECT DISTINCT symbol FROM raw_market.stock_daily
                 WHERE symbol LIKE '^%%' OR symbol LIKE U&'\\FF3E%%'
                 """
             )
@@ -530,7 +530,7 @@ def query_caret_symbols(conn: Any) -> list[str]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT symbol FROM market.stock_minute
+                SELECT DISTINCT symbol FROM raw_market.stock_minute
                 WHERE symbol LIKE '^%%' OR symbol LIKE U&'\\FF3E%%'
                 """
             )

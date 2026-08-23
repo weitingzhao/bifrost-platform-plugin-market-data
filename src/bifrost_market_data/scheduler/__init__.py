@@ -1,4 +1,4 @@
-"""CronJob-driven job enqueue into data_ops.job_ingest (P5)."""
+"""CronJob-driven job enqueue into ops_jobs.job_ingest (P5)."""
 
 from bifrost_market_data.scheduler.daily import (
     SLOT_NAMES,

@@ -51,14 +51,14 @@ def _replace_expirations(conn: Any, symbol: str, expirations: List[str]) -> int:
     sym = normalize_symbol(symbol)
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM market.option_expiration WHERE underlying = %s",
+            "DELETE FROM raw_market.option_expiration WHERE underlying = %s",
             (sym,),
         )
         if expirations:
             values = [(sym, exp) for exp in expirations]
             cur.executemany(
                 """
-                INSERT INTO market.option_expiration (underlying, expiry, updated_at)
+                INSERT INTO raw_market.option_expiration (underlying, expiry, updated_at)
                 VALUES (%s, %s::date, now())
                 ON CONFLICT (underlying, expiry) DO UPDATE SET updated_at = now()
                 """,

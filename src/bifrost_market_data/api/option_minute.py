@@ -60,7 +60,7 @@ def query_option_minute(
     sql = """
         SELECT extract(epoch from bar_time) AS time,
                open, high, low, close, volume, vwap
-        FROM market.option_minute
+        FROM raw_market.option_minute
         WHERE underlying = %s AND expiry = %s
           AND strike = %s AND option_right = %s
           AND period = %s

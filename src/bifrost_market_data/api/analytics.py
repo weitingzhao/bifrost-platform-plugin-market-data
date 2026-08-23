@@ -2,7 +2,7 @@
 
 Wave 2.1: daily upsert ownership moved to Research API ``:8795``
 (``/analytics/options/*`` via ``bifrost_research``). This Plugin keeps DB **read**
-endpoints on the same Golden Source ``market_analytics.*`` tables for FE/Plugin
+endpoints on the same Golden Source ``features_daily.*`` tables for FE/Plugin
 consumers during transition, plus live max-pain compute from OI.
 """
 
@@ -115,7 +115,7 @@ def query_max_pain(
     trade_date: date | None = None,
     lookback_days: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Read rows from ``market_analytics.max_pain_daily``."""
+    """Read rows from ``features_daily.max_pain_daily``."""
     cols = (
         "symbol",
         "trade_date",
@@ -131,7 +131,7 @@ def query_max_pain(
     _apply_date_filters(
         clauses,
         params,
-        table="market_analytics.max_pain_daily",
+        table="features_daily.max_pain_daily",
         symbol_col="symbol",
         sym=sym,
         trade_date=trade_date,
@@ -146,7 +146,7 @@ def query_max_pain(
     sql = f"""
         SELECT symbol, trade_date, expiry, max_pain_strike,
                total_oi, total_pain_at_strike, computed_at
-        FROM market_analytics.max_pain_daily
+        FROM features_daily.max_pain_daily
         {where}
         ORDER BY trade_date DESC, symbol ASC, expiry ASC
         LIMIT 500
@@ -165,7 +165,7 @@ def query_atm_iv(
     trade_date: date | None = None,
     lookback_days: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Read rows from ``market_analytics.atm_iv_daily``."""
+    """Read rows from ``features_daily.atm_iv_daily``."""
     cols = (
         "symbol",
         "trade_date",
@@ -182,7 +182,7 @@ def query_atm_iv(
     _apply_date_filters(
         clauses,
         params,
-        table="market_analytics.atm_iv_daily",
+        table="features_daily.atm_iv_daily",
         symbol_col="symbol",
         sym=sym,
         trade_date=trade_date,
@@ -197,7 +197,7 @@ def query_atm_iv(
     sql = f"""
         SELECT symbol, trade_date, expiry, atm_strike, atm_iv,
                underlying_price, iv_source, computed_at
-        FROM market_analytics.atm_iv_daily
+        FROM features_daily.atm_iv_daily
         {where}
         ORDER BY trade_date DESC, symbol ASC, expiry ASC
         LIMIT 500
@@ -215,7 +215,7 @@ def query_pcr(
     trade_date: date | None = None,
     lookback_days: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Read rows from ``market_analytics.pcr_daily``."""
+    """Read rows from ``features_daily.pcr_daily``."""
     cols = (
         "symbol",
         "trade_date",
@@ -233,7 +233,7 @@ def query_pcr(
     _apply_date_filters(
         clauses,
         params,
-        table="market_analytics.pcr_daily",
+        table="features_daily.pcr_daily",
         symbol_col="symbol",
         sym=sym,
         trade_date=trade_date,
@@ -245,7 +245,7 @@ def query_pcr(
         SELECT symbol, trade_date, pcr_oi, pcr_volume,
                total_put_oi, total_call_oi,
                total_put_volume, total_call_volume, computed_at
-        FROM market_analytics.pcr_daily
+        FROM features_daily.pcr_daily
         {where}
         ORDER BY trade_date DESC, symbol ASC
         LIMIT 500
@@ -263,7 +263,7 @@ def query_iv_percentile(
     trade_date: date | None = None,
     lookback_days: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Read rows from ``market_analytics.iv_percentile_daily``."""
+    """Read rows from ``features_daily.iv_percentile_daily``."""
     cols = (
         "symbol",
         "trade_date",
@@ -279,7 +279,7 @@ def query_iv_percentile(
     _apply_date_filters(
         clauses,
         params,
-        table="market_analytics.iv_percentile_daily",
+        table="features_daily.iv_percentile_daily",
         symbol_col="symbol",
         sym=sym,
         trade_date=trade_date,
@@ -290,7 +290,7 @@ def query_iv_percentile(
     sql = f"""
         SELECT symbol, trade_date, iv_current, iv_percentile_1y,
                iv_rank_1y, lookback_days, computed_at
-        FROM market_analytics.iv_percentile_daily
+        FROM features_daily.iv_percentile_daily
         {where}
         ORDER BY trade_date DESC, symbol ASC
         LIMIT 500
@@ -314,7 +314,7 @@ def max_pain(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted Max Pain from ``market_analytics.max_pain_daily``.
+    """Read persisted Max Pain from ``features_daily.max_pain_daily``.
 
     Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
     """
@@ -359,7 +359,7 @@ def atm_iv(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted ATM IV from ``market_analytics.atm_iv_daily``.
+    """Read persisted ATM IV from ``features_daily.atm_iv_daily``.
 
     Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
     """
@@ -403,7 +403,7 @@ def pcr(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted Put/Call Ratio from ``market_analytics.pcr_daily``.
+    """Read persisted Put/Call Ratio from ``features_daily.pcr_daily``.
 
     Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
     """
@@ -445,7 +445,7 @@ def iv_percentile(
         description="When set, return rows in [end-lookback, end] window",
     ),
 ) -> dict[str, Any]:
-    """Read persisted IV percentile/rank from ``market_analytics.iv_percentile_daily``.
+    """Read persisted IV percentile/rank from ``features_daily.iv_percentile_daily``.
 
     Upserts owned by Research API ``:8795``; Plugin keeps Golden Source reads.
     """
@@ -499,7 +499,7 @@ def _fetch_oi_rows_for_date(
             cur.execute(
                 """
                 SELECT underlying, expiry, strike, option_right, open_interest
-                FROM market.option_open_interest
+                FROM raw_market.option_open_interest
                 WHERE trade_date = %s AND underlying = ANY(%s)
                 """,
                 (trade_date, syms),
@@ -508,7 +508,7 @@ def _fetch_oi_rows_for_date(
             cur.execute(
                 """
                 SELECT underlying, expiry, strike, option_right, open_interest
-                FROM market.option_open_interest
+                FROM raw_market.option_open_interest
                 WHERE trade_date = %s
                 """,
                 (trade_date,),
@@ -536,7 +536,7 @@ def compute_max_pain_live(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT MAX(trade_date) FROM market.option_open_interest
+                SELECT MAX(trade_date) FROM raw_market.option_open_interest
                 WHERE underlying = %s AND expiry = %s
                 """,
                 (sym, expiry),
@@ -589,7 +589,7 @@ def compute_max_pain_history(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT MAX(trade_date) FROM market.option_open_interest
+            SELECT MAX(trade_date) FROM raw_market.option_open_interest
             WHERE underlying = %s AND expiry = %s
             """,
             (sym, expiry),
@@ -611,7 +611,7 @@ def compute_max_pain_history(
         cur.execute(
             """
             SELECT trade_date, strike, option_right, open_interest
-            FROM market.option_open_interest
+            FROM raw_market.option_open_interest
             WHERE underlying = %s AND expiry = %s
               AND trade_date >= %s AND trade_date <= %s
             ORDER BY trade_date ASC
@@ -725,7 +725,7 @@ def atm_iv_term(
     symbol: str = Query(..., description="Underlying symbol"),
     trade_date: date | None = Query(None, description="Trade date (default: latest)"),
 ) -> dict[str, Any]:
-    """ATM IV term structure from persisted ``market_analytics.atm_iv_daily``."""
+    """ATM IV term structure from persisted ``features_daily.atm_iv_daily``."""
     _deprecation_headers(response)
     try:
         conn = _connect()
@@ -746,5 +746,5 @@ def atm_iv_term(
         "trade_date": td,
         "term": term_sorted,
         "count": len(term_sorted),
-        "source": "market_analytics.atm_iv_daily",
+        "source": "features_daily.atm_iv_daily",
     }

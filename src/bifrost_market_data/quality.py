@@ -1,4 +1,4 @@
-"""Data quality checks for market.* + data_ops.ingest_freshness (P7)."""
+"""Data quality checks for market.* + ops_jobs.ingest_freshness (P7)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ EXPECTED_FRESHNESS_DIMENSIONS = (
 
 def fetch_stock_daily_symbol_count(conn: Any) -> int:
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(DISTINCT symbol) FROM market.stock_daily")
+        cur.execute("SELECT COUNT(DISTINCT symbol) FROM raw_market.stock_daily")
         row = cur.fetchone()
     if row is None:
         return 0
@@ -76,7 +76,7 @@ def filter_optionable_underlyings(conn: Any, symbols: Sequence[str]) -> list[str
             cur.execute(
                 """
                 SELECT DISTINCT UPPER(TRIM(underlying)) AS und
-                FROM market.option_contract
+                FROM raw_market.option_contract
                 WHERE UPPER(TRIM(underlying)) = ANY(%s)
                 """,
                 (syms,),
@@ -117,7 +117,7 @@ def check_stock_daily_coverage(
             cur.execute(
                 """
                 SELECT symbol, bar_date
-                FROM market.stock_daily
+                FROM raw_market.stock_daily
                 WHERE symbol = ANY(%s)
                   AND bar_date >= %s
                   AND bar_date <= %s
@@ -188,7 +188,7 @@ def check_option_snapshot_coverage(
             cur.execute(
                 """
                 SELECT DISTINCT underlying
-                FROM market.option_snapshot
+                FROM raw_market.option_snapshot
                 WHERE underlying = ANY(%s)
                   AND (snapshot_ts AT TIME ZONE 'America/New_York')::date = %s
                 """,
@@ -247,7 +247,7 @@ def check_option_oi_coverage(
             cur.execute(
                 """
                 SELECT underlying, trade_date
-                FROM market.option_open_interest
+                FROM raw_market.option_open_interest
                 WHERE underlying = ANY(%s)
                   AND trade_date >= %s
                   AND trade_date <= %s
@@ -310,7 +310,7 @@ def check_freshness(
         cur.execute(
             """
             SELECT dimension, last_run_at, rows_written, status, updated_at
-            FROM data_ops.ingest_freshness
+            FROM ops_jobs.ingest_freshness
             """
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []

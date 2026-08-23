@@ -44,7 +44,7 @@ def query_ticker_search(conn: Any, *, q: str, limit: int) -> list[dict[str, Any]
         cur.execute(
             """
             SELECT symbol, name, market, locale, primary_exchange, instrument_type, active
-            FROM market.ticker
+            FROM raw_market.ticker
             WHERE UPPER(symbol) LIKE %s
                OR name ILIKE %s
             ORDER BY
@@ -66,9 +66,9 @@ def query_overview_coverage(conn: Any) -> dict[str, Any]:
         return {"ok": True, "total": 0, "filled": 0, "missing": 0}
     pred = _overview_missing_predicate()
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
+        cur.execute("SELECT COUNT(*)::bigint FROM raw_market.ticker")
         total = int((cur.fetchone() or [0])[0])
-        cur.execute(f"SELECT COUNT(*)::bigint FROM market.ticker WHERE NOT ({pred})")
+        cur.execute(f"SELECT COUNT(*)::bigint FROM raw_market.ticker WHERE NOT ({pred})")
         filled = int((cur.fetchone() or [0])[0])
     missing = max(0, total - filled)
     return {"ok": True, "total": total, "filled": filled, "missing": missing, "source": "market.ticker"}
@@ -83,7 +83,7 @@ def query_missing_overview(conn: Any, *, limit: int, offset: int) -> dict[str, A
         cur.execute(
             f"""
             SELECT symbol
-            FROM market.ticker
+            FROM raw_market.ticker
             WHERE {pred}
             ORDER BY symbol ASC
             LIMIT %s OFFSET %s
@@ -115,12 +115,12 @@ def query_related_coverage(conn: Any) -> dict[str, Any]:
             "note": "market.ticker_related not present; related coverage unavailable.",
         }
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
+        cur.execute("SELECT COUNT(*)::bigint FROM raw_market.ticker")
         total = int((cur.fetchone() or [0])[0])
         cur.execute(
             """
             SELECT COUNT(DISTINCT UPPER(TRIM(from_symbol)))::bigint
-            FROM market.ticker_related
+            FROM raw_market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             """
         )
@@ -144,10 +144,10 @@ def query_missing_related(conn: Any, *, limit: int, offset: int) -> dict[str, An
         cur.execute(
             """
             SELECT t.symbol
-            FROM market.ticker t
+            FROM raw_market.ticker t
             LEFT JOIN (
                 SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
-                FROM market.ticker_related
+                FROM raw_market.ticker_related
             ) r ON r.sym = UPPER(TRIM(t.symbol))
             WHERE r.sym IS NULL
             ORDER BY t.symbol ASC
@@ -183,7 +183,7 @@ def query_filled_related(conn: Any, *, limit: int, offset: int) -> dict[str, Any
         cur.execute(
             """
             SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
-            FROM market.ticker_related
+            FROM raw_market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             ORDER BY sym ASC
             LIMIT %s OFFSET %s
@@ -231,7 +231,7 @@ def query_us_equity_universe(conn: Any) -> dict[str, Any]:
                 t.list_date::text AS list_date,
                 t.sector,
                 t.industry
-            FROM market.ticker t
+            FROM raw_market.ticker t
             WHERE COALESCE(t.active, false) = true
               AND lower(COALESCE(t.locale, '')) = 'us'
               AND lower(COALESCE(t.market, '')) = 'stocks'
@@ -294,7 +294,7 @@ def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") 
             cur.execute(
                 f"""
                 SELECT asset_class, locale, code AS ticker_type, description
-                FROM market.ticker_type
+                FROM raw_market.ticker_type
                 {where}
                 ORDER BY asset_class, locale, code
                 LIMIT 500
@@ -316,7 +316,7 @@ def query_ticker_types(conn: Any, *, asset_class: str = "*", locale: str = "*") 
                 COALESCE(NULLIF(TRIM(market), ''), '*') AS asset_class,
                 COALESCE(NULLIF(TRIM(locale), ''), '*') AS locale,
                 COUNT(*)::bigint AS symbol_count
-            FROM market.ticker
+            FROM raw_market.ticker
             GROUP BY 1, 2, 3
             ORDER BY symbol_count DESC, ticker_type ASC
             """
@@ -365,8 +365,8 @@ def query_ticker_related(conn: Any, *, ticker: str) -> dict[str, Any]:
                 UPPER(TRIM(r.to_symbol)) AS symbol,
                 r.rank,
                 t.name
-            FROM market.ticker_related r
-            LEFT JOIN market.ticker t ON t.symbol = UPPER(TRIM(r.to_symbol))
+            FROM raw_market.ticker_related r
+            LEFT JOIN raw_market.ticker t ON t.symbol = UPPER(TRIM(r.to_symbol))
             WHERE UPPER(TRIM(r.from_symbol)) = %s
             ORDER BY r.rank ASC, r.to_symbol ASC
             LIMIT 200
@@ -404,7 +404,7 @@ def query_ticker_single(conn: Any, *, symbol: str) -> dict[str, Any] | None:
                    instrument_type, active, currency, cik, composite_figi,
                    sic_code, sector, industry, market_cap, list_date,
                    homepage_url, total_employees, description, updated_at
-            FROM market.ticker
+            FROM raw_market.ticker
             WHERE symbol = %s
             LIMIT 1
             """,
@@ -429,7 +429,7 @@ def query_ticker_batch(conn: Any, *, symbols: list[str]) -> list[dict[str, Any]]
                    instrument_type, active, currency, cik, composite_figi,
                    sic_code, sector, industry, market_cap, list_date,
                    homepage_url, total_employees, description, updated_at
-            FROM market.ticker
+            FROM raw_market.ticker
             WHERE symbol = ANY(%s)
             ORDER BY symbol ASC
             """,

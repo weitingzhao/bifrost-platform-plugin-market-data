@@ -49,9 +49,9 @@ class _DashCur:
             self._rows = list(self.parent.finished_rows)
         elif "min(created_at)" in q:
             self._rows = [(self.parent.oldest_pending,)]
-        elif "from data_ops.ingest_freshness" in q:
+        elif "from ops_jobs.ingest_freshness" in q:
             self._rows = list(self.parent.freshness_rows)
-        elif "from data_ops.job_ingest" in q and "created_at >=" in q:
+        elif "from ops_jobs.job_ingest" in q and "created_at >=" in q:
             self._rows = list(self.parent.window_rows)
         else:
             self._rows = []

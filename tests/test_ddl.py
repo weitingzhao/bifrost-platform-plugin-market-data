@@ -48,29 +48,29 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     apply_ddl(conn)
     assert conn.committed
     blob = "\n".join(conn.cur.statements)
-    assert "CREATE SCHEMA IF NOT EXISTS market" in blob
-    assert "CREATE SCHEMA IF NOT EXISTS market_analytics" in blob
-    assert "CREATE SCHEMA IF NOT EXISTS data_ops" in blob
+    assert "CREATE SCHEMA IF NOT EXISTS raw_market" in blob
+    assert "CREATE SCHEMA IF NOT EXISTS raw_market_analytics" in blob
+    assert "CREATE SCHEMA IF NOT EXISTS ops_jobs" in blob
     for name in MARKET_TABLES:
         assert f"market.{name}" in blob, f"missing market.{name}"
     for name in MARKET_ANALYTICS_TABLES:
-        assert f"market_analytics.{name}" in blob, f"missing market_analytics.{name}"
+        assert f"features_daily.{name}" in blob, f"missing features_daily.{name}"
     for name in DATA_OPS_TABLES:
-        assert f"data_ops.{name}" in blob, f"missing data_ops.{name}"
+        assert f"ops_jobs.{name}" in blob, f"missing ops_jobs.{name}"
     for name in MARKET_VIEWS:
         assert name in blob, f"missing view {name}"
     assert "ensure_year_partitions" in blob
     assert "ensure_month_partitions" in blob
     assert "ensure_day_partitions" in blob
     assert "drop_day_partitions_older_than" in blob
-    assert "SELECT data_ops.ensure_year_partitions('market', 'stock_daily'" in blob
-    assert "SELECT data_ops.ensure_day_partitions('market', 'option_trades'" in blob
+    assert "SELECT ops_jobs.ensure_year_partitions('market', 'stock_daily'" in blob
+    assert "SELECT ops_jobs.ensure_day_partitions('market', 'option_trades'" in blob
     assert (
-        "SELECT data_ops.ensure_month_partitions('market_analytics', 'max_pain_daily'"
+        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'max_pain_daily'"
         in blob
     )
     assert "job_ingest_dedup" in blob
-    assert "DROP TABLE IF EXISTS data_ops.us_trading_calendar" in blob
+    assert "DROP TABLE IF EXISTS ops_jobs.us_trading_calendar" in blob
     assert "SELECT FOR UPDATE" not in blob  # claim logic is P3, not DDL
 
 
@@ -152,5 +152,5 @@ def test_create_roles_sql_exists() -> None:
     assert "data_writer" in text
     assert "market_reader" in text
     assert "GRANT" in text
-    assert "GRANT USAGE, CREATE ON SCHEMA market_analytics TO data_writer" in text
-    assert "GRANT SELECT ON ALL TABLES IN SCHEMA market_analytics TO market_reader" in text
+    assert "GRANT USAGE, CREATE ON SCHEMA features_daily TO data_writer" in text
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA features_daily TO market_reader" in text

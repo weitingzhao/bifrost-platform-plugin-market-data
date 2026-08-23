@@ -34,7 +34,7 @@ async def handle_ticker_related(job: JobRow, client: Any, conn: Any) -> Mapping[
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM market.ticker_related WHERE from_symbol = %s",
+                "DELETE FROM raw_market.ticker_related WHERE from_symbol = %s",
                 (symbol,),
             )
         n = batch_upsert(

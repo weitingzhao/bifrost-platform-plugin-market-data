@@ -1,4 +1,4 @@
-"""Best-effort UPSERT into data_ops.ingest_freshness after successful ingest jobs."""
+"""Best-effort UPSERT into ops_jobs.ingest_freshness after successful ingest jobs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _DIMENSION_ALIASES: dict[str, str] = {
 
 
 def dimension_for_kind(kind: str) -> str:
-    """Map job kind → freshness dimension (PK of data_ops.ingest_freshness)."""
+    """Map job kind → freshness dimension (PK of ops_jobs.ingest_freshness)."""
     key = str(kind or "").strip()
     return _DIMENSION_ALIASES.get(key, key)
 
@@ -36,7 +36,7 @@ def update_freshness(
     *,
     status: str = "ok",
 ) -> None:
-    """UPSERT ``data_ops.ingest_freshness`` after a successful job.
+    """UPSERT ``ops_jobs.ingest_freshness`` after a successful job.
 
     Caller should catch exceptions — freshness must not fail the job.
     """
@@ -49,7 +49,7 @@ def update_freshness(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO data_ops.ingest_freshness
+            INSERT INTO ops_jobs.ingest_freshness
                 (dimension, last_run_at, rows_written, status, updated_at)
             VALUES (%s, now(), %s, %s, now())
             ON CONFLICT (dimension) DO UPDATE SET

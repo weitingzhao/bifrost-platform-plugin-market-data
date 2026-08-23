@@ -21,7 +21,7 @@ def query_status_summary(conn: Any) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT dimension, last_run_at, status, rows_written
-                    FROM data_ops.ingest_freshness
+                    FROM ops_jobs.ingest_freshness
                     ORDER BY last_run_at DESC NULLS LAST
                     LIMIT 20
                     """

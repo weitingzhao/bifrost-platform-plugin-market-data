@@ -59,7 +59,7 @@ def query_option_daily(
         SELECT
             option_ticker, underlying, expiry, strike, option_right,
             bar_date, open, high, low, close, volume
-        FROM market.option_daily
+        FROM raw_market.option_daily
         WHERE {where}
         ORDER BY bar_date DESC, expiry ASC, strike ASC, option_right ASC
         LIMIT %s
@@ -102,7 +102,7 @@ def query_option_daily_available_dates(
         cur.execute(
             """
             SELECT DISTINCT bar_date
-            FROM market.option_daily
+            FROM raw_market.option_daily
             WHERE UPPER(TRIM(underlying)) = %s
             ORDER BY bar_date DESC
             LIMIT %s

@@ -42,7 +42,7 @@ def query_corporate_actions(
             SELECT
                 id, symbol, action_type, ex_date, record_date, payment_date,
                 ratio_from, ratio_to, amount, currency, description, fetched_at
-            FROM market.corporate_action
+            FROM raw_market.corporate_action
             WHERE {where}
             ORDER BY ex_date DESC NULLS LAST, id DESC
             LIMIT %s
@@ -82,7 +82,7 @@ def query_daily_checklist(
             cur.execute(
                 """
                 SELECT dimension, last_run_at, status, rows_written
-                FROM data_ops.ingest_freshness
+                FROM ops_jobs.ingest_freshness
                 """
             )
             for row in cur.fetchall() or []:
@@ -98,7 +98,7 @@ def query_daily_checklist(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COUNT(*)::bigint FROM market.stock_daily
+                    SELECT COUNT(*)::bigint FROM raw_market.stock_daily
                     WHERE UPPER(TRIM(symbol)) = %s AND bar_date = %s::date
                     """,
                     (sym, trade_date),
@@ -108,7 +108,7 @@ def query_daily_checklist(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COUNT(*)::bigint FROM market.option_open_interest
+                    SELECT COUNT(*)::bigint FROM raw_market.option_open_interest
                     WHERE UPPER(TRIM(underlying)) = %s AND trade_date = %s::date
                     """,
                     (sym, trade_date),
@@ -118,7 +118,7 @@ def query_daily_checklist(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT COUNT(*)::bigint FROM market.corporate_action
+                    SELECT COUNT(*)::bigint FROM raw_market.corporate_action
                     WHERE UPPER(TRIM(symbol)) = %s AND ex_date = %s::date
                     """,
                     (sym, trade_date),
@@ -131,7 +131,7 @@ def query_daily_checklist(
         "trade_date": trade_date,
         "symbols": checklist,
         "freshness": freshness_by_dim,
-        "note": "Simplified checklist from market.* row presence and data_ops.ingest_freshness.",
+        "note": "Simplified checklist from market.* row presence and ops_jobs.ingest_freshness.",
     }
 
 

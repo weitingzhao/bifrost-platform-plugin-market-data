@@ -40,7 +40,7 @@ def fetch_closed_holiday_dates(
         params.append(end)
     sql = f"""
         SELECT holiday_date
-        FROM market.us_market_holiday
+        FROM raw_market.us_market_holiday
         WHERE {' AND '.join(clauses)}
     """
     try:
@@ -73,7 +73,7 @@ def is_trading_day(conn: Any, d: date) -> bool:
         cur.execute(
             """
             SELECT 1
-            FROM market.us_market_holiday
+            FROM raw_market.us_market_holiday
             WHERE exchange = 'NYSE'
               AND holiday_date = %s
               AND status = 'closed'
