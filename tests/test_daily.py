@@ -829,7 +829,7 @@ def test_enqueue_readiness_refresh() -> None:
         scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
     )
     assert result["slot"] == "readiness-refresh"
-    assert result["rows_updated"] == 2  # _DailyCursor sets rowcount=2 for UPDATE
+    assert result["rows_updated"] == 0  # slot retired — no SRD UPDATE
     assert result["enqueued"] == 0
 
 
@@ -844,7 +844,7 @@ def test_readiness_refresh_not_skipped_on_holiday() -> None:
         scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
     )
     assert result.get("skipped") is not True
-    assert result["rows_updated"] == 2
+    assert result["rows_updated"] == 0
 
 
 def test_readiness_refresh_commits() -> None:
@@ -856,7 +856,7 @@ def test_readiness_refresh_commits() -> None:
         watchlist_symbols=[],
         scheduler_cfg={},
     )
-    assert conn.committed >= 1
+    assert conn.committed == 0  # retired slot — no SQL executed
 
 
 def test_watchlist_db_fallback_missing_table_returns_empty() -> None:

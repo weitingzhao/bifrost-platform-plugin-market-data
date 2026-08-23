@@ -1,6 +1,6 @@
-# Readiness refresh — UPDATE stock_readiness_daily from view (UTC).
-# Suspended: public.stock_readiness_daily is Trade-owned and is not in
-# bifrost_golden_source. Re-enable after a Plugin-native readiness table exists.
+# Readiness refresh — RETIRED (stock_readiness_daily dropped from Trade DB).
+# Suspended permanently: SEPA readiness is dw_stock.mart_sepa_* via dbt CronJob.
+# Do NOT unsuspend — see stock-readiness-retire program D-SRD3.
 ---
 apiVersion: batch/v1
 kind: CronJob

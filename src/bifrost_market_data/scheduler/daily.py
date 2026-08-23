@@ -472,38 +472,14 @@ def load_option_tickers(
     return tickers
 
 
-_READINESS_REFRESH_SQL = """
-UPDATE public.stock_readiness_daily srd
-SET bar_count_lookback = v.bar_rows,
-    first_bar_date = v.first_bar_date,
-    last_bar_date = v.last_bar_date,
-    null_close_rows = v.null_close_rows,
-    null_volume_rows = v.null_volume_rows,
-    price_ready = v.price_ready
-FROM public.v_sepa_symbol_price_readiness v
-WHERE srd.as_of_date = v.as_of_date AND srd.symbol = v.symbol
-""".strip()
-
-
 def _run_readiness_refresh(conn: Any) -> int:
-    """Execute readiness UPDATE and return number of rows affected.
-
-    ``public.stock_readiness_daily`` is Trade-owned and is not in Golden Source.
-    Missing-table errors are skipped so the CronJob does not BackoffLimitExceeded.
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(_READINESS_REFRESH_SQL)
-            rows = cur.rowcount if hasattr(cur, "rowcount") else 0
-        conn.commit()
-        return rows
-    except Exception as exc:
-        logger.warning("readiness-refresh skipped (table missing or query failed): %s", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return 0
+    """RETIRED: public.stock_readiness_daily removed from Trade DB (core 0.10.7+)."""
+    _ = conn
+    logger.info(
+        "readiness-refresh retired — stock_readiness_daily dropped; "
+        "use dw_stock.mart_sepa_* via dbt (CronJob suspend must stay true)"
+    )
+    return 0
 
 
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
@@ -577,8 +553,9 @@ def enqueue_slot(
         }
 
     if slot_key == "readiness-refresh":
+        # Inline slot retired — stock_readiness_daily no longer exists on Trade DB.
         rows_updated = _run_readiness_refresh(conn)
-        logger.info("readiness-refresh updated %d rows", rows_updated)
+        logger.info("readiness-refresh retired (rows_updated=%d)", rows_updated)
         return {"slot": slot_key, "rows_updated": rows_updated, "enqueued": 0, "deduped": 0}
 
     if slot_key == "oi-gap-heal":
