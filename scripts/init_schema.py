@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize market.*, market_analytics.*, and data_ops.* schemas on the target PostgreSQL database."""
+"""Initialize raw_market.* and ops_jobs.* schemas on the target PostgreSQL database."""
 
 from __future__ import annotations
 
@@ -78,7 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     target = f"{kw['user']}@{kw['host']}:{kw['port']}/{kw['dbname']}"
     print(f"Target: {target}")
     print(f"market tables: {', '.join(MARKET_TABLES)}")
-    print(f"market_analytics tables: {', '.join(MARKET_ANALYTICS_TABLES)}")
+    if MARKET_ANALYTICS_TABLES:
+        print(f"market_analytics tables: {', '.join(MARKET_ANALYTICS_TABLES)}")
+    else:
+        print("market_analytics tables: (retired — features.* owned by bifrost-research)")
     print(f"data_ops tables: {', '.join(DATA_OPS_TABLES)}")
     print(f"market views: {', '.join(MARKET_VIEWS)}")
 
@@ -107,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.roles_only:
         print("Roles apply finished.")
     else:
-        print("DDL applied successfully (schemas market + market_analytics + data_ops).")
+        print("DDL applied successfully (schemas raw_market + ops_jobs).")
     return 0
 
 

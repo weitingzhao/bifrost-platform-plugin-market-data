@@ -1,10 +1,25 @@
 # Market Data Schema — Golden Source (`bifrost_golden_source`)
 
-> **Canonical schemas (Wave 6.3):** `raw_market.*` (Polygon raw), `features_daily.*` (derived daily metrics), `ops_jobs.*` (ingest queue + freshness).  
-> **Legacy aliases in this doc:** `market.*`, `market_analytics.*`, `data_ops.*` — historical names from pre-pipeline-rename programs; physical tables live under canonical schemas. See `bifrost-trade-core/docs/DATABASE.md`.
+> **Canonical schemas (Wave 6.6):** `raw_market.*` (Polygon raw), `features.*` (Research Feature Store), `ops_jobs.*` (ingest queue + freshness).  
+> **Legacy aliases (retired Wave 6.6):** `market.*`, `market_analytics.*`, `features_daily.*`, `data_ops.*` — see `bifrost-trade-core/docs/DATABASE.md`.
 
 Owner review deliverable for program **market-data-subcontractor** Phase **P1**,
-extended by **market-data-expand** Wave **0-A** (`features_daily`, formerly `market_analytics`).
+extended by **market-data-expand** Wave **0-A** (historical `market_analytics` / `features_daily`, retired Wave 7).
+
+## `features.*` (owned by bifrost-research)
+
+Wave 7: Plugin **does not** create or write `features.*`. DDL, scheduled compute, and
+upserts live in **`bifrost-research`** (`features.option_metric_*` volatility tables).
+Plugin API and coverage routes read canonical tables for compatibility:
+
+| Legacy alias | Canonical table |
+|--------------|-----------------|
+| `max_pain_daily` | `features.option_metric_max_pain_daily` |
+| `atm_iv_daily` | `features.option_metric_atm_iv_daily` |
+| `pcr_daily` | `features.option_metric_pcr_daily` |
+| `iv_percentile_daily` | `features.option_metric_iv_percentile_daily` |
+
+Research API `:8795` is the preferred write + read path (`/analytics/options/*`).
 
 ## Golden Source Model (since W2 — 2026-08-14)
 
@@ -309,106 +324,6 @@ Ingest kind `ticker_type` (no payload) TRUNCATEs then upserts the full
 dictionary (~25 rows). No CronJob — enqueue manually when Polygon codes change.
 
 Trade consumers read via Plugin HTTP (`/market/reference/ticker-types`).
-
----
-
-## `market_analytics` tables
-
-Derived daily analytics written by compute jobs (Wave 0-B+). All four tables are
-`PARTITION BY RANGE (trade_date)` with monthly partitions via
-`data_ops.ensure_month_partitions('market_analytics', …, 12, 4)`.
-
-### `market_analytics.max_pain_daily`
-
-| Column | Type | Notes |
-|--------|------|-------|
-| symbol | text | PK part |
-| trade_date | date | PK part; RANGE partition key |
-| expiry | date | PK part |
-| max_pain_strike | double precision | strike minimizing total pain |
-| total_oi | integer | |
-| total_pain_at_strike | double precision | pain at max-pain strike |
-| computed_at | timestamptz | default `now()` |
-
-**PK:** `(symbol, trade_date, expiry)`  
-**Index:** `(symbol, trade_date DESC)`
-
-**Computation path (owned by bifrost-research since Wave 2.1):**
-
-1. Source: `market.option_open_interest` for each trading day in lookback (`lookback_days=3`).
-2. Group by `(underlying, expiry)`; build strike → (call_oi, put_oi).
-3. `pain(K) = Σ [ OI_call(s)·max(0,K−s)·100 + OI_put(s)·max(0,s−K)·100 ]`; `max_pain_strike = argmin_K(pain(K))`.
-4. Upsert into this table (`ON CONFLICT DO UPDATE` refreshes `computed_at`).
-5. Research CronJob `research-max-pain` (`45 22 * * *` UTC) — see `bifrost-research/k8s/engines/cronjob-volatility.yaml`.
-6. Read API: Research `/analytics/options/max-pain` (preferred); Plugin `GET /market/analytics/max-pain` deprecated.
-
-### `market_analytics.atm_iv_daily`
-
-| Column | Type | Notes |
-|--------|------|-------|
-| symbol | text | PK part |
-| trade_date | date | PK part; RANGE partition key |
-| expiry | date | PK part |
-| atm_strike | double precision | |
-| atm_iv | double precision | |
-| underlying_price | double precision | |
-| iv_source | text | e.g. `snapshot` |
-| computed_at | timestamptz | default `now()` |
-
-**PK:** `(symbol, trade_date, expiry)`  
-**Index:** `(symbol, trade_date DESC)`
-
-**Computation path (owned by bifrost-research since Wave 2.1):**
-
-1. Source: `market.v_option_snapshot_with_stock` (last snap per ticker on NY day) JOIN `option_contract`.
-2. Group by `(underlying, expiry)`; spot = median `underlying_price`; nearest strike call/put IV avg.
-3. Upsert (`ON CONFLICT DO UPDATE`); `iv_source='snapshot'`.
-4. Research CronJob `research-atm-iv-pcr` (`0 23 * * *` UTC) with PCR.
-5. Read API: Research `/analytics/options/atm-iv` (preferred); Plugin route deprecated.
-6. **Black-box:** `iv` is Polygon precomputed — see `docs/ANALYTICS.md`.
-
-### `market_analytics.pcr_daily`
-
-| Column | Type | Notes |
-|--------|------|-------|
-| symbol | text | PK part |
-| trade_date | date | PK part; RANGE partition key |
-| pcr_oi | double precision | put/call open-interest ratio |
-| pcr_volume | double precision | put/call volume ratio |
-| total_put_oi / total_call_oi | integer | |
-| total_put_volume / total_call_volume | bigint | |
-| computed_at | timestamptz | default `now()` |
-
-**PK:** `(symbol, trade_date)`  
-**Index:** `(symbol, trade_date DESC)`
-
-**Computation path (owned by bifrost-research since Wave 2.1):**
-
-1. OI totals from `market.option_open_interest` for `trade_date`.
-2. Volume totals from last `option_snapshot.day_volume` per ticker (NY day) + `option_contract` right.
-3. Upsert via Research CronJob `research-atm-iv-pcr`; read Research `/analytics/options/pcr` (preferred).
-
-### `market_analytics.iv_percentile_daily`
-
-| Column | Type | Notes |
-|--------|------|-------|
-| symbol | text | PK part |
-| trade_date | date | PK part; RANGE partition key |
-| iv_current | double precision | median atm_iv across expiries that day |
-| iv_percentile_1y | double precision | |
-| iv_rank_1y | double precision | |
-| lookback_days | integer | samples used (≤ percentile_window) |
-| computed_at | timestamptz | default `now()` |
-
-**PK:** `(symbol, trade_date)`  
-**Index:** `(symbol, trade_date DESC)`
-
-**Computation path (owned by bifrost-research since Wave 2.1):**
-
-1. Source: `market_analytics.atm_iv_daily` history (~252 trading days).
-2. Current IV = median of per-expiry `atm_iv` on `trade_date`.
-3. Percentile / rank vs lookback window; Research CronJob `research-iv-percentile` at `15 23 * * *` UTC.
-4. Read API: Research `/analytics/options/iv-percentile` (preferred); Plugin route deprecated.
 
 ---
 

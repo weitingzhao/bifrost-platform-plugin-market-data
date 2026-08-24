@@ -25,10 +25,19 @@ router = APIRouter(prefix="/coverage", tags=["coverage"])
 _RECENT_SNAPSHOT_DAYS = 7
 _RECENT_BAR_DAYS = 7
 
+# Legacy coverage keys → canonical features.* table names (Wave 7).
+_ANALYTICS_TABLE_MAP: dict[str, str] = {
+    "max_pain_daily": "option_metric_max_pain_daily",
+    "atm_iv_daily": "option_metric_atm_iv_daily",
+    "pcr_daily": "option_metric_pcr_daily",
+    "iv_percentile_daily": "option_metric_iv_percentile_daily",
+}
 
-def _analytics_metric_summary(conn: Any, table: str) -> dict[str, Any] | None:
-    """Aggregate symbol/day coverage for one market_analytics table."""
-    if not table_exists(conn, "market_analytics", table):
+
+def _analytics_metric_summary(conn: Any, legacy_table: str) -> dict[str, Any] | None:
+    """Aggregate symbol/day coverage for one features.option_metric_* table."""
+    canonical = _ANALYTICS_TABLE_MAP.get(legacy_table, legacy_table)
+    if not table_exists(conn, "features", canonical):
         return None
     try:
         with conn.cursor() as cur:
@@ -38,7 +47,7 @@ def _analytics_metric_summary(conn: Any, table: str) -> dict[str, Any] | None:
                     COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
                     COUNT(DISTINCT trade_date)::bigint AS days,
                     MAX(trade_date) AS latest
-                FROM features_daily.{table}
+                FROM features.{canonical}
                 """
             )
             row = cur.fetchone()

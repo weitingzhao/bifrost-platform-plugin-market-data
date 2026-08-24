@@ -15,6 +15,15 @@ from bifrost_market_data.schema.ddl import (
     apply_ddl,
 )
 
+FORBIDDEN_LEGACY_SCHEMAS = (
+    "features_daily",
+    "features_option",
+    "features_signals",
+    "features_forecasts",
+    "features_backtests",
+    "market_analytics",
+)
+
 
 class _FakeCursor:
     def __init__(self) -> None:
@@ -49,12 +58,11 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert conn.committed
     blob = "\n".join(conn.cur.statements)
     assert "CREATE SCHEMA IF NOT EXISTS raw_market" in blob
-    assert "CREATE SCHEMA IF NOT EXISTS features_daily" in blob
     assert "CREATE SCHEMA IF NOT EXISTS ops_jobs" in blob
+    for legacy in FORBIDDEN_LEGACY_SCHEMAS:
+        assert legacy not in blob, f"legacy schema {legacy} must not appear in DDL"
     for name in MARKET_TABLES:
         assert f"raw_market.{name}" in blob, f"missing raw_market.{name}"
-    for name in MARKET_ANALYTICS_TABLES:
-        assert f"features_daily.{name}" in blob, f"missing features_daily.{name}"
     for name in DATA_OPS_TABLES:
         assert f"ops_jobs.{name}" in blob, f"missing ops_jobs.{name}"
     for name in MARKET_VIEWS:
@@ -67,10 +75,6 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert "option_oi_underlying_expiry_strike" in blob
     assert "SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily'" in blob
     assert "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades'" in blob
-    assert (
-        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'max_pain_daily'"
-        in blob
-    )
     assert "job_ingest_dedup" in blob
     assert "DROP TABLE IF EXISTS ops_jobs.us_trading_calendar" in blob
     assert "SELECT FOR UPDATE" not in blob  # claim logic is P3, not DDL
@@ -94,7 +98,7 @@ def test_expected_object_counts() -> None:
     assert "us_market_holiday" in MARKET_TABLES
     assert "ticker_related" in MARKET_TABLES
     assert "ticker_type" in MARKET_TABLES
-    assert len(MARKET_ANALYTICS_TABLES) == 4
+    assert len(MARKET_ANALYTICS_TABLES) == 0
     assert len(DATA_OPS_TABLES) == 3
     assert "data_source_void" in DATA_OPS_TABLES
     assert "us_trading_calendar" not in DATA_OPS_TABLES
@@ -128,16 +132,6 @@ def test_apply_ddl_live_idempotent() -> None:
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'features_daily' AND table_type = 'BASE TABLE'
-                ORDER BY 1
-                """
-            )
-            analytics = [r[0] for r in cur.fetchall()]
-            for name in MARKET_ANALYTICS_TABLES:
-                assert name in analytics
-            cur.execute(
-                """
-                SELECT table_name FROM information_schema.tables
                 WHERE table_schema = 'ops_jobs' AND table_type = 'BASE TABLE'
                 ORDER BY 1
                 """
@@ -155,5 +149,6 @@ def test_create_roles_sql_exists() -> None:
     assert "data_writer" in text
     assert "market_reader" in text
     assert "GRANT" in text
-    assert "GRANT USAGE, CREATE ON SCHEMA features_daily TO data_writer" in text
-    assert "GRANT SELECT ON ALL TABLES IN SCHEMA features_daily TO market_reader" in text
+    assert "features_daily" not in text
+    assert "GRANT USAGE ON SCHEMA features TO market_reader" in text
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA features TO market_reader" in text

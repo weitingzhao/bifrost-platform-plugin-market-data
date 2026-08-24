@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from bifrost_market_data.api.deps import startup_error, startup_ok
+
 router = APIRouter(tags=["health"])
 
 _DB_PROBE_TIMEOUT_SEC = 2.0
@@ -34,12 +36,15 @@ def health() -> dict[str, Any]:
     """Process health plus DB probe.
 
     Always HTTP 200 so liveness stays up; readiness consumers should check
-    ``status`` / ``db`` in the body (``degraded`` when DB is unreachable).
+    ``status`` / ``db`` / ``startup_ok`` in the body.
     """
     db = _probe_db()
-    status = "ok" if db == "ok" else "degraded"
+    guard_ok = startup_ok()
+    status = "ok" if db == "ok" and guard_ok else "degraded"
     return {
         "status": status,
         "service": "market-data-api",
         "db": db,
+        "startup_ok": guard_ok,
+        "startup_error": startup_error(),
     }

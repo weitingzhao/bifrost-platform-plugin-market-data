@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from bifrost_market_data import __version__
@@ -13,6 +15,7 @@ from bifrost_market_data.api.filings import router as filings_router
 from bifrost_market_data.api.fundamentals import router as fundamentals_router
 from bifrost_market_data.api.fundamentals_db import router as fundamentals_db_router
 from bifrost_market_data.api.fundamentals_sepa import router as fundamentals_sepa_router
+from bifrost_market_data.api.deps import run_startup_schema_guard
 from bifrost_market_data.api.health import router as health_router
 from bifrost_market_data.api.ingest import router as ingest_router
 from bifrost_market_data.api.ingest_ticker import router as ingest_ticker_router
@@ -35,6 +38,12 @@ from bifrost_market_data.api.technical import router as technical_router
 from bifrost_market_data.api.trades_quotes import router as trades_quotes_router
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    run_startup_schema_guard()
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Bifrost Market Data API",
@@ -44,6 +53,7 @@ def create_app() -> FastAPI:
             "Polygon pass-through, DB coverage, analytics, and ingest enqueue "
             "under /market/*. Deep Celery/SSE paths remain on Trade API until P7."
         ),
+        lifespan=_lifespan,
     )
     app.include_router(health_router)
     # Mount under /market (P5 contract). Order: static prefixes before /stocks/{symbol}.

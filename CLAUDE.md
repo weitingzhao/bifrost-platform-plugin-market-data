@@ -24,7 +24,7 @@
 
 - **单一 Golden Source 数据库**：`bifrost_golden_source`（CNPG 管理）
 - 所有 Trade 环境共享同一数据库实例，不再按环境分离
-- Schema：`raw_market.*`（公共行情）+ `features_daily.*`（衍生）+ `ops_jobs.*`（作业队列 / freshness / **data_source_void**）
+- Schema：`raw_market.*`（公共行情）+ `ops_jobs.*`（作业队列 / freshness / **data_source_void**）；`features.*` 由 **bifrost-research** 写入
 - DDL 归 **本 repo** 管理（`src/bifrost_market_data/schema/ddl.py`）
 - 不依赖 `bifrost-core`；不 import `bifrost-trade-*` Python 包
 - **PG 目标**：CNPG LAN NodePort `192.168.10.73:30432`（见 `config/market-data.yaml.example`）

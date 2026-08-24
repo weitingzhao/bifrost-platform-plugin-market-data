@@ -2,7 +2,7 @@
 
 Daily upserts (max-pain / ATM IV / PCR / IV percentile) moved to
 ``bifrost_research.engines.volatility`` and ``bifrost_research.scheduler.volatility``.
-Plugin API still reads ``features_daily.*`` from Golden Source and offers live
+Plugin API reads ``features.option_metric_*`` from Golden Source and offers live
 max-pain compute via pure math in ``max_pain_math``.
 """
 

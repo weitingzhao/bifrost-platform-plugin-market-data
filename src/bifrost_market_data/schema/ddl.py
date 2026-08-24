@@ -1,15 +1,13 @@
-"""Idempotent DDL for raw_market.*, features_daily.*, and ops_jobs.* schemas.
+"""Idempotent DDL for raw_market.* and ops_jobs.* schemas.
 
 Design principles:
 - Single Polygon source (no source column)
 - UTC timestamptz or NY calendar date
 - option_ticker = Polygon native key
 - Partitioned history tables with auto-extend helper
-- market_analytics holds derived daily analytics (max pain, ATM IV, PCR, IV percentile)
 
-Wave 2.1: Research owns market_analytics DDL going forward
-(``bifrost_research.schema.ddl``). This module keeps ``_create_market_analytics_tables``
-for Plugin ``db-init`` compatibility only.
+Wave 7: ``features.*`` Feature Store DDL owned by ``bifrost_research`` only.
+Plugin ``db-init`` must not create ``features_daily`` / ``market_analytics`` schemas.
 """
 
 from __future__ import annotations
@@ -32,7 +30,6 @@ def apply_ddl(conn: _Connection) -> None:
     with conn.cursor() as cur:
         _create_schemas(cur)
         _create_market_tables(cur)
-        _create_market_analytics_tables(cur)
         _create_data_ops_tables(cur)
         _create_views(cur)
         _create_partition_helper(cur)
@@ -42,7 +39,6 @@ def apply_ddl(conn: _Connection) -> None:
 
 def _create_schemas(cur: _Cursor) -> None:
     cur.execute("CREATE SCHEMA IF NOT EXISTS raw_market")
-    cur.execute("CREATE SCHEMA IF NOT EXISTS features_daily")
     cur.execute("CREATE SCHEMA IF NOT EXISTS ops_jobs")
 
 
@@ -514,104 +510,6 @@ def _create_market_tables(cur: _Cursor) -> None:
     )
 
 
-def _create_market_analytics_tables(cur: _Cursor) -> None:
-    """Create features_daily.* tables (db-init compat).
-
-    Research owns DDL going forward — see ``bifrost_research.schema.ddl``.
-    Kept here so Plugin ``make db-init`` still bootstraps Golden Source tables.
-    """
-    # --- max_pain_daily (RANGE by month on trade_date) ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS features_daily.max_pain_daily (
-            symbol                 text        NOT NULL,
-            trade_date             date        NOT NULL,
-            expiry                 date        NOT NULL,
-            max_pain_strike        double precision,
-            total_oi               integer,
-            total_pain_at_strike   double precision,
-            computed_at            timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (symbol, trade_date, expiry)
-        ) PARTITION BY RANGE (trade_date)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS max_pain_daily_symbol_date
-        ON features_daily.max_pain_daily (symbol, trade_date DESC)
-        """
-    )
-
-    # --- atm_iv_daily ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS features_daily.atm_iv_daily (
-            symbol             text        NOT NULL,
-            trade_date         date        NOT NULL,
-            expiry             date        NOT NULL,
-            atm_strike         double precision,
-            atm_iv             double precision,
-            underlying_price   double precision,
-            iv_source          text,
-            computed_at        timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (symbol, trade_date, expiry)
-        ) PARTITION BY RANGE (trade_date)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS atm_iv_daily_symbol_date
-        ON features_daily.atm_iv_daily (symbol, trade_date DESC)
-        """
-    )
-
-    # --- pcr_daily ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS features_daily.pcr_daily (
-            symbol              text        NOT NULL,
-            trade_date          date        NOT NULL,
-            pcr_oi              double precision,
-            pcr_volume          double precision,
-            total_put_oi        integer,
-            total_call_oi       integer,
-            total_put_volume    bigint,
-            total_call_volume   bigint,
-            computed_at         timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (symbol, trade_date)
-        ) PARTITION BY RANGE (trade_date)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS pcr_daily_symbol_date
-        ON features_daily.pcr_daily (symbol, trade_date DESC)
-        """
-    )
-
-    # --- iv_percentile_daily ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS features_daily.iv_percentile_daily (
-            symbol               text        NOT NULL,
-            trade_date           date        NOT NULL,
-            iv_current           double precision,
-            iv_percentile_1y     double precision,
-            iv_rank_1y           double precision,
-            lookback_days        integer,
-            computed_at          timestamptz NOT NULL DEFAULT now(),
-            PRIMARY KEY (symbol, trade_date)
-        ) PARTITION BY RANGE (trade_date)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS iv_percentile_daily_symbol_date
-        ON features_daily.iv_percentile_daily (symbol, trade_date DESC)
-        """
-    )
-
-
 def _create_data_ops_tables(cur: _Cursor) -> None:
     cur.execute(
         """
@@ -1014,7 +912,7 @@ def _create_partition_helper(cur: _Cursor) -> None:
 
 def _ensure_partitions(cur: _Cursor) -> None:
     # Rolling window: keep recent history + at most ~12 months forward.
-    # Schema names must match physical schemas (raw_market / features_daily).
+    # Schema names must match physical schemas (raw_market only; features.* = Research).
     cur.execute("SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily', 1, 1)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'stock_minute', 12, 3)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_daily', 12, 3)")
@@ -1022,18 +920,6 @@ def _ensure_partitions(cur: _Cursor) -> None:
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_snapshot', 3, 3)")
     # Tape: day partitions + ~35d window; trim drops partitions older than 30d.
     cur.execute("SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)")
-    cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'max_pain_daily', 3, 3)"
-    )
-    cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'atm_iv_daily', 3, 3)"
-    )
-    cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'pcr_daily', 3, 3)"
-    )
-    cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'iv_percentile_daily', 3, 3)"
-    )
 
 
 # Expected table names for tests / docs
@@ -1057,12 +943,8 @@ MARKET_TABLES: tuple[str, ...] = (
     "ticker_type",
 )
 
-MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
-    "max_pain_daily",
-    "atm_iv_daily",
-    "pcr_daily",
-    "iv_percentile_daily",
-)
+# Retired Wave 7 — analytics tables live in features.* (bifrost-research).
+MARKET_ANALYTICS_TABLES: tuple[str, ...] = ()
 
 DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",

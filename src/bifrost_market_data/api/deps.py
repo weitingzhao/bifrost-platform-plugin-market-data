@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -13,7 +14,39 @@ from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.polygon.client import PolygonClient
 from bifrost_market_data.polygon.errors import PolygonAPIError, PolygonRateLimitError
 
+logger = logging.getLogger(__name__)
+
 _client: PolygonClient | None = None
+
+_startup_ok = True
+_startup_error: str | None = None
+
+
+def run_startup_schema_guard() -> None:
+    """Best-effort legacy schema guard — does not block process start."""
+    global _startup_ok, _startup_error
+    try:
+        from bifrost_market_data.db.schema_guard import assert_no_legacy_schemas
+
+        conn = connect_db(timeout=5)
+        try:
+            assert_no_legacy_schemas(conn)
+            _startup_ok = True
+            _startup_error = None
+        finally:
+            conn.close()
+    except Exception as exc:
+        _startup_ok = False
+        _startup_error = str(exc)
+        logger.error("startup schema guard failed: %s", exc)
+
+
+def startup_ok() -> bool:
+    return _startup_ok
+
+
+def startup_error() -> str | None:
+    return _startup_error
 
 
 def resolve_polygon_api_key() -> str:

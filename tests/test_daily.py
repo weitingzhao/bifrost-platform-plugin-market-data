@@ -117,7 +117,7 @@ class _DailyCursor:
                     )
                 self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif "from features_daily.atm_iv_daily" in q:
+        elif "from features.option_metric_atm_iv_daily" in q:
             from_d = params[0] if params else None
             to_d = params[1] if params and len(params) > 1 else None
             underlyings = set(params[2]) if params and len(params) > 2 else None

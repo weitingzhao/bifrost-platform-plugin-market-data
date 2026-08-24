@@ -24,10 +24,12 @@ _OPTION_TICKER_RE = re.compile(
 _NY = ZoneInfo("America/New_York")
 
 # Logical ingest names (market.*) map to Golden Source physical schemas.
+# Wave 7: market_analytics / features_daily retired — Research owns features.* writes.
 _LOGICAL_TO_PHYSICAL_SCHEMA = {
     "market": "raw_market",
-    "market_analytics": "features_daily",
 }
+
+_FORBIDDEN_LOGICAL_SCHEMAS = frozenset({"market_analytics", "features_daily"})
 
 
 def physical_table_name(qualified: str) -> str:
@@ -35,6 +37,11 @@ def physical_table_name(qualified: str) -> str:
     if "." not in qualified:
         raise ValueError(f"expected qualified table name, got: {qualified!r}")
     schema, name = qualified.split(".", 1)
+    if schema in _FORBIDDEN_LOGICAL_SCHEMAS:
+        raise ValueError(
+            f"logical schema {schema!r} retired (Wave 7); "
+            "use bifrost_research features.* for analytics writes"
+        )
     physical_schema = _LOGICAL_TO_PHYSICAL_SCHEMA.get(schema, schema)
     return f"{physical_schema}.{name}"
 
