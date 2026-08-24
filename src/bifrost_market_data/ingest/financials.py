@@ -8,11 +8,12 @@ from typing import Any, Mapping
 from bifrost_market_data.ingest._upsert import as_int, parse_date
 from bifrost_market_data.worker.claim import JobRow
 
+# Wave 1 hygiene: stop writing comprehensive_income (197k+ rows unused by
+# SEPA / dbt). Historical rows remain; only new upserts skip this key.
 _STATEMENT_KEYS = (
     "income_statement",
     "balance_sheet",
     "cash_flow_statement",
-    "comprehensive_income",
 )
 
 

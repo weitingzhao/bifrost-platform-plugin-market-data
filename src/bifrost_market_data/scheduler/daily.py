@@ -522,11 +522,13 @@ def enqueue_slot(
         keep_max = int(scfg.get("keep_max") or 5000)
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
         trades_keep = int(scfg.get("option_trades_keep_days") or 30)
+        snapshot_keep = int(scfg.get("option_snapshot_keep_days") or 90)
         partitions_dropped = 0
+        snapshot_partitions_dropped = 0
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT ops_jobs.drop_day_partitions_older_than('market', 'option_trades', %s)",
+                    "SELECT ops_jobs.drop_day_partitions_older_than('raw_market', 'option_trades', %s)",
                     (trades_keep,),
                 )
                 row = cur.fetchone() if hasattr(cur, "fetchone") else None
@@ -536,11 +538,37 @@ def enqueue_slot(
                 conn.commit()
             # Re-create near-term day partitions after drops.
             with conn.cursor() as cur:
-                cur.execute("SELECT ops_jobs.ensure_day_partitions('market', 'option_trades', 35, 2)")
+                cur.execute(
+                    "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)"
+                )
             if hasattr(conn, "commit"):
                 conn.commit()
         except Exception as exc:  # noqa: BLE001 — retention best-effort
             logger.warning("option_trades partition retention failed: %s", exc)
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ops_jobs.drop_month_partitions_older_than"
+                    "('raw_market', 'option_snapshot', %s)",
+                    (snapshot_keep,),
+                )
+                row = cur.fetchone() if hasattr(cur, "fetchone") else None
+            if row is not None:
+                snapshot_partitions_dropped = int(
+                    row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+                )
+            if hasattr(conn, "commit"):
+                conn.commit()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_snapshot', 3, 3)"
+                )
+            if hasattr(conn, "commit"):
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 — retention best-effort
+            logger.warning("option_snapshot partition retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
         return {
@@ -548,6 +576,8 @@ def enqueue_slot(
             "trimmed": deleted,
             "option_trades_partitions_dropped": partitions_dropped,
             "option_trades_keep_days": trades_keep,
+            "option_snapshot_partitions_dropped": snapshot_partitions_dropped,
+            "option_snapshot_keep_days": snapshot_keep,
             "enqueued": 0,
             "deduped": 0,
         }

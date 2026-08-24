@@ -344,6 +344,18 @@ def _create_market_tables(cur: _Cursor) -> None:
         ON raw_market.option_open_interest (underlying, trade_date DESC)
         """
     )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_strike
+        ON raw_market.option_open_interest (underlying, expiry, strike)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_date
+        ON raw_market.option_open_interest (underlying, expiry, trade_date DESC)
+        """
+    )
 
     # --- ticker (merged tickers + ticker_overview) ---
     cur.execute(
@@ -942,27 +954,75 @@ def _create_partition_helper(cur: _Cursor) -> None:
         $$
         """
     )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION ops_jobs.drop_month_partitions_older_than(
+            p_schema text,
+            p_table text,
+            p_keep_days integer DEFAULT 90
+        ) RETURNS integer
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          cutoff date;
+          r record;
+          dropped integer := 0;
+          part_month date;
+          y text;
+          m text;
+        BEGIN
+          cutoff := date_trunc('month', CURRENT_DATE - p_keep_days)::date;
+          FOR r IN
+            SELECT c.relname AS part_name
+            FROM pg_inherits i
+            JOIN pg_class c ON c.oid = i.inhrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_class p ON p.oid = i.inhparent
+            JOIN pg_namespace pn ON pn.oid = p.relnamespace
+            WHERE pn.nspname = p_schema
+              AND p.relname = p_table
+              AND n.nspname = p_schema
+              AND c.relname ~ (p_table || '_y[0-9]{4}m[0-9]{2}$')
+          LOOP
+            y := substring(r.part_name from '_y([0-9]{4})m');
+            m := substring(r.part_name from 'm([0-9]{2})$');
+            IF y IS NULL OR m IS NULL THEN
+              CONTINUE;
+            END IF;
+            part_month := make_date(y::integer, m::integer, 1);
+            IF part_month < cutoff THEN
+              EXECUTE format('DROP TABLE IF EXISTS %I.%I', p_schema, r.part_name);
+              dropped := dropped + 1;
+            END IF;
+          END LOOP;
+          RETURN dropped;
+        END;
+        $$
+        """
+    )
 
 
 def _ensure_partitions(cur: _Cursor) -> None:
-    cur.execute("SELECT ops_jobs.ensure_year_partitions('market', 'stock_daily', 5, 2)")
-    cur.execute("SELECT ops_jobs.ensure_month_partitions('market', 'stock_minute', 12, 4)")
-    cur.execute("SELECT ops_jobs.ensure_month_partitions('market', 'option_daily', 12, 4)")
-    cur.execute("SELECT ops_jobs.ensure_month_partitions('market', 'option_minute', 12, 4)")
-    cur.execute("SELECT ops_jobs.ensure_month_partitions('market', 'option_snapshot', 12, 4)")
+    # Rolling window: keep recent history + at most ~12 months forward.
+    # Schema names must match physical schemas (raw_market / features_daily).
+    cur.execute("SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily', 1, 1)")
+    cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'stock_minute', 12, 3)")
+    cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_daily', 12, 3)")
+    cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_minute', 12, 3)")
+    cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_snapshot', 3, 3)")
     # Tape: day partitions + ~35d window; trim drops partitions older than 30d.
-    cur.execute("SELECT ops_jobs.ensure_day_partitions('market', 'option_trades', 35, 2)")
+    cur.execute("SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)")
     cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'max_pain_daily', 12, 4)"
+        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'max_pain_daily', 3, 3)"
     )
     cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'atm_iv_daily', 12, 4)"
+        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'atm_iv_daily', 3, 3)"
     )
     cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'pcr_daily', 12, 4)"
+        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'pcr_daily', 3, 3)"
     )
     cur.execute(
-        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'iv_percentile_daily', 12, 4)"
+        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'iv_percentile_daily', 3, 3)"
     )
 
 

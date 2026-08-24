@@ -49,10 +49,10 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert conn.committed
     blob = "\n".join(conn.cur.statements)
     assert "CREATE SCHEMA IF NOT EXISTS raw_market" in blob
-    assert "CREATE SCHEMA IF NOT EXISTS raw_market_analytics" in blob
+    assert "CREATE SCHEMA IF NOT EXISTS features_daily" in blob
     assert "CREATE SCHEMA IF NOT EXISTS ops_jobs" in blob
     for name in MARKET_TABLES:
-        assert f"market.{name}" in blob, f"missing market.{name}"
+        assert f"raw_market.{name}" in blob, f"missing raw_market.{name}"
     for name in MARKET_ANALYTICS_TABLES:
         assert f"features_daily.{name}" in blob, f"missing features_daily.{name}"
     for name in DATA_OPS_TABLES:
@@ -63,10 +63,12 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert "ensure_month_partitions" in blob
     assert "ensure_day_partitions" in blob
     assert "drop_day_partitions_older_than" in blob
-    assert "SELECT ops_jobs.ensure_year_partitions('market', 'stock_daily'" in blob
-    assert "SELECT ops_jobs.ensure_day_partitions('market', 'option_trades'" in blob
+    assert "drop_month_partitions_older_than" in blob
+    assert "option_oi_underlying_expiry_strike" in blob
+    assert "SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily'" in blob
+    assert "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades'" in blob
     assert (
-        "SELECT ops_jobs.ensure_month_partitions('market_analytics', 'max_pain_daily'"
+        "SELECT ops_jobs.ensure_month_partitions('features_daily', 'max_pain_daily'"
         in blob
     )
     assert "job_ingest_dedup" in blob
@@ -93,7 +95,8 @@ def test_expected_object_counts() -> None:
     assert "ticker_related" in MARKET_TABLES
     assert "ticker_type" in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 4
-    assert len(DATA_OPS_TABLES) == 2
+    assert len(DATA_OPS_TABLES) == 3
+    assert "data_source_void" in DATA_OPS_TABLES
     assert "us_trading_calendar" not in DATA_OPS_TABLES
     assert len(MARKET_VIEWS) == 3
 
@@ -115,7 +118,7 @@ def test_apply_ddl_live_idempotent() -> None:
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'market' AND table_type = 'BASE TABLE'
+                WHERE table_schema = 'raw_market' AND table_type = 'BASE TABLE'
                 ORDER BY 1
                 """
             )
@@ -125,7 +128,7 @@ def test_apply_ddl_live_idempotent() -> None:
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'market_analytics' AND table_type = 'BASE TABLE'
+                WHERE table_schema = 'features_daily' AND table_type = 'BASE TABLE'
                 ORDER BY 1
                 """
             )
@@ -135,7 +138,7 @@ def test_apply_ddl_live_idempotent() -> None:
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'data_ops' AND table_type = 'BASE TABLE'
+                WHERE table_schema = 'ops_jobs' AND table_type = 'BASE TABLE'
                 ORDER BY 1
                 """
             )

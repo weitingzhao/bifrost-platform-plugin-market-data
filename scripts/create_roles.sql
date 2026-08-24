@@ -14,37 +14,37 @@ END
 $$;
 
 -- Schemas must already exist (make db-init / scripts/init_schema.py).
-GRANT USAGE, CREATE ON SCHEMA market TO data_writer;
-GRANT USAGE, CREATE ON SCHEMA market_analytics TO data_writer;
-GRANT USAGE, CREATE ON SCHEMA data_ops TO data_writer;
-GRANT ALL ON ALL TABLES IN SCHEMA market TO data_writer;
-GRANT ALL ON ALL TABLES IN SCHEMA market_analytics TO data_writer;
-GRANT ALL ON ALL TABLES IN SCHEMA data_ops TO data_writer;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA market TO data_writer;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA market_analytics TO data_writer;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA data_ops TO data_writer;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA data_ops TO data_writer;
+GRANT USAGE, CREATE ON SCHEMA raw_market TO data_writer;
+GRANT USAGE, CREATE ON SCHEMA features_daily TO data_writer;
+GRANT USAGE, CREATE ON SCHEMA ops_jobs TO data_writer;
+GRANT ALL ON ALL TABLES IN SCHEMA raw_market TO data_writer;
+GRANT ALL ON ALL TABLES IN SCHEMA features_daily TO data_writer;
+GRANT ALL ON ALL TABLES IN SCHEMA ops_jobs TO data_writer;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA raw_market TO data_writer;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA features_daily TO data_writer;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA ops_jobs TO data_writer;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ops_jobs TO data_writer;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA market
+ALTER DEFAULT PRIVILEGES IN SCHEMA raw_market
   GRANT ALL ON TABLES TO data_writer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA market_analytics
+ALTER DEFAULT PRIVILEGES IN SCHEMA features_daily
   GRANT ALL ON TABLES TO data_writer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA data_ops
+ALTER DEFAULT PRIVILEGES IN SCHEMA ops_jobs
   GRANT ALL ON TABLES TO data_writer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA market
+ALTER DEFAULT PRIVILEGES IN SCHEMA raw_market
   GRANT ALL ON SEQUENCES TO data_writer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA market_analytics
+ALTER DEFAULT PRIVILEGES IN SCHEMA features_daily
   GRANT ALL ON SEQUENCES TO data_writer;
-ALTER DEFAULT PRIVILEGES IN SCHEMA data_ops
+ALTER DEFAULT PRIVILEGES IN SCHEMA ops_jobs
   GRANT ALL ON SEQUENCES TO data_writer;
 
-GRANT USAGE ON SCHEMA market TO market_reader;
-GRANT USAGE ON SCHEMA market_analytics TO market_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA market TO market_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA market_analytics TO market_reader;
-ALTER DEFAULT PRIVILEGES IN SCHEMA market
+GRANT USAGE ON SCHEMA raw_market TO market_reader;
+GRANT USAGE ON SCHEMA features_daily TO market_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA raw_market TO market_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA features_daily TO market_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA raw_market
   GRANT SELECT ON TABLES TO market_reader;
-ALTER DEFAULT PRIVILEGES IN SCHEMA market_analytics
+ALTER DEFAULT PRIVILEGES IN SCHEMA features_daily
   GRANT SELECT ON TABLES TO market_reader;
 
 -- P9 lockdown: data_writer must not write Trade / public business tables.
@@ -67,6 +67,6 @@ DO $$ BEGIN
 END $$;
 
 -- Optional: allow readers to see job status (not write)
-GRANT USAGE ON SCHEMA data_ops TO market_reader;
-GRANT SELECT ON data_ops.job_ingest TO market_reader;
-GRANT SELECT ON data_ops.ingest_freshness TO market_reader;
+GRANT USAGE ON SCHEMA ops_jobs TO market_reader;
+GRANT SELECT ON ops_jobs.job_ingest TO market_reader;
+GRANT SELECT ON ops_jobs.ingest_freshness TO market_reader;
