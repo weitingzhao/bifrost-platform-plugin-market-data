@@ -33,6 +33,9 @@ class _FakeCursor:
         _ = params
         self.statements.append(query)
 
+    def fetchone(self) -> None:
+        return None
+
     def __enter__(self) -> _FakeCursor:
         return self
 
@@ -72,8 +75,10 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert "ensure_day_partitions" in blob
     assert "drop_day_partitions_older_than" in blob
     assert "drop_month_partitions_older_than" in blob
-    assert "option_oi_underlying_expiry_strike" in blob
     assert "SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily'" in blob
+    assert "DROP VIEW IF EXISTS data_ops.ingest_freshness" in blob
+    assert "DROP SCHEMA IF EXISTS data_ops CASCADE" in blob
+    assert "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_open_interest'" in blob
     assert "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades'" in blob
     assert "job_ingest_dedup" in blob
     assert "DROP TABLE IF EXISTS ops_jobs.us_trading_calendar" in blob
@@ -91,18 +96,23 @@ def test_apply_ddl_is_idempotent_on_mock() -> None:
 
 
 def test_expected_object_counts() -> None:
-    assert len(MARKET_TABLES) == 17
+    assert len(MARKET_TABLES) == 22
     assert "stock_snapshot" in MARKET_TABLES
+    assert "income_statement" in MARKET_TABLES
+    assert "balance_sheet" in MARKET_TABLES
+    assert "cash_flow" in MARKET_TABLES
     assert "stock_movers" in MARKET_TABLES
     assert "option_trades" in MARKET_TABLES
     assert "us_market_holiday" in MARKET_TABLES
     assert "ticker_related" in MARKET_TABLES
     assert "ticker_type" in MARKET_TABLES
+    assert "stock_financials" not in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 0
     assert len(DATA_OPS_TABLES) == 3
     assert "data_source_void" in DATA_OPS_TABLES
     assert "us_trading_calendar" not in DATA_OPS_TABLES
-    assert len(MARKET_VIEWS) == 3
+    assert len(MARKET_VIEWS) == 4
+    assert "stock_financials" in MARKET_VIEWS
 
 
 @pytest.mark.skipif(

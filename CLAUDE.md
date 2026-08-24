@@ -10,14 +10,14 @@
 | 组件 | 说明 |
 |------|------|
 | Polygon REST ingest | 股票/期权日线、快照、合约目录、基本面、公司行动 → `market.*` |
-| PG-as-broker workers | `data_ops.job_ingest` + asyncio Deployment（无 Celery） |
+| PG-as-broker workers | `ops_jobs.job_ingest` + asyncio Deployment（无 Celery） |
 | CronJob scheduler | 替代 Celery Beat，定时 enqueue |
 
 ## 架构边界
 
 - **Platform core** (`bifrost-platform`): 通用环境治理 — matrix、spine、Console
 - **本 repo**: 独立进程、独立 K8s namespace、通过 PostgreSQL schema 契约与消费者解耦
-- **Trade** (`bifrost-trade-*`): 只读 `market.*`；不直连 Polygon；不写 `data_ops.*`
+- **Trade** (`bifrost-trade-*`): 只读 `raw_market.*`；不直连 Polygon；不写 `ops_jobs.*`（`data_ops` schema **retired Wave 8**）
 - **不含 IB**：无 TWS/Gateway/bars IB 路径
 
 ## 数据库（Golden Source 模式）

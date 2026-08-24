@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from typing import Any
 
 from bifrost_market_data.ingest.financials import handle_financials
 from ingest_testutil import FakeConn, make_job, mock_client
@@ -37,13 +38,16 @@ async def test_financials_upsert_nested_statements() -> None:
         conn,
     )
     assert result["rows_written"] == 3
-    sql = conn.statements[0][0]
-    assert "market.stock_financials" in sql
-    assert "::jsonb" in sql
-    types = {r[1] for r in conn.statements[0][1]}
-    assert types == {"income_statement", "balance_sheet", "cash_flow_statement"}
-    income = next(r for r in conn.statements[0][1] if r[1] == "income_statement")
-    assert json.loads(income[6])["revenues"]["value"] == 100
+    upsert_sqls = conn.upsert_sqls()
+    assert len(upsert_sqls) == 3
+    assert all("::jsonb" in sql for sql in upsert_sqls)
+    assert any("income_statement" in sql for sql in upsert_sqls)
+    all_rows: list[tuple[Any, ...]] = []
+    for _, params in conn.statements:
+        if isinstance(params, list):
+            all_rows.extend(params)
+    income_row = next(r for r in all_rows if "revenues" in r[5])
+    assert json.loads(income_row[5])["revenues"]["value"] == 100
 
 
 @pytest.mark.asyncio

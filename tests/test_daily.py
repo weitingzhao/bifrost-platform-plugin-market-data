@@ -133,7 +133,7 @@ class _DailyCursor:
                 rows.append((r["symbol"], r["trade_date"], r["expiry"], r["atm_iv"]))
             self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif "from market.option_contract" in q:
+        elif "from market.option_contract" in q or "from raw_market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
             as_of = params[1] if params and len(params) > 1 else None
             end = params[2] if params and len(params) > 2 else None
@@ -154,10 +154,12 @@ class _DailyCursor:
                 rows.append((ticker,))
             self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif "from market.ticker" in q and "instrument_type" in q:
+        elif ("from market.ticker" in q or "from raw_market.ticker" in q) and "instrument_type" in q:
             self.parent._fetchall = [(s,) for s in self.parent.cs_universe]
             self.parent._fetchone = None
-        elif "from market.stock_financials" in q and "income_statement" in q:
+        elif "raw_market.income_statement" in q or (
+            "stock_financials" in q and "income_statement" in q
+        ):
             self.parent._fetchall = [(s,) for s in self.parent.income_covered]
             self.parent._fetchone = None
         elif "from watchlist" in q or "from public.watchlist" in q or "select distinct symbol" in q:

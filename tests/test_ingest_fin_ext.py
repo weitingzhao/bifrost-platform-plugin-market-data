@@ -36,11 +36,9 @@ async def test_ratios_upsert_period_end_date() -> None:
     assert result["rows_written"] == 2
     assert result["symbol"] == "AAPL"
     sql = conn.statements[0][0]
-    assert "market.stock_financials" in sql
+    assert "raw_market.ratios" in sql
     assert "::jsonb" in sql
-    types = {r[1] for r in conn.statements[0][1]}
-    assert types == {"ratios"}
-    dates = {str(r[2]) for r in conn.statements[0][1]}
+    dates = {str(r[1]) for r in conn.statements[0][1]}
     assert dates == {"2024-03-31", "2024-06-30"}
 
 
@@ -86,8 +84,8 @@ async def test_short_interest_upsert() -> None:
     assert result["rows_written"] == 1
     row = conn.statements[0][1][0]
     assert row[0] == "NVDA"
-    assert row[1] == "short_interest"
-    assert row[3] == "biweekly"
+    assert str(row[1]) == "2024-08-15"
+    assert row[2] == "biweekly"
 
 
 @pytest.mark.asyncio
@@ -106,8 +104,8 @@ async def test_short_volume_upsert() -> None:
     )
     assert result["rows_written"] == 2
     rows = conn.statements[0][1]
-    assert {r[3] for r in rows} == {"daily"}
-    assert {str(r[2]) for r in rows} == {"2024-08-19", "2024-08-20"}
+    assert {r[2] for r in rows} == {"daily"}
+    assert {str(r[1]) for r in rows} == {"2024-08-19", "2024-08-20"}
 
 
 @pytest.mark.asyncio

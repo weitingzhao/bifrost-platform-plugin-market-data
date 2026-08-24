@@ -1,7 +1,6 @@
 """Extended financials handlers: ratios / short_interest / short_volume.
 
-All three write into ``market.stock_financials`` (jsonb ``data``) with the
-appropriate ``report_type`` so downstream SEPA/analytics queries can join.
+Wave 8: writes split entity tables (ratios, short_interest, short_volume).
 
 Contract per report_type:
 
@@ -11,16 +10,16 @@ Contract per report_type:
 * ``short_volume``    — one row per calendar ``date``; ``period_type`` = 'daily'.
 
 Handlers are safe to re-run: primary key
-``(symbol, report_type, period_date, period_type)`` triggers ON CONFLICT DO
+``(symbol, period_date, period_type)`` triggers ON CONFLICT DO
 UPDATE with fresh jsonb + fetched_at.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import as_int, parse_date
+from bifrost_market_data.ingest.financials_tables import upsert_financials_rows
 from bifrost_market_data.worker.claim import JobRow
 
 
@@ -33,35 +32,6 @@ def _period_date_of(item: Mapping[str, Any], *fields: str) -> Any:
         if d is not None:
             return d
     return None
-
-
-def _upsert_rows(conn: Any, rows: list[tuple[Any, ...]]) -> int:
-    if not rows:
-        return 0
-    sql = """
-        INSERT INTO raw_market.stock_financials
-            (symbol, report_type, period_date, period_type, fiscal_year, fiscal_quarter, data)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-        ON CONFLICT (symbol, report_type, period_date, period_type) DO UPDATE SET
-            fiscal_year = EXCLUDED.fiscal_year,
-            fiscal_quarter = EXCLUDED.fiscal_quarter,
-            data = EXCLUDED.data,
-            fetched_at = now()
-    """
-    prepared = []
-    for r in rows:
-        data_val = r[6]
-        if isinstance(data_val, (dict, list)):
-            data_val = json.dumps(data_val)
-        prepared.append((r[0], r[1], r[2], r[3], r[4], r[5], data_val))
-    try:
-        with conn.cursor() as cur:
-            cur.executemany(sql, prepared)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    return len(prepared)
 
 
 async def handle_ratios(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
@@ -92,7 +62,7 @@ async def handle_ratios(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any
                 dict(item),
             )
         )
-    n = _upsert_rows(conn, rows)
+    n = upsert_financials_rows(conn, rows)
     return {"rows_written": n, "symbol": symbol}
 
 
@@ -122,7 +92,7 @@ async def handle_short_interest(job: JobRow, client: Any, conn: Any) -> Mapping[
                 dict(item),
             )
         )
-    n = _upsert_rows(conn, rows)
+    n = upsert_financials_rows(conn, rows)
     return {"rows_written": n, "symbol": symbol}
 
 
@@ -152,5 +122,5 @@ async def handle_short_volume(job: JobRow, client: Any, conn: Any) -> Mapping[st
                 dict(item),
             )
         )
-    n = _upsert_rows(conn, rows)
+    n = upsert_financials_rows(conn, rows)
     return {"rows_written": n, "symbol": symbol}

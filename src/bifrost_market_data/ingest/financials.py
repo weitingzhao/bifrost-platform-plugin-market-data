@@ -1,15 +1,15 @@
-"""kind=financials → market.stock_financials (jsonb per statement type)."""
+"""kind=financials → raw_market split entity tables (Wave 8)."""
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import as_int, parse_date
+from bifrost_market_data.ingest.financials_tables import upsert_financials_rows
 from bifrost_market_data.worker.claim import JobRow
 
 # Wave 1 hygiene: stop writing comprehensive_income (197k+ rows unused by
-# SEPA / dbt). Historical rows remain; only new upserts skip this key.
+# SEPA / dbt). Historical rows removed on Wave 8 migration.
 _STATEMENT_KEYS = (
     "income_statement",
     "balance_sheet",
@@ -77,42 +77,10 @@ async def handle_financials(job: JobRow, client: Any, conn: Any) -> Mapping[str,
                 )
             )
 
-    # batch_upsert JSON-encodes dicts; ensure jsonb cast works via ::jsonb in SQL?
-    # Our _prepare_value dumps to JSON string — need cast in SQL for jsonb columns.
-    # Override: write with explicit SQL for financials so data::jsonb is correct.
-    n = _upsert_financials(conn, rows)
+    n = upsert_financials_rows(conn, rows)
     return {
         "rows_written": n,
         "symbol": symbol,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }
-
-
-def _upsert_financials(conn: Any, rows: list[tuple[Any, ...]]) -> int:
-    if not rows:
-        return 0
-    sql = """
-        INSERT INTO raw_market.stock_financials
-            (symbol, report_type, period_date, period_type, fiscal_year, fiscal_quarter, data)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-        ON CONFLICT (symbol, report_type, period_date, period_type) DO UPDATE SET
-            fiscal_year = EXCLUDED.fiscal_year,
-            fiscal_quarter = EXCLUDED.fiscal_quarter,
-            data = EXCLUDED.data,
-            fetched_at = now()
-    """
-    prepared = []
-    for r in rows:
-        data_val = r[6]
-        if isinstance(data_val, (dict, list)):
-            data_val = json.dumps(data_val)
-        prepared.append((r[0], r[1], r[2], r[3], r[4], r[5], data_val))
-    try:
-        with conn.cursor() as cur:
-            cur.executemany(sql, prepared)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    return len(prepared)

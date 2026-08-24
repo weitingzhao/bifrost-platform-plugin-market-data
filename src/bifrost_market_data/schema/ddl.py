@@ -14,6 +14,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from bifrost_market_data.schema.wave8_migrations import (
+    FINANCIALS_ENTITY_TABLES,
+    migrate_option_open_interest_partitioned,
+    migrate_stock_financials_split,
+    retire_data_ops_compat_schema,
+)
+
 
 class _Cursor(Protocol):
     def execute(self, query: str, params: Any = None) -> Any: ...
@@ -31,8 +38,11 @@ def apply_ddl(conn: _Connection) -> None:
         _create_schemas(cur)
         _create_market_tables(cur)
         _create_data_ops_tables(cur)
-        _create_views(cur)
         _create_partition_helper(cur)
+        migrate_option_open_interest_partitioned(cur)
+        migrate_stock_financials_split(cur)
+        retire_data_ops_compat_schema(cur)
+        _create_views(cur)
         _ensure_partitions(cur)
     conn.commit()
 
@@ -318,40 +328,7 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
-    # --- option_open_interest ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS raw_market.option_open_interest (
-            option_ticker  text    NOT NULL,
-            underlying     text    NOT NULL,
-            expiry         date    NOT NULL,
-            strike         double precision NOT NULL,
-            option_right   char(1) NOT NULL,
-            trade_date     date    NOT NULL,
-            open_interest  integer NOT NULL,
-            fetched_at     timestamptz DEFAULT now(),
-            PRIMARY KEY (option_ticker, trade_date)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_date
-        ON raw_market.option_open_interest (underlying, trade_date DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_strike
-        ON raw_market.option_open_interest (underlying, expiry, strike)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_date
-        ON raw_market.option_open_interest (underlying, expiry, trade_date DESC)
-        """
-    )
+    # option_open_interest — Wave 8: PARTITION BY RANGE (trade_date); see wave8_migrations.
 
     # --- ticker (merged tickers + ticker_overview) ---
     cur.execute(
@@ -398,28 +375,7 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
-    # --- stock_financials (jsonb unified fundamentals) ---
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS raw_market.stock_financials (
-            symbol         text    NOT NULL,
-            report_type    text    NOT NULL,
-            period_date    date    NOT NULL,
-            period_type    text    NOT NULL DEFAULT '',
-            fiscal_year    integer,
-            fiscal_quarter integer,
-            data           jsonb   NOT NULL,
-            fetched_at     timestamptz DEFAULT now(),
-            PRIMARY KEY (symbol, report_type, period_date, period_type)
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS stock_financials_symbol_type
-        ON raw_market.stock_financials (symbol, report_type, period_date DESC)
-        """
-    )
+    # stock_financials — Wave 8: split entity tables + compat view (wave8_migrations).
 
     # --- corporate_action ---
     cur.execute(
@@ -579,16 +535,6 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
 
     # Retired: flat is_trading calendar → derive from raw_market.us_market_holiday.
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
-
-    # Platform-api freshness probe still reads legacy data_ops.ingest_freshness.
-    cur.execute("CREATE SCHEMA IF NOT EXISTS data_ops")
-    cur.execute(
-        """
-        CREATE OR REPLACE VIEW data_ops.ingest_freshness AS
-        SELECT dimension, last_run_at, rows_written, status, updated_at
-        FROM ops_jobs.ingest_freshness
-        """
-    )
 
 
 def _create_views(cur: _Cursor) -> None:
@@ -918,6 +864,9 @@ def _ensure_partitions(cur: _Cursor) -> None:
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_daily', 12, 3)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_minute', 12, 3)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_snapshot', 3, 3)")
+    cur.execute(
+        "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_open_interest', 12, 3)"
+    )
     # Tape: day partitions + ~35d window; trim drops partitions older than 30d.
     cur.execute("SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)")
 
@@ -936,7 +885,7 @@ MARKET_TABLES: tuple[str, ...] = (
     "option_expiration",
     "option_open_interest",
     "ticker",
-    "stock_financials",
+    *FINANCIALS_ENTITY_TABLES,
     "corporate_action",
     "us_market_holiday",
     "ticker_related",
@@ -956,4 +905,5 @@ MARKET_VIEWS: tuple[str, ...] = (
     "v_us_equity_universe",
     "v_option_chain_latest",
     "v_option_snapshot_with_stock",
+    "stock_financials",
 )

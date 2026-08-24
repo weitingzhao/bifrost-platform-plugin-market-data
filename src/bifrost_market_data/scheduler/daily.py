@@ -71,9 +71,8 @@ WHERE instrument_type = 'CS'
 
 INCOME_STATEMENT_COVERED_QUERY = """
 SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
-FROM raw_market.stock_financials
-WHERE report_type = 'income_statement'
-  AND symbol IS NOT NULL AND trim(symbol) <> ''
+FROM raw_market.income_statement
+WHERE symbol IS NOT NULL AND trim(symbol) <> ''
 """.strip()
 
 # Wave A IV Radar market-weather ETFs — unioned into eod-pipeline / option paths.
@@ -330,7 +329,7 @@ def load_cs_universe(conn: Any) -> list[str]:
 
 
 def load_income_statement_symbols(conn: Any) -> set[str]:
-    """Symbols that already have an income_statement row in stock_financials."""
+    """Symbols that already have an income_statement row."""
     try:
         with conn.cursor() as cur:
             cur.execute(INCOME_STATEMENT_COVERED_QUERY)
