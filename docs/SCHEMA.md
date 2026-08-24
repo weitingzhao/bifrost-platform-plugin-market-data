@@ -1,7 +1,10 @@
-# Market Data Schema (`market.*` + `market_analytics.*` + `data_ops.*`)
+# Market Data Schema — Golden Source (`bifrost_golden_source`)
+
+> **Canonical schemas (Wave 6.3):** `raw_market.*` (Polygon raw), `features_daily.*` (derived daily metrics), `ops_jobs.*` (ingest queue + freshness).  
+> **Legacy aliases in this doc:** `market.*`, `market_analytics.*`, `data_ops.*` — historical names from pre-pipeline-rename programs; physical tables live under canonical schemas. See `bifrost-trade-core/docs/DATABASE.md`.
 
 Owner review deliverable for program **market-data-subcontractor** Phase **P1**,
-extended by **market-data-expand** Wave **0-A** (`market_analytics`).
+extended by **market-data-expand** Wave **0-A** (`features_daily`, formerly `market_analytics`).
 
 ## Golden Source Model (since W2 — 2026-08-14)
 
