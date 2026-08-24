@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from bifrost_market_data.ingest._upsert import as_float, as_int, batch_upsert, parse_date
+from bifrost_market_data.ingest._upsert import as_float, as_int, batch_upsert, parse_date, physical_table_name
 from bifrost_market_data.worker.claim import JobRow
 
 _COLS = (
@@ -102,7 +102,7 @@ async def handle_ticker_sync(job: JobRow, client: Any, conn: Any) -> Mapping[str
             if rows:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE market.ticker SET updated_at = now() WHERE symbol = %s",
+                        f"UPDATE {physical_table_name('market.ticker')} SET updated_at = now() WHERE symbol = %s",
                         (symbol,),
                     )
             conn.commit()
@@ -153,7 +153,7 @@ async def handle_ticker_sync(job: JobRow, client: Any, conn: Any) -> Mapping[str
             symbols = [r[0] for r in rows]
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE market.ticker SET updated_at = now() WHERE symbol = ANY(%s)",
+                    f"UPDATE {physical_table_name('market.ticker')} SET updated_at = now() WHERE symbol = ANY(%s)",
                     (symbols,),
                 )
         conn.commit()

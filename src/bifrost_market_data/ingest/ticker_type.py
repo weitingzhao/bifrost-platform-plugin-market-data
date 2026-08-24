@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from bifrost_market_data.ingest._upsert import batch_upsert
+from bifrost_market_data.ingest._upsert import batch_upsert, physical_table_name
 from bifrost_market_data.worker.claim import JobRow
 
 _COLS = ("code", "description", "asset_class", "locale", "fetched_at")
@@ -36,7 +36,7 @@ async def handle_ticker_type(job: JobRow, client: Any, conn: Any) -> Mapping[str
 
     try:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE market.ticker_type")
+            cur.execute(f"TRUNCATE {physical_table_name('market.ticker_type')}")
         n = batch_upsert(
             conn,
             "market.ticker_type",

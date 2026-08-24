@@ -23,6 +23,21 @@ _OPTION_TICKER_RE = re.compile(
 
 _NY = ZoneInfo("America/New_York")
 
+# Logical ingest names (market.*) map to Golden Source physical schemas.
+_LOGICAL_TO_PHYSICAL_SCHEMA = {
+    "market": "raw_market",
+    "market_analytics": "features_daily",
+}
+
+
+def physical_table_name(qualified: str) -> str:
+    """Map logical ``market.*`` ingest targets to physical Golden Source tables."""
+    if "." not in qualified:
+        raise ValueError(f"expected qualified table name, got: {qualified!r}")
+    schema, name = qualified.split(".", 1)
+    physical_schema = _LOGICAL_TO_PHYSICAL_SCHEMA.get(schema, schema)
+    return f"{physical_schema}.{name}"
+
 
 class _Cursor(Protocol):
     def execute(self, query: str, params: Any = None) -> Any: ...
@@ -167,6 +182,7 @@ def batch_upsert(
     if not cols or not conflict:
         raise ValueError("columns and conflict_keys are required")
 
+    physical_table = physical_table_name(table)
     updates = list(update_cols) if update_cols is not None else [c for c in cols if c not in conflict]
     set_parts = [f"{c} = EXCLUDED.{c}" for c in updates]
     if set_fetched_at and "fetched_at" not in updates and "fetched_at" not in conflict:
@@ -179,12 +195,12 @@ def batch_upsert(
     conflict_list = ", ".join(conflict)
     if set_parts:
         sql = (
-            f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
+            f"INSERT INTO {physical_table} ({col_list}) VALUES ({placeholders}) "
             f"ON CONFLICT ({conflict_list}) DO UPDATE SET {', '.join(set_parts)}"
         )
     else:
         sql = (
-            f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
+            f"INSERT INTO {physical_table} ({col_list}) VALUES ({placeholders}) "
             f"ON CONFLICT ({conflict_list}) DO NOTHING"
         )
 

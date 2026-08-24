@@ -10,6 +10,7 @@ from bifrost_market_data.ingest._upsert import (
     batch_upsert,
     parse_date,
     parse_option_right,
+    physical_table_name,
 )
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
@@ -97,8 +98,8 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         if contract_rows:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE market.option_contract
+                    f"""
+                    UPDATE {physical_table_name("market.option_contract")}
                     SET updated_at = now()
                     WHERE option_ticker = ANY(%s)
                     """,
@@ -118,8 +119,8 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         if exp_rows:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE market.option_expiration
+                    f"""
+                    UPDATE {physical_table_name("market.option_expiration")}
                     SET updated_at = now()
                     WHERE underlying = %s
                     """,

@@ -682,6 +682,16 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
     # Retired: flat is_trading calendar → derive from raw_market.us_market_holiday.
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
 
+    # Platform-api freshness probe still reads legacy data_ops.ingest_freshness.
+    cur.execute("CREATE SCHEMA IF NOT EXISTS data_ops")
+    cur.execute(
+        """
+        CREATE OR REPLACE VIEW data_ops.ingest_freshness AS
+        SELECT dimension, last_run_at, rows_written, status, updated_at
+        FROM ops_jobs.ingest_freshness
+        """
+    )
+
 
 def _create_views(cur: _Cursor) -> None:
     # CREATE OR REPLACE cannot rename/reorder columns; drop first for idempotent apply.

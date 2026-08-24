@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from bifrost_market_data.ingest._upsert import batch_upsert, parse_date
+from bifrost_market_data.ingest._upsert import batch_upsert, parse_date, physical_table_name
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
     storage_underlying,
@@ -53,8 +53,8 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
         if rows:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE market.option_expiration
+                    f"""
+                    UPDATE {physical_table_name("market.option_expiration")}
                     SET updated_at = now()
                     WHERE underlying = %s
                     """,

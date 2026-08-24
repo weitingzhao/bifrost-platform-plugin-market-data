@@ -38,8 +38,8 @@ async def test_ticker_type_writes_dictionary() -> None:
     result = await handle_ticker_type(make_job("ticker_type", {}), client, conn)
     assert result["rows_written"] == 2
     assert conn.committed == 1
-    assert any("TRUNCATE market.ticker_type" in s[0] for s in conn.statements)
-    assert "market.ticker_type" in conn.upsert_sqls()[0]
+    assert any("TRUNCATE raw_market.ticker_type" in s[0] for s in conn.statements)
+    assert "raw_market.ticker_type" in conn.upsert_sqls()[0]
     rows = [s[1] for s in conn.statements if "INSERT INTO" in s[0]][0]
     assert rows[0][0] == "CS"
     assert rows[0][2] == "stocks"
@@ -52,5 +52,5 @@ async def test_ticker_type_empty_results_truncates() -> None:
     conn = FakeConn()
     result = await handle_ticker_type(make_job("ticker_type", {}), client, conn)
     assert result["rows_written"] == 0
-    assert any("TRUNCATE market.ticker_type" in s[0] for s in conn.statements)
+    assert any("TRUNCATE raw_market.ticker_type" in s[0] for s in conn.statements)
     assert conn.committed == 1
