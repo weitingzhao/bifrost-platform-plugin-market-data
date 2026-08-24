@@ -1,5 +1,6 @@
-# One-shot Wave 8 Golden Source migration (financials split + OI partition).
-# apply_ddl in init_schema.py is idempotent — safe to re-run after deploy.
+# One-shot Golden Source schema migrate (idempotent apply_ddl).
+# Re-run: kubectl delete job job-wave8-schema-migrate -n plugin-market-data --ignore-not-found
+#         kubectl apply -f k8s/base/job-wave8-schema-migrate.yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,12 +22,44 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: 192.168.10.73:30500/bifrost-market-data:0.9.0
+          image: bifrost-market-data:0.9.0
           imagePullPolicy: IfNotPresent
           command: ["python", "scripts/init_schema.py"]
-          envFrom:
-            - secretRef:
-                name: market-data-secrets
-            - configMapRef:
-                name: market-data-config
+          env:
+            - name: MARKET_DATA_CONFIG
+              value: /config/market-data.yaml
+            - name: POLYGON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: polygon-api-key
+                  optional: true
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-host
+                  optional: true
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-password
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /config/market-data.yaml
+              subPath: market-data.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: market-data-config
       serviceAccountName: default
