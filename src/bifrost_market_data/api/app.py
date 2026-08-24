@@ -24,8 +24,10 @@ from bifrost_market_data.api.option_minute import router as option_minute_router
 from bifrost_market_data.api.options import router as options_router
 from bifrost_market_data.api.pcr import router as pcr_router
 from bifrost_market_data.api.readiness_data import router as readiness_data_router
+from bifrost_market_data.api.readiness_summary import router as readiness_summary_router
 from bifrost_market_data.api.reference import router as reference_router
 from bifrost_market_data.api.reference_db import router as reference_db_router
+from bifrost_market_data.api.source_void import router as source_void_router
 from bifrost_market_data.api.status_ext import router as status_ext_router
 from bifrost_market_data.api.stocks import router as stocks_router
 from bifrost_market_data.api.stocks_db import router as stocks_db_router
@@ -63,6 +65,8 @@ def create_app() -> FastAPI:
     app.include_router(stocks_router, prefix=market_prefix)
     app.include_router(market_ops_router, prefix=market_prefix)
     app.include_router(readiness_data_router, prefix=market_prefix)
+    app.include_router(source_void_router, prefix=market_prefix)
+    app.include_router(readiness_summary_router, prefix=market_prefix)
     app.include_router(reference_router, prefix=market_prefix)
     app.include_router(reference_db_router, prefix=market_prefix)
     app.include_router(ingest_ticker_router, prefix=market_prefix)

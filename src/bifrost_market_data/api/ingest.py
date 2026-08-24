@@ -15,6 +15,25 @@ router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 ALLOWED_KINDS = frozenset(raw_handler_kinds())
 
+# Trade Stock Data Readiness backfill aliases → real handler kinds.
+# vendor_gap_fix uses stock_daily_grouped for the latest session fill.
+KIND_ALIASES: dict[str, str] = {
+    "snapshot_backfill": "stock_snapshot",
+    "grouped_daily_backfill": "stock_daily_grouped",
+    "vendor_gap_fix": "stock_daily_grouped",
+    # Trade Stock Data Readiness Steps 4–9 (fin backfill buttons)
+    "feed_stocks_income_statements": "financials",
+    "feed_stocks_balance_sheets": "financials",
+    "feed_stocks_cash_flows": "financials",
+    "feed_stocks_ratios": "ratios",
+    "feed_stocks_short_interest": "short_interest",
+    "feed_stocks_short_volume": "short_volume",
+}
+
+
+def _resolve_kind(kind: str) -> str:
+    return KIND_ALIASES.get(kind, kind)
+
 
 def _job_row_to_api(row: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
     cols = (
@@ -88,12 +107,19 @@ def enqueue_job(
     kind = str(body.get("kind") or "").strip()
     if not kind:
         raise HTTPException(status_code=400, detail="kind is required")
+    kind = _resolve_kind(kind)
     if kind not in ALLOWED_KINDS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid kind; allowed: {sorted(ALLOWED_KINDS)}",
+            detail=(
+                f"Invalid kind; allowed: {sorted(ALLOWED_KINDS)} "
+                f"(aliases: {sorted(KIND_ALIASES)})"
+            ),
         )
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    # grouped_daily / vendor_gap aliases need a trade date when caller omits payload.from
+    if kind == "stock_daily_grouped" and not payload.get("from"):
+        payload = {**payload, "from": datetime.now(timezone.utc).date().isoformat()}
     try:
         priority = int(body.get("priority") or 0)
     except (TypeError, ValueError) as exc:

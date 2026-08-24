@@ -24,13 +24,14 @@
 
 - **单一 Golden Source 数据库**：`bifrost_golden_source`（CNPG 管理）
 - 所有 Trade 环境共享同一数据库实例，不再按环境分离
-- Schema：`market.*`（公共行情）+ `market_analytics.*`（衍生指标）+ `data_ops.*`（作业队列 / freshness）
+- Schema：`raw_market.*`（公共行情）+ `features_daily.*`（衍生）+ `ops_jobs.*`（作业队列 / freshness / **data_source_void**）
 - DDL 归 **本 repo** 管理（`src/bifrost_market_data/schema/ddl.py`）
 - 不依赖 `bifrost-core`；不 import `bifrost-trade-*` Python 包
 - **PG 目标**：CNPG LAN NodePort `192.168.10.73:30432`（见 `config/market-data.yaml.example`）
-  - 覆盖：`POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_PASSWORD` 等环境变量
-  - 本机 `localhost:5432` 不是默认目标
+ - 覆盖：`POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_PASSWORD` 等环境变量
+ - 本机 `localhost:5432` 不是默认目标
 - Trade 消费者通过 Plugin API HTTP（`:8790` via `platform-api` `:8780`）读取，零直接 SQL
+- **Readiness authority (0.7.9+)**: `/market/readiness/summary` · `/market/readiness/source-void` · ingest enqueue aliases (`snapshot_backfill` / `grouped_daily_backfill` / `vendor_gap_fix`). Trade `preference_data_gap_ack` retired.
 
 ## K8s（Single Golden Source）
 

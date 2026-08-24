@@ -646,6 +646,27 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
+    # Operator ack: vendor cannot provide this fundamentals data_type (migrated from
+    # Trade public.preference_data_gap_ack — Golden Source owns data completeness).
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.data_source_void (
+            data_type        text        PRIMARY KEY,
+            is_void          boolean     NOT NULL DEFAULT false,
+            acked_gap_count  integer,
+            note             text,
+            updated_at       timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON TABLE ops_jobs.data_source_void IS
+          'Vendor cannot provide this fundamentals data_type; operator ack. '
+          'Sourced from Trade preference_data_gap_ack (2026-08).'
+        """
+    )
+
     # Retired: flat is_trading calendar → derive from raw_market.us_market_holiday.
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
 
@@ -976,6 +997,7 @@ MARKET_ANALYTICS_TABLES: tuple[str, ...] = (
 DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",
     "ingest_freshness",
+    "data_source_void",
 )
 
 MARKET_VIEWS: tuple[str, ...] = (
