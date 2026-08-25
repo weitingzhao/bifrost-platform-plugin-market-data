@@ -88,6 +88,4 @@ data:
           lookback_days: 30
         # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
         # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
-        readiness-refresh:
-          cron: "30 23 * * *"
-          priority: 0
+        # Wave 14G-A: readiness-refresh slot + CronJob retired (stock_readiness_daily gone).

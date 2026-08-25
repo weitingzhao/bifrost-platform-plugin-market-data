@@ -52,7 +52,12 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "inline": True,
         "migrated": True,
     },
-    "readiness-refresh": {"kinds": [], "freshness": None, "inline": True},
+    "readiness-refresh": {
+        "kinds": [],
+        "freshness": None,
+        "inline": True,
+        "retired": True,
+    },
     "trim": {"kinds": [], "freshness": None, "inline": True},
 }
 
@@ -75,7 +80,7 @@ SLOT_NOTES: dict[str, str] = {
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",
-    "readiness-refresh": "Readiness rollup — RETIRED (inline no-op)",
+    "readiness-refresh": "Readiness rollup — RETIRED (Wave 14G-A; CronJob archived)",
     "trim": "Trim old jobs (inline)",
 }
 

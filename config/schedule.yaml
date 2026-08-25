@@ -82,9 +82,7 @@ scheduler:
       keep_days: 7
       keep_max: 5000
       option_trades_keep_days: 30
-    readiness-refresh:
-      cron: "30 23 * * *"
-      priority: 0
+    # Wave 14G-A: readiness-refresh retired (stock_readiness_daily dropped).
     stock-snapshot:
       cron: "5 21 * * *"
       priority: 4

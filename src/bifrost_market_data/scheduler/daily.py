@@ -471,16 +471,6 @@ def load_option_tickers(
     return tickers
 
 
-def _run_readiness_refresh(conn: Any) -> int:
-    """RETIRED: public.stock_readiness_daily removed from Trade DB (core 0.10.7+)."""
-    _ = conn
-    logger.info(
-        "readiness-refresh retired — stock_readiness_daily dropped; "
-        "use dw_stock.mart_sepa_* via dbt (CronJob suspend must stay true)"
-    )
-    return 0
-
-
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
     slots = dict(scheduler_cfg.get("slots") or {})
     return dict(slots.get(slot) or {})
@@ -582,14 +572,23 @@ def enqueue_slot(
         }
 
     if slot_key == "readiness-refresh":
-        # Inline slot retired — stock_readiness_daily no longer exists on Trade DB.
-        rows_updated = _run_readiness_refresh(conn)
-        logger.info("readiness-refresh retired (rows_updated=%d)", rows_updated)
-        return {"slot": slot_key, "rows_updated": rows_updated, "enqueued": 0, "deduped": 0}
+        # Wave 14G-A: slot kept for CLI/schedule compat; no-op skip only.
+        # stock_readiness_daily dropped; SEPA readiness via Plugin /market/readiness/* + dbt.
+        logger.info(
+            "readiness-refresh skipped — retired (stock_readiness_daily gone; "
+            "use /market/readiness/* + dw_stock.mart_sepa_*)"
+        )
+        return {
+            "slot": slot_key,
+            "skipped": True,
+            "reason": "retired",
+            "enqueued": 0,
+            "deduped": 0,
+        }
 
     if slot_key == "oi-gap-heal":
         # D6=B: weekly DB-to-DB extract over recent trading days (no Polygon).
-        # Inline like readiness-refresh — pure SQL gap-fill, no worker job kind.
+        # Inline — pure SQL gap-fill, no worker job kind.
         from bifrost_market_data.ingest.option_oi_extract import extract_oi_from_snapshots
         from bifrost_market_data.quality import fetch_recent_trading_days
 

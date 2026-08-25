@@ -831,7 +831,8 @@ def test_enqueue_readiness_refresh() -> None:
         scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
     )
     assert result["slot"] == "readiness-refresh"
-    assert result["rows_updated"] == 0  # slot retired — no SRD UPDATE
+    assert result.get("skipped") is True
+    assert result.get("reason") == "retired"
     assert result["enqueued"] == 0
 
 
@@ -845,8 +846,10 @@ def test_readiness_refresh_not_skipped_on_holiday() -> None:
         watchlist_symbols=[],
         scheduler_cfg={"slots": {"readiness-refresh": {"priority": 0}}},
     )
-    assert result.get("skipped") is not True
-    assert result["rows_updated"] == 0
+    # Retired slot skips for reason=retired, not holiday gate.
+    assert result.get("skipped") is True
+    assert result.get("reason") == "retired"
+    assert result["enqueued"] == 0
 
 
 def test_readiness_refresh_commits() -> None:
@@ -917,6 +920,7 @@ def test_resolve_watchlist_prefers_loaded_symbols(monkeypatch: pytest.MonkeyPatc
 
 
 def test_readiness_refresh_missing_table_skips() -> None:
+    """Retired slot never touches stock_readiness_daily (even if mock would raise)."""
     conn = _DailyConn(raise_on_readiness=True)
     result = enqueue_slot(
         conn,
@@ -925,7 +929,8 @@ def test_readiness_refresh_missing_table_skips() -> None:
         scheduler_cfg={},
     )
     assert result["slot"] == "readiness-refresh"
-    assert result["rows_updated"] == 0
+    assert result.get("skipped") is True
+    assert result.get("reason") == "retired"
     assert result["enqueued"] == 0
 
 

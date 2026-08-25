@@ -20,7 +20,6 @@ resources:
   - cronjob-option-trades.yaml
   - cronjob-options-refresh.yaml
   - cronjob-reference.yaml
-  - cronjob-readiness-refresh.yaml
   - cronjob-maintenance.yaml
   - job-wave8-schema-migrate.yaml
 
