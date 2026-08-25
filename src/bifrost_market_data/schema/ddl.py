@@ -32,6 +32,15 @@ class _Connection(Protocol):
     def commit(self) -> None: ...
 
 
+def apply_wave8_migrations(conn: _Connection) -> None:
+    """Wave 8 idempotent migrations only (no full raw_market DDL — safe for bifrost role)."""
+    with conn.cursor() as cur:
+        migrate_option_open_interest_partitioned(cur)
+        migrate_stock_financials_split(cur)
+        retire_data_ops_compat_schema(cur)
+    conn.commit()
+
+
 def apply_ddl(conn: _Connection) -> None:
     """Create schemas, tables, indexes, views, and partition helper (idempotent)."""
     with conn.cursor() as cur:

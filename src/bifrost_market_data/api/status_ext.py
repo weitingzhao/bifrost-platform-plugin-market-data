@@ -15,7 +15,7 @@ router = APIRouter(tags=["status"])
 def query_status_summary(conn: Any) -> dict[str, Any]:
     db = _probe_db()
     freshness: list[dict[str, Any]] = []
-    if table_exists(conn, "data_ops", "ingest_freshness"):
+    if table_exists(conn, "ops_jobs", "ingest_freshness"):
         try:
             with conn.cursor() as cur:
                 cur.execute(

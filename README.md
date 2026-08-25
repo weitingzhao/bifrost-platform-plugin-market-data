@@ -1,6 +1,6 @@
 # bifrost-platform-plugin-market-data
 
-Bifrost **Market Data Subcontractor** — Polygon.io market data ingestion into PostgreSQL schemas `market.*` and `data_ops.*`.
+Bifrost **Market Data Subcontractor** — Polygon.io market data ingestion into PostgreSQL schemas `raw_market.*` and `ops_jobs.*`.
 
 ## Scope
 

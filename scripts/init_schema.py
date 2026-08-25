@@ -20,6 +20,7 @@ from bifrost_market_data.schema.ddl import (  # noqa: E402
     MARKET_TABLES,
     MARKET_VIEWS,
     apply_ddl,
+    apply_wave8_migrations,
 )
 
 _ROLES_SQL = _ROOT / "scripts" / "create_roles.sql"
@@ -71,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only apply create_roles.sql (no DDL)",
     )
+    parser.add_argument(
+        "--wave8-only",
+        action="store_true",
+        help="Only apply Wave 8 migrations (OI partition, financials split, drop data_ops shim)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -82,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"market_analytics tables: {', '.join(MARKET_ANALYTICS_TABLES)}")
     else:
         print("market_analytics tables: (retired — features.* owned by bifrost-research)")
-    print(f"data_ops tables: {', '.join(DATA_OPS_TABLES)}")
+    print(f"ops_jobs tables: {', '.join(DATA_OPS_TABLES)}")
     print(f"market views: {', '.join(MARKET_VIEWS)}")
 
     if args.dry_run:
@@ -99,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         with psycopg.connect(**kw) as conn:
             if args.roles_only:
                 _apply_roles(conn)
+            elif args.wave8_only:
+                apply_wave8_migrations(conn)
             else:
                 apply_ddl(conn)
                 if not args.skip_roles:
@@ -109,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.roles_only:
         print("Roles apply finished.")
+    elif args.wave8_only:
+        print("Wave 8 migrations applied (idempotent).")
     else:
         print("DDL applied successfully (schemas raw_market + ops_jobs).")
     return 0

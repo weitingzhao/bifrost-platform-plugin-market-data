@@ -77,7 +77,7 @@ def query_daily_checklist(
     syms = [normalize_symbol(s) for s in symbols if normalize_symbol(s)]
     checklist: dict[str, dict[str, Any]] = {}
     freshness_by_dim: dict[str, Any] = {}
-    if table_exists(conn, "data_ops", "ingest_freshness"):
+    if table_exists(conn, "ops_jobs", "ingest_freshness"):
         with conn.cursor() as cur:
             cur.execute(
                 """

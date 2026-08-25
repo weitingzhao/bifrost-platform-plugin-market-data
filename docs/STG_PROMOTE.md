@@ -20,7 +20,7 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 
 | Step | Status |
 |------|--------|
-| `market` / `data_ops` DDL (`POSTGRES_DB=bifrost_stg`) | done |
+| `market` / `ops_jobs` DDL (`POSTGRES_DB=bifrost_stg`) | done |
 | `public.ticker_related_tickers` → `market.ticker_related` (Golden Source) | done (2026-08-19) |
 | `scripts/create_roles.sql` | done |
 | `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`) |
@@ -45,13 +45,13 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 
 `price_ready` requires ≥**240** `market.stock_daily` bars in a ~420d window. After P9 cutover the span was only ~2026-06-01…2026-07-31 (~2 bars/symbol avg) → `price_ready=0`.
 
-**Backfill path** (running on `bifrost_dev`): enqueue weekday `stock_daily_grouped` jobs from ~2025-06-01 → latest session into `data_ops.job_ingest`; polygon-worker-stocks consumes them. Re-snapshot readiness after depth grows (`syms ≥240` / rollup `price_ready`).
+**Backfill path** (running on `bifrost_dev`): enqueue weekday `stock_daily_grouped` jobs from ~2025-06-01 → latest session into `ops_jobs.job_ingest`; polygon-worker-stocks consumes them. Re-snapshot readiness after depth grows (`syms ≥240` / rollup `price_ready`).
 
 ```bash
 # Progress
 PRIMARY=$(kubectl -n data get cluster bifrost-postgres -o jsonpath='{.status.currentPrimary}')
 kubectl -n data exec "$PRIMARY" -c postgres -- psql -d bifrost_dev -c "
-SELECT status, count(*) FROM data_ops.job_ingest
+SELECT status, count(*) FROM ops_jobs.job_ingest
  WHERE kind='stock_daily_grouped' AND created_at > now() - interval '1 day'
  GROUP BY status;
 SELECT count(*) FILTER (WHERE c >= 240) AS ge240, round(avg(c)::numeric,1) AS avg_bars
@@ -95,12 +95,12 @@ SELECT 'legacy=' || count(*) FROM information_schema.tables
  WHERE table_schema='public' AND table_name IN (
    'stock_day','tickers','job_massive_backfill','option_snapshots');
 SELECT 'ticker=' || count(*) FROM market.ticker;
-SELECT 'pending_ticker_sync=' || count(*) FROM data_ops.job_ingest
+SELECT 'pending_ticker_sync=' || count(*) FROM ops_jobs.job_ingest
  WHERE kind='ticker_sync' AND status='pending';
-SELECT 'pending_financials=' || count(*) FROM data_ops.job_ingest
+SELECT 'pending_financials=' || count(*) FROM ops_jobs.job_ingest
  WHERE kind='financials' AND status='pending';
 SELECT dimension, last_run_at, status, rows_written
-  FROM data_ops.ingest_freshness
+  FROM ops_jobs.ingest_freshness
  WHERE dimension IN ('ticker_sync','financials')
  ORDER BY dimension;
 "

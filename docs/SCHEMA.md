@@ -29,7 +29,7 @@ has been retired; all environments share one ingest instance writing to
 **`bifrost_golden_source`** (target database name after Owner-gated rename).
 
 - **One Plugin namespace** (`plugin-market-data`) serves all Trade environments
-- **One database** with schemas `market`, `market_analytics`, `data_ops`
+- **One database** with schemas `raw_market`, `features.*` (Research), `ops_jobs`
 - **Watchlist union mode**: Plugin reads the union of all Trade environment watchlists
   via `platform-api` (`GET /api/v1/watchlist/union`)
 - **Trade consumers** read exclusively through Plugin API HTTP (`:8790` proxied via
@@ -58,7 +58,7 @@ psql -f scripts/create_roles.sql
 | Identity | `symbol` uppercase TRIM at write time; options keyed by Polygon `option_ticker` (`O:AAPL250620C00150000`) |
 | Partitioning | Year for `stock_daily`; month for minute / option daily / snapshot / analytics; **day** for `option_trades` (30d retention); **no partition** for `stock_snapshot` / `stock_movers` (daily upsert by session_date) |
 | Fundamentals | One jsonb table (`stock_financials`) instead of six flat tables |
-| Jobs | `data_ops.job_ingest` is the broker (`SELECT FOR UPDATE SKIP LOCKED` in P3) |
+| Jobs | `ops_jobs.job_ingest` is the broker (`SELECT FOR UPDATE SKIP LOCKED` in P3) |
 | Analytics | Derived daily metrics in `market_analytics.*` (computed from `market.*`; no live vendor calls in DDL) |
 
 ---
@@ -81,7 +81,7 @@ Replaces `public.stock_day`.
 
 **PK:** `(symbol, bar_date)`  
 **Indexes:** `(symbol, bar_date DESC)`  
-**Partitions:** `stock_daily_yYYYY` + `stock_daily_default` via `data_ops.ensure_year_partitions`
+**Partitions:** `stock_daily_yYYYY` + `stock_daily_default` via `ops_jobs.ensure_year_partitions`
 
 ### `market.stock_minute`
 
@@ -177,8 +177,8 @@ Used by Research Order Flow when present (`data_source=option_trades_tape`).
 | fetched_at | timestamptz | ingest wall clock |
 
 **PK:** `(option_ticker, trade_date, sip_ts, sequence_number)`  
-**Partitions:** `option_trades_dYYYYMMDD` + default via `data_ops.ensure_day_partitions`  
-**Retention:** 30 days — `trim` slot calls `data_ops.drop_day_partitions_older_than(..., 30)`  
+**Partitions:** `option_trades_dYYYYMMDD` + default via `ops_jobs.ensure_day_partitions`  
+**Retention:** 30 days — `trim` slot calls `ops_jobs.drop_day_partitions_older_than(..., 30)`  
 **Job kind:** `option_trades` · slot `option-trades` (~23:00 UTC)  
 **Universe:** SPX ∪ Trade watchlist (sorted union truncated to 50, always include SPX)
 
@@ -343,9 +343,9 @@ Option snapshot joined to same-day `market.stock_daily` close (NY calendar date)
 
 ---
 
-## `data_ops` tables
+## `ops_jobs` tables
 
-### `data_ops.job_ingest`
+### `ops_jobs.job_ingest`
 
 Replaces `public.job_massive_backfill` as the PG-as-broker queue.
 
@@ -364,7 +364,7 @@ Replaces `public.job_massive_backfill` as the PG-as-broker queue.
 **Partial unique index:** `(kind, payload_hash)` WHERE `status IN ('pending','running') AND payload_hash IS NOT NULL`  
 **Claim index:** `(status, priority DESC, created_at)`
 
-### `data_ops.ingest_freshness`
+### `ops_jobs.ingest_freshness`
 
 Per-dimension freshness for Platform probes (`dimension` PK).
 
@@ -376,8 +376,8 @@ Per-dimension freshness for Platform probes (`dimension` PK).
 
 | Function | Use |
 |----------|-----|
-| `data_ops.ensure_year_partitions(schema, table, years_back, years_forward)` | `stock_daily` |
-| `data_ops.ensure_month_partitions(schema, table, months_back, months_forward)` | minute / option daily / snapshot / analytics |
+| `ops_jobs.ensure_year_partitions(schema, table, years_back, years_forward)` | `stock_daily` |
+| `ops_jobs.ensure_month_partitions(schema, table, months_back, months_forward)` | minute / option daily / snapshot / analytics |
 
 `apply_ddl()` calls these after table creation:
 
@@ -401,8 +401,8 @@ Each partitioned parent also gets a `*_default` partition for out-of-range value
 
 | Role | Access |
 |------|--------|
-| `data_writer` | USAGE/CREATE + ALL on `market`, `market_analytics`, and `data_ops` |
-| `market_reader` | SELECT on `market.*` + `market_analytics.*`; SELECT on selected `data_ops` status tables |
+| `data_writer` | USAGE/CREATE + ALL on `raw_market` and `ops_jobs` |
+| `market_reader` | SELECT on `raw_market.*`; SELECT on selected `ops_jobs` status tables |
 
 Passwords in the SQL file are placeholders (`CHANGE_ME_*`).  
 Apply DDL (`make db-init`) before `scripts/create_roles.sql` so schemas exist.
@@ -418,7 +418,7 @@ FastAPI app: `src/bifrost_market_data/api/app.py`. OpenAPI at `/docs`.
 | Health | `/health` | DB probe; always HTTP 200 |
 | Status | `/market/status` | Plugin + DB + key-configured bool |
 | Analytics | `/market/analytics/*` | Table reads + max-pain live compute |
-| Ingest | `/market/ingest/*` | `POST enqueue` → `data_ops.job_ingest` (D15=A) |
+| Ingest | `/market/ingest/*` | `POST enqueue` → `ops_jobs.job_ingest` (D15=A) |
 | Options | `/market/options/*` | DB expirations / snapshots / OI |
 | Stocks / fundamentals / filings | `/market/stocks/*` | Polygon pass-through (D14=A) |
 | Market ops | `/market/market-ops/*` | Conditions / exchanges / holidays / status |

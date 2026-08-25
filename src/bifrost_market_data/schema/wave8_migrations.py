@@ -101,8 +101,10 @@ def create_stock_financials_compat_view(cur: _Cursor) -> None:
 
 def migrate_stock_financials_split(cur: _Cursor) -> None:
     """Backfill split tables from legacy stock_financials table; replace with compat view."""
-    create_financials_entity_tables(cur)
     relkind = _table_relkind(cur, "raw_market", "stock_financials")
+    if relkind == "v":
+        return
+    create_financials_entity_tables(cur)
     if relkind != "r":
         create_stock_financials_compat_view(cur)
         return

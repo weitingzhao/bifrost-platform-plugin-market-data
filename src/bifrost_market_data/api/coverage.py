@@ -201,7 +201,7 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
         "corporate_action": safe_count(conn, "market.corporate_action"),
     }
     freshness: list[dict[str, Any]] = []
-    if table_exists(conn, "data_ops", "ingest_freshness"):
+    if table_exists(conn, "ops_jobs", "ingest_freshness"):
         try:
             with conn.cursor() as cur:
                 cur.execute(
