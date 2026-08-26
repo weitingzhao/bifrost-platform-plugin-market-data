@@ -101,8 +101,8 @@ def require_db() -> Any:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
-def table_exists(conn: Any, schema: str, table: str) -> bool:
-    """Return True when ``schema.table`` is present."""
+def _relation_exists(conn: Any, schema: str, table: str) -> bool:
+    """Exact ``schema.table`` presence check (no aliasing)."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -119,14 +119,35 @@ def table_exists(conn: Any, schema: str, table: str) -> bool:
         return False
 
 
+def resolve_market_schema(conn: Any, schema: str, table: str) -> str | None:
+    """Resolve logical schema for Golden Source tables.
+
+    Wave relocate: persisted Polygon tables live under ``raw_market.*``. Call sites
+    still pass ``market`` for historical reasons — treat it as an alias.
+    """
+    if _relation_exists(conn, schema, table):
+        return schema
+    if schema == "market" and _relation_exists(conn, "raw_market", table):
+        return "raw_market"
+    return None
+
+
+def table_exists(conn: Any, schema: str, table: str) -> bool:
+    """Return True when ``schema.table`` is present (``market`` → ``raw_market`` alias)."""
+    return resolve_market_schema(conn, schema, table) is not None
+
+
 def safe_count(conn: Any, qualified_table: str) -> int | None:
     """``COUNT(*)`` on a table; return None when missing or on error."""
     schema, _, name = qualified_table.partition(".")
-    if not schema or not name or not table_exists(conn, schema, name):
+    if not schema or not name:
+        return None
+    resolved = resolve_market_schema(conn, schema, name)
+    if not resolved:
         return None
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*)::bigint FROM {qualified_table}")
+            cur.execute(f"SELECT COUNT(*)::bigint FROM {resolved}.{name}")
             row = cur.fetchone()
         if row is None:
             return 0
