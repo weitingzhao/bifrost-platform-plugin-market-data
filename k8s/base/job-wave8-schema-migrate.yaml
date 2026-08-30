@@ -37,7 +37,7 @@ spec:
               exit 1
       containers:
         - name: migrate
-          image: 192.168.10.73:30500/bifrost-market-data:0.9.3
+          image: 192.168.10.73:30500/bifrost-market-data:0.9.4
           imagePullPolicy: Always
           command: ["python", "scripts/init_schema.py", "--wave8-only"]
           env:

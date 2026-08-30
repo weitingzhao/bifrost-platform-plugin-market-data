@@ -8,7 +8,15 @@ from typing import Any, Mapping
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 
 from bifrost_market_data.api.deps import iso_value, require_db, require_write_token, row_dict
+from bifrost_market_data.config import load_config
 from bifrost_market_data.ingest import raw_handler_kinds
+from bifrost_market_data.scheduler.daily import (
+    SLOT_NAMES,
+    enqueue_slot,
+    load_schedule,
+    load_watchlist_symbols,
+    resolve_target_date,
+)
 from bifrost_market_data.scheduler.enqueue import insert_job
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
@@ -170,6 +178,60 @@ def enqueue_job(
             "deduplicated": False,
             "kind": kind,
         }
+    finally:
+        conn.close()
+
+
+@router.post("/enqueue-slot", dependencies=[Depends(require_write_token)])
+def enqueue_schedule_slot(
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Enqueue all jobs for a schedule slot (same as Cron ``scheduler.daily --slot``).
+
+    Body: ``{ "slot": "stock-eod"|"eod-pipeline"|..., "date": "YYYY-MM-DD?", "force": false }``
+    Used by Dagster batch assets — workers remain the executors.
+    """
+    slot = str(body.get("slot") or "").strip().lower()
+    if not slot:
+        raise HTTPException(status_code=400, detail="slot is required")
+    if slot not in SLOT_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown slot; allowed: {sorted(SLOT_NAMES)}",
+        )
+    force = bool(body.get("force") or False)
+    date_raw = body.get("date")
+    target = None
+    if date_raw:
+        try:
+            from datetime import date as date_cls
+
+            target = date_cls.fromisoformat(str(date_raw)[:10])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from exc
+
+    cfg = load_config()
+    schedule = load_schedule()
+    scheduler_cfg = dict(schedule.get("scheduler") or {})
+    if isinstance(cfg.get("scheduler"), dict):
+        merged = dict(scheduler_cfg)
+        merged.update(cfg["scheduler"])
+        scheduler_cfg = merged
+
+    conn = require_db()
+    try:
+        symbols = load_watchlist_symbols(conn, scheduler_cfg)
+        result = enqueue_slot(
+            conn,
+            slot,
+            target_date=resolve_target_date(target),
+            watchlist_symbols=symbols,
+            scheduler_cfg=scheduler_cfg,
+            force=force,
+        )
+        return {"ok": True, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         conn.close()
 

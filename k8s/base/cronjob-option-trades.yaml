@@ -11,6 +11,8 @@ metadata:
 spec:
   schedule: "0 23 * * *"
   timeZone: UTC
+  # Suspended: Dagster multi-schedule owns this slot
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

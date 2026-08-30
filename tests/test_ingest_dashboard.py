@@ -137,3 +137,34 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stock["drain"]["started_at"] == "2026-08-16T21:30:00Z"
     assert stock["drain"]["active"] is True
     assert stock["drain"]["ended_at"] is None
+    assert "husbandry" in report
+    assert report["husbandry"]["verdict"] in ("draining", "due", "missed", "healthy")
+
+
+def test_trim_slot_on_plan_via_job_trim_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline trim has no job_ingest rows; job_trim freshness clears false MISSED."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {
+            "scheduler": {
+                "slots": {
+                    "trim": {"cron": "15 2 * * *"},
+                }
+            }
+        },
+    )
+    conn = _DashConn()
+    # Last fire would be 02:15 UTC today; freshness after that ⇒ on_plan
+    now = datetime(2026, 8, 17, 4, 0, tzinfo=timezone.utc)
+    conn.freshness_rows = [
+        ("job_trim", datetime(2026, 8, 17, 2, 16, tzinfo=timezone.utc), 100, "ok"),
+    ]
+    conn.window_rows = []
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    trim = next(s for s in report["schedule"]["slots"] if s["slot"] == "trim")
+    assert trim["adherence"] == "on_plan"
+    assert trim["freshness_dimension"] == "job_trim"
+    assert report["schedule"]["missed"] == 0

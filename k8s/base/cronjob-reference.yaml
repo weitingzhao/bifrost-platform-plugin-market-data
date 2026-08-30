@@ -12,6 +12,8 @@ metadata:
 spec:
   schedule: "30 21 * * *"
   timeZone: UTC
+  # Suspended: Dagster multi-schedule owns this slot
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -89,6 +91,8 @@ metadata:
 spec:
   schedule: "0 3 * * *"
   timeZone: UTC
+  # Suspended: Dagster multi-schedule owns this slot
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -166,6 +170,8 @@ metadata:
 spec:
   schedule: "30 22 * * *"
   timeZone: UTC
+  # Suspended: Dagster multi-schedule owns this slot
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

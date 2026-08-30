@@ -58,7 +58,8 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "inline": True,
         "retired": True,
     },
-    "trim": {"kinds": [], "freshness": None, "inline": True},
+    # Inline maintenance — no job_ingest rows; evidence is ops_jobs.ingest_freshness.job_trim
+    "trim": {"kinds": [], "freshness": "job_trim", "inline": True},
 }
 
 SLOT_NOTES: dict[str, str] = {
@@ -561,9 +562,31 @@ def build_queue_dashboard(
     else:
         schedule_verdict = "on_plan"
 
+    if schedule_verdict == "missed":
+        husbandry_verdict = "missed"
+        husbandry_detail = f"{missed} slot(s) missed cron adherence"
+    elif schedule_verdict == "due":
+        husbandry_verdict = "due"
+        husbandry_detail = f"{due} slot(s) within grace window"
+    elif queue_verdict == "draining":
+        husbandry_verdict = "draining"
+        if eta_min is not None:
+            husbandry_detail = f"{queue['pending']} pending · eta {eta_min}m"
+        else:
+            husbandry_detail = f"{queue['pending']} pending"
+    else:
+        husbandry_verdict = "healthy"
+        husbandry_detail = f"{on_plan} slots on plan · queue idle"
+
     return {
         "ok": True,
         "generated_at": iso_z(now_utc),
+        "husbandry": {
+            "verdict": husbandry_verdict,
+            "detail": husbandry_detail,
+            "schedule": schedule_verdict,
+            "queue": queue_verdict,
+        },
         "model": {
             "ready_now": "pending jobs waiting for worker claim (SKIP LOCKED)",
             "running": "jobs claimed by workers",

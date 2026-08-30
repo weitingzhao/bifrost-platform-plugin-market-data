@@ -23,6 +23,7 @@ from bifrost_market_data.ingest.index_options import (
     spot_api_symbol,
     storage_underlying,
 )
+from bifrost_market_data.freshness import update_freshness
 from bifrost_market_data.scheduler.enqueue import insert_job, trim_old_jobs
 
 logger = logging.getLogger(__name__)
@@ -510,6 +511,10 @@ def enqueue_slot(
         keep_days = int(scfg.get("keep_days") or 7)
         keep_max = int(scfg.get("keep_max") or 5000)
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
+        try:
+            update_freshness(conn, "job_trim", int(deleted or 0), status="ok")
+        except Exception as exc:  # noqa: BLE001 — freshness must not fail trim
+            logger.warning("job_trim freshness update failed: %s", exc)
         trades_keep = int(scfg.get("option_trades_keep_days") or 30)
         snapshot_keep = int(scfg.get("option_snapshot_keep_days") or 90)
         partitions_dropped = 0
