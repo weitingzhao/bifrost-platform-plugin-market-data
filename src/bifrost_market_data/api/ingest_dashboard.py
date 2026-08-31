@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
-from bifrost_market_data.scheduler.daily import load_schedule
+from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
+from bifrost_market_data.trading_calendar import is_trading_day
 
 # Swimlane horizon (UTC). Drain lookback is longer so weekend catch-up bars clip in.
 SWIMLANE_PAST = timedelta(hours=24)
@@ -349,6 +350,40 @@ def _oldest_pending_age_sec(conn: Any, now: datetime) -> float | None:
     return max(0.0, (now - ts).total_seconds())
 
 
+def _previous_expected_fire(
+    conn: Any,
+    *,
+    slot_id: str,
+    cron: str,
+    before: datetime,
+) -> datetime | None:
+    """Most recent cron fire that should have produced evidence.
+
+    Holiday-skip slots do not enqueue on weekends / NYSE closed days — evaluating
+    adherence against those fires creates false ``missed`` after Fri EOD.
+    """
+    last = previous_fire(cron, before=before)
+    if last is None:
+        return None
+    if slot_id not in SKIP_ON_HOLIDAY_SLOTS:
+        return last
+    cursor: datetime | None = last
+    for _ in range(21):
+        if cursor is None:
+            return None
+        try:
+            if is_trading_day(conn, cursor.date()):
+                return cursor
+        except Exception:
+            # Calendar probe failure → fall back to raw cron fire (fail open).
+            return last
+        prev = previous_fire(cron, before=cursor)
+        if prev is None or prev >= cursor:
+            return None
+        cursor = prev
+    return None
+
+
 def _slot_adherence(
     conn: Any,
     *,
@@ -390,8 +425,9 @@ def _slot_adherence(
             "drain": None,
         }
     try:
-        last = previous_fire(cron, before=now)
+        last = _previous_expected_fire(conn, slot_id=slot_id, cron=cron, before=now)
         nxt = next_fires(cron, after=now, count=3)
+        cron_last = previous_fire(cron, before=now)
     except ValueError as exc:
         return {
             "slot": slot_id,
@@ -409,6 +445,39 @@ def _slot_adherence(
     last_iso = iso_z(last)
     next_iso = [iso_z(t) for t in nxt]
     if last is None:
+        # Only non-trading cron fires in lookback (weekend / holiday) — not a miss.
+        if slot_id in SKIP_ON_HOLIDAY_SLOTS and cron_last is not None:
+            return {
+                "slot": slot_id,
+                "cron": cron,
+                "note": SLOT_NOTES.get(slot_id, ""),
+                "ok": True,
+                "adherence": "on_plan",
+                "detail": (
+                    f"non-trading day skip — no enqueue expected "
+                    f"(cron_last={iso_z(cron_last)})"
+                ),
+                "last_fire": iso_z(cron_last),
+                "next_fires": next_iso,
+                "grace_ends_at": None,
+                "inline": inline,
+                "evidence_kinds": kinds,
+                "jobs_in_window": {
+                    "created": 0,
+                    "done": 0,
+                    "failed": 0,
+                    "pending": 0,
+                    "running": 0,
+                },
+                "freshness_dimension": fresh_dim,
+                "freshness_last_run_at": (
+                    freshness[fresh_dim].get("last_run_at")
+                    if fresh_dim and fresh_dim in freshness
+                    else None
+                ),
+                "fires_in_window": fires_iso,
+                "drain": drain,
+            }
         return {
             "slot": slot_id,
             "cron": cron,

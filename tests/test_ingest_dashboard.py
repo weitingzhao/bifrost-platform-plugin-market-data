@@ -141,8 +141,8 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["husbandry"]["verdict"] in ("draining", "due", "missed", "healthy")
 
 
-def test_trim_slot_on_plan_via_job_trim_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inline trim has no job_ingest rows; job_trim freshness clears false MISSED."""
+def test_eod_pipeline_weekend_cron_not_false_missed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sunday cron fire must not mark eod-pipeline missed after Fri EOD evidence."""
     from bifrost_market_data.api import ingest_dashboard as mod
 
     monkeypatch.setattr(
@@ -151,20 +151,25 @@ def test_trim_slot_on_plan_via_job_trim_freshness(monkeypatch: pytest.MonkeyPatc
         lambda: {
             "scheduler": {
                 "slots": {
-                    "trim": {"cron": "15 2 * * *"},
+                    "eod-pipeline": {"cron": "0 22 * * *"},
                 }
             }
         },
     )
+    monkeypatch.setattr(mod, "is_trading_day", lambda _conn, d: d.weekday() < 5)
+
     conn = _DashConn()
-    # Last fire would be 02:15 UTC today; freshness after that ⇒ on_plan
-    now = datetime(2026, 8, 17, 4, 0, tzinfo=timezone.utc)
+    # Fri EOD completed Sat morning — freshness after Fri 22:00 UTC fire.
     conn.freshness_rows = [
-        ("job_trim", datetime(2026, 8, 17, 2, 16, tzinfo=timezone.utc), 100, "ok"),
+        ("option_snapshot", datetime(2026, 8, 30, 5, 31, tzinfo=timezone.utc), 50, "ok"),
+        ("option_open_interest", datetime(2026, 8, 30, 5, 31, tzinfo=timezone.utc), 50, "ok"),
     ]
     conn.window_rows = []
+    # Monday mid-day UTC — previous cron fire is Sunday 22:00 (non-trading).
+    now = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
     report = build_queue_dashboard(conn, now=now, grace_minutes=45)
-    trim = next(s for s in report["schedule"]["slots"] if s["slot"] == "trim")
-    assert trim["adherence"] == "on_plan"
-    assert trim["freshness_dimension"] == "job_trim"
+    eod = next(s for s in report["schedule"]["slots"] if s["slot"] == "eod-pipeline")
+    assert eod["adherence"] == "on_plan"
+    assert eod["last_fire"] == "2026-08-28T22:00:00Z"  # Fri trading-day fire
     assert report["schedule"]["missed"] == 0
+    assert report["husbandry"]["verdict"] != "missed"

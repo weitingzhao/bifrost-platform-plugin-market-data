@@ -53,6 +53,23 @@ SLOT_NAMES = (
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
 MIGRATED_ANALYTICS_SLOTS = frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"})
 
+# Slots that skip enqueue on NYSE closed / weekend (must match adherence logic).
+SKIP_ON_HOLIDAY_SLOTS = frozenset(
+    {
+        "stock-eod",
+        "eod-pipeline",
+        "universe-daily",
+        "corporate",
+        "option-bars",
+        "option-trades",
+        "minute-bars",
+        "fundamentals-rotate",
+        "related-rotate",
+        "stock-snapshot",
+        "stock-movers",
+    }
+)
+
 DEFAULT_WATCHLIST_QUERY = """
 SELECT DISTINCT symbol FROM public.watchlist
 WHERE sec_type = 'STK' AND optionable = true
@@ -636,19 +653,7 @@ def enqueue_slot(
             **extract_result,
         }
 
-    skip_on_holiday = slot_key in (
-        "stock-eod",
-        "eod-pipeline",
-        "universe-daily",
-        "corporate",
-        "option-bars",
-        "option-trades",
-        "minute-bars",
-        "fundamentals-rotate",
-        "related-rotate",
-        "stock-snapshot",
-        "stock-movers",
-    )
+    skip_on_holiday = slot_key in SKIP_ON_HOLIDAY_SLOTS
     if skip_on_holiday and not force and not is_trading_day(conn, day):
         logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
         return {
