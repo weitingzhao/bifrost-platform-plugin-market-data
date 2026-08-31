@@ -356,32 +356,67 @@ def _previous_expected_fire(
     slot_id: str,
     cron: str,
     before: datetime,
-) -> datetime | None:
-    """Most recent cron fire that should have produced evidence.
+) -> tuple[datetime | None, str]:
+    """Return ``(fire, mode)`` for adherence evidence.
 
-    Holiday-skip slots do not enqueue on weekends / NYSE closed days — evaluating
-    adherence against those fires creates false ``missed`` after Fri EOD.
+    ``mode``:
+    - ``cron`` — evaluate the raw previous cron fire
+    - ``trading`` — weekend/holiday cron had no evidence; fall back to last
+      NYSE session fire (Fri EOD must still show freshness/jobs)
+    - ``skip`` — only non-trading fires in lookback and no evidence (ok)
     """
     last = previous_fire(cron, before=before)
     if last is None:
-        return None
+        return None, "cron"
     if slot_id not in SKIP_ON_HOLIDAY_SLOTS:
-        return last
+        return last, "cron"
+    try:
+        trading = is_trading_day(conn, last.date())
+    except Exception:
+        return last, "cron"
+    if trading:
+        return last, "cron"
+
+    # Non-trading cron tick: Dagster may still enqueue with rolled-back target
+    # date — caller should prefer evidence on ``last`` when present.
     cursor: datetime | None = last
     for _ in range(21):
-        if cursor is None:
-            return None
+        prev = previous_fire(cron, before=cursor) if cursor is not None else None
+        if prev is None or (cursor is not None and prev >= cursor):
+            return None, "skip"
         try:
-            if is_trading_day(conn, cursor.date()):
-                return cursor
+            if is_trading_day(conn, prev.date()):
+                return prev, "trading"
         except Exception:
-            # Calendar probe failure → fall back to raw cron fire (fail open).
-            return last
-        prev = previous_fire(cron, before=cursor)
-        if prev is None or prev >= cursor:
-            return None
+            return last, "cron"
         cursor = prev
-    return None
+    return None, "skip"
+
+
+def _evidence_for_fire(
+    conn: Any,
+    *,
+    kinds: list[str],
+    fresh_dim: str | None,
+    freshness: Mapping[str, dict[str, Any]],
+    fire: datetime,
+    now: datetime,
+    grace_minutes: int,
+) -> tuple[bool, dict[str, int], bool, str | None, datetime]:
+    grace_end = fire + timedelta(minutes=grace_minutes)
+    window_end = min(now, grace_end + timedelta(hours=2))
+    counts = _count_jobs_in_window(conn, kinds=kinds, start=fire, end=window_end)
+    fresh_hit = False
+    fresh_last: str | None = None
+    if fresh_dim and fresh_dim in freshness:
+        fresh_last = freshness[fresh_dim].get("last_run_at")  # type: ignore[assignment]
+        raw_last = freshness[fresh_dim].get("_last")
+        if isinstance(raw_last, datetime):
+            if raw_last.tzinfo is None:
+                raw_last = raw_last.replace(tzinfo=timezone.utc)
+            fresh_hit = raw_last >= fire
+    evidence_ok = (counts["created"] > 0) or fresh_hit
+    return evidence_ok, counts, fresh_hit, fresh_last, grace_end
 
 
 def _slot_adherence(
@@ -425,9 +460,8 @@ def _slot_adherence(
             "drain": None,
         }
     try:
-        last = _previous_expected_fire(conn, slot_id=slot_id, cron=cron, before=now)
-        nxt = next_fires(cron, after=now, count=3)
         cron_last = previous_fire(cron, before=now)
+        nxt = next_fires(cron, after=now, count=3)
     except ValueError as exc:
         return {
             "slot": slot_id,
@@ -442,42 +476,8 @@ def _slot_adherence(
             "drain": drain,
         }
 
-    last_iso = iso_z(last)
     next_iso = [iso_z(t) for t in nxt]
-    if last is None:
-        # Only non-trading cron fires in lookback (weekend / holiday) — not a miss.
-        if slot_id in SKIP_ON_HOLIDAY_SLOTS and cron_last is not None:
-            return {
-                "slot": slot_id,
-                "cron": cron,
-                "note": SLOT_NOTES.get(slot_id, ""),
-                "ok": True,
-                "adherence": "on_plan",
-                "detail": (
-                    f"non-trading day skip — no enqueue expected "
-                    f"(cron_last={iso_z(cron_last)})"
-                ),
-                "last_fire": iso_z(cron_last),
-                "next_fires": next_iso,
-                "grace_ends_at": None,
-                "inline": inline,
-                "evidence_kinds": kinds,
-                "jobs_in_window": {
-                    "created": 0,
-                    "done": 0,
-                    "failed": 0,
-                    "pending": 0,
-                    "running": 0,
-                },
-                "freshness_dimension": fresh_dim,
-                "freshness_last_run_at": (
-                    freshness[fresh_dim].get("last_run_at")
-                    if fresh_dim and fresh_dim in freshness
-                    else None
-                ),
-                "fires_in_window": fires_iso,
-                "drain": drain,
-            }
+    if cron_last is None:
         return {
             "slot": slot_id,
             "cron": cron,
@@ -493,21 +493,67 @@ def _slot_adherence(
             "drain": drain,
         }
 
+    # Default: score the raw previous cron fire.
+    last = cron_last
     grace_end = last + timedelta(minutes=grace_minutes)
-    window_end = min(now, grace_end + timedelta(hours=2))
-    counts = _count_jobs_in_window(conn, kinds=kinds, start=last, end=window_end)
+    evidence_ok, counts, fresh_hit, fresh_last, grace_end = _evidence_for_fire(
+        conn,
+        kinds=kinds,
+        fresh_dim=fresh_dim,
+        freshness=freshness,
+        fire=last,
+        now=now,
+        grace_minutes=grace_minutes,
+    )
 
-    fresh_hit = False
-    fresh_last = None
-    if fresh_dim and fresh_dim in freshness:
-        fresh_last = freshness[fresh_dim].get("last_run_at")
-        raw_last = freshness[fresh_dim].get("_last")
-        if isinstance(raw_last, datetime):
-            if raw_last.tzinfo is None:
-                raw_last = raw_last.replace(tzinfo=timezone.utc)
-            fresh_hit = raw_last >= last
+    # Weekend/holiday cron with no evidence → fall back to last trading-day fire
+    # (Fri EOD) so a real miss is still visible; empty lookback ⇒ on_plan skip.
+    if (
+        not evidence_ok
+        and slot_id in SKIP_ON_HOLIDAY_SLOTS
+    ):
+        try:
+            trading_last = is_trading_day(conn, cron_last.date())
+        except Exception:
+            trading_last = True
+        if not trading_last:
+            fallback, mode = _previous_expected_fire(
+                conn, slot_id=slot_id, cron=cron, before=now
+            )
+            if mode == "skip" or fallback is None:
+                return {
+                    "slot": slot_id,
+                    "cron": cron,
+                    "note": SLOT_NOTES.get(slot_id, ""),
+                    "ok": True,
+                    "adherence": "on_plan",
+                    "detail": (
+                        f"non-trading day skip — no enqueue expected "
+                        f"(cron_last={iso_z(cron_last)})"
+                    ),
+                    "last_fire": iso_z(cron_last),
+                    "next_fires": next_iso,
+                    "grace_ends_at": None,
+                    "inline": inline,
+                    "evidence_kinds": kinds,
+                    "jobs_in_window": counts,
+                    "freshness_dimension": fresh_dim,
+                    "freshness_last_run_at": fresh_last,
+                    "fires_in_window": fires_iso,
+                    "drain": drain,
+                }
+            if mode == "trading" and fallback is not None:
+                last = fallback
+                evidence_ok, counts, fresh_hit, fresh_last, grace_end = _evidence_for_fire(
+                    conn,
+                    kinds=kinds,
+                    fresh_dim=fresh_dim,
+                    freshness=freshness,
+                    fire=last,
+                    now=now,
+                    grace_minutes=grace_minutes,
+                )
 
-    evidence_ok = (counts["created"] > 0) or fresh_hit
     if evidence_ok:
         adherence = "on_plan"
         detail = (
@@ -533,7 +579,7 @@ def _slot_adherence(
         "ok": adherence in ("on_plan", "due", "unknown"),
         "adherence": adherence,
         "detail": detail,
-        "last_fire": last_iso,
+        "last_fire": iso_z(last),
         "next_fires": next_iso,
         "grace_ends_at": iso_z(grace_end),
         "inline": inline,

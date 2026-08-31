@@ -173,3 +173,31 @@ def test_eod_pipeline_weekend_cron_not_false_missed(monkeypatch: pytest.MonkeyPa
     assert eod["last_fire"] == "2026-08-28T22:00:00Z"  # Fri trading-day fire
     assert report["schedule"]["missed"] == 0
     assert report["husbandry"]["verdict"] != "missed"
+
+
+def test_weekend_cron_with_jobs_stays_on_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dagster may enqueue on Sunday with rolled-back target — count those jobs."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {
+            "scheduler": {
+                "slots": {
+                    "corporate": {"cron": "0 23 * * *"},
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(mod, "is_trading_day", lambda _conn, d: d.weekday() < 5)
+
+    conn = _DashConn()
+    conn.freshness_rows = []
+    conn.window_rows = [("done", 36)]
+    now = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    corp = next(s for s in report["schedule"]["slots"] if s["slot"] == "corporate")
+    assert corp["adherence"] == "on_plan"
+    assert corp["last_fire"] == "2026-08-30T23:00:00Z"
+    assert report["schedule"]["missed"] == 0
