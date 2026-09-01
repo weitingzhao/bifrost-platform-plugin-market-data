@@ -201,3 +201,44 @@ def test_weekend_cron_with_jobs_stays_on_plan(monkeypatch: pytest.MonkeyPatch) -
     assert corp["adherence"] == "on_plan"
     assert corp["last_fire"] == "2026-08-30T23:00:00Z"
     assert report["schedule"]["missed"] == 0
+
+
+def test_eod_pipeline_trading_day_lag_not_false_missed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mon–Fri ~00:00–02:30 UTC after 22:00 cron must be due, not missed.
+
+    eod-pipeline is owned by research_trading_day (22:30 ET); UTC cron alone
+    must not false-positive ``missed`` before Dagster enqueue.
+    """
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {
+            "scheduler": {
+                "slots": {
+                    "eod-pipeline": {"cron": "0 22 * * *"},
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(mod, "is_trading_day", lambda _conn, d: d.weekday() < 5)
+
+    conn = _DashConn()
+    # Stale Fri freshness — not evidence for Mon 22:00 UTC fire.
+    conn.freshness_rows = [
+        ("option_snapshot", datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc), 50, "ok"),
+        ("option_open_interest", datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc), 50, "ok"),
+    ]
+    conn.window_rows = []
+    # Tue 01:00 UTC — after Mon 2026-08-17 22:00 fire, before Mon 22:30 ET
+    # (Tue 02:30 UTC during EDT). Default 45m grace would already be expired.
+    now = datetime(2026, 8, 18, 1, 0, tzinfo=timezone.utc)
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    eod = next(s for s in report["schedule"]["slots"] if s["slot"] == "eod-pipeline")
+    assert eod["adherence"] == "due"
+    assert eod["last_fire"] == "2026-08-17T22:00:00Z"
+    assert report["schedule"]["missed"] == 0
+    assert report["husbandry"]["verdict"] != "missed"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
 from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
@@ -13,6 +14,16 @@ from bifrost_market_data.trading_calendar import is_trading_day
 SWIMLANE_PAST = timedelta(hours=24)
 SWIMLANE_FUTURE = timedelta(hours=6)
 DRAIN_LOOKBACK = timedelta(hours=48)
+
+# Slots owned by Dagster research_trading_day (Mon–Fri 22:30 America/New_York),
+# not by the UTC cron tick alone. Cron fire → trading_day lag must stay ``due``,
+# not false-positive ``missed``.
+TRADING_DAY_OWNED_SLOTS = frozenset({"eod-pipeline"})
+_ET = ZoneInfo("America/New_York")
+_TRADING_DAY_TIME = time(22, 30)
+# Floor after UTC cron (22:00 → ~04:00) + slack after ET 22:30 for materialize.
+_TRADING_DAY_OWNED_MIN_GRACE = timedelta(hours=6)
+_TRADING_DAY_OWNED_AFTER_ET = timedelta(hours=2)
 
 # Slot → job kinds created by enqueue_slot (for plan-vs-actual).
 # Empty list → slot is inline / analytics; use freshness_dimension when set.
@@ -419,6 +430,29 @@ def _evidence_for_fire(
     return evidence_ok, counts, fresh_hit, fresh_last, grace_end
 
 
+def _trading_day_owned_grace_end(fire: datetime, base_grace_end: datetime) -> datetime:
+    """Extend grace through research_trading_day 22:30 ET (+ materialize slack).
+
+    UTC cron for eod-pipeline is ``0 22 * * *``; Dagster enqueue is Mon–Fri
+    22:30 America/New_York (~02:30–03:30 UTC). Without this, the Mon–Fri window
+    after default 45m grace falsely scores ``missed``.
+    """
+    fire_et = fire.astimezone(_ET)
+    td_deadline = datetime.combine(fire_et.date(), _TRADING_DAY_TIME, tzinfo=_ET)
+    after_et = td_deadline.astimezone(timezone.utc) + _TRADING_DAY_OWNED_AFTER_ET
+    floor = fire + _TRADING_DAY_OWNED_MIN_GRACE
+    return max(base_grace_end, floor, after_et)
+
+
+def _grace_minutes_for_slot(slot_id: str, fire: datetime, grace_minutes: int) -> int:
+    """Effective grace minutes (extended for trading_day-owned slots)."""
+    if slot_id not in TRADING_DAY_OWNED_SLOTS:
+        return grace_minutes
+    base = fire + timedelta(minutes=grace_minutes)
+    extended = _trading_day_owned_grace_end(fire, base)
+    return max(grace_minutes, int((extended - fire).total_seconds() // 60))
+
+
 def _slot_adherence(
     conn: Any,
     *,
@@ -495,7 +529,7 @@ def _slot_adherence(
 
     # Default: score the raw previous cron fire.
     last = cron_last
-    grace_end = last + timedelta(minutes=grace_minutes)
+    slot_grace = _grace_minutes_for_slot(slot_id, last, grace_minutes)
     evidence_ok, counts, fresh_hit, fresh_last, grace_end = _evidence_for_fire(
         conn,
         kinds=kinds,
@@ -503,7 +537,7 @@ def _slot_adherence(
         freshness=freshness,
         fire=last,
         now=now,
-        grace_minutes=grace_minutes,
+        grace_minutes=slot_grace,
     )
 
     # Weekend/holiday cron with no evidence → fall back to last trading-day fire
@@ -544,6 +578,7 @@ def _slot_adherence(
                 }
             if mode == "trading" and fallback is not None:
                 last = fallback
+                slot_grace = _grace_minutes_for_slot(slot_id, last, grace_minutes)
                 evidence_ok, counts, fresh_hit, fresh_last, grace_end = _evidence_for_fire(
                     conn,
                     kinds=kinds,
@@ -551,7 +586,7 @@ def _slot_adherence(
                     freshness=freshness,
                     fire=last,
                     now=now,
-                    grace_minutes=grace_minutes,
+                    grace_minutes=slot_grace,
                 )
 
     if evidence_ok:
@@ -564,7 +599,13 @@ def _slot_adherence(
             detail += f"; freshness.{fresh_dim}={fresh_last}"
     elif now < grace_end:
         adherence = "due"
-        detail = f"within grace ({grace_minutes}m) after last fire; waiting for evidence"
+        if slot_id in TRADING_DAY_OWNED_SLOTS:
+            detail = (
+                "within trading_day ownership grace "
+                f"(cron→ET 22:30+{_TRADING_DAY_OWNED_AFTER_ET}); waiting for evidence"
+            )
+        else:
+            detail = f"within grace ({grace_minutes}m) after last fire; waiting for evidence"
     else:
         adherence = "missed"
         detail = (
