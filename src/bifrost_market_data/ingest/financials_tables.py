@@ -26,7 +26,12 @@ def split_financials_writes_enabled() -> bool:
 
 
 def upsert_financials_rows(conn: Any, rows: list[tuple[Any, ...]]) -> int:
-    """Upsert rows keyed by (symbol, report_type, period_date, period_type, ...)."""
+    """Upsert rows keyed by (symbol, report_type, period_date, period_type, ...).
+
+    Row tuple: (symbol, report_type, period_date, period_type, fiscal_year,
+    fiscal_quarter, data, filing_date). filing_date is last so the existing
+    positional indexes stay put.
+    """
     if not rows or not split_financials_writes_enabled():
         return 0
 
@@ -47,12 +52,15 @@ def upsert_financials_rows(conn: Any, rows: list[tuple[Any, ...]]) -> int:
 def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> int:
     sql = f"""
         INSERT INTO raw_market.{table}
-            (symbol, period_date, period_type, fiscal_year, fiscal_quarter, data)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            (symbol, period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date)
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
         ON CONFLICT (symbol, period_date, period_type) DO UPDATE SET
             fiscal_year = EXCLUDED.fiscal_year,
             fiscal_quarter = EXCLUDED.fiscal_quarter,
             data = EXCLUDED.data,
+            -- COALESCE: a later TTM-shaped fetch must not blank a filing_date
+            -- an earlier quarterly row already established.
+            filing_date = COALESCE(EXCLUDED.filing_date, raw_market.{table}.filing_date),
             fetched_at = now()
     """
     prepared: list[tuple[Any, ...]] = []
@@ -60,7 +68,8 @@ def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> 
         data_val = r[6]
         if isinstance(data_val, (dict, list)):
             data_val = json.dumps(data_val)
-        prepared.append((r[0], r[2], r[3], r[4], r[5], data_val))
+        filing_date = r[7] if len(r) > 7 else None
+        prepared.append((r[0], r[2], r[3], r[4], r[5], data_val, filing_date))
     try:
         with conn.cursor() as cur:
             cur.executemany(sql, prepared)

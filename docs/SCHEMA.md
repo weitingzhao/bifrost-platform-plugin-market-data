@@ -249,7 +249,20 @@ Replaces six flat fundamentals tables (`stock_income_statements`, `stock_balance
 | period_type | text | `quarterly` / `annual` / `ttm` / `settlement` / `''` |
 | fiscal_year / fiscal_quarter | integer | optional |
 | data | jsonb | vendor field bag |
+| filing_date | date | When the 10-Q / 10-K was filed. Nullable. |
 | fetched_at | timestamptz | |
+
+`period_date` is the fiscal period **end**; `filing_date` is when the report was
+actually filed, which is the date an earnings-event study needs. The gap is not
+constant — 24 to 31 days on NVDA — so `period_date` plus a fixed offset is not a
+substitute. Null on `ttm` rows and on fiscal-Q4 `quarterly` rows, whose filing is
+reported by the matching `annual` row; a calendar should read both. Partial index
+`<table>_filing_date` covers the non-null rows.
+
+Added by `wave8_migrations.add_financials_filing_date`, called from `apply_ddl`
+and **not** from `apply_wave8_migrations` — `raw_market` tables are owned by
+`postgres`, so the ALTER needs the superuser path the schema-migrate job header
+documents.
 
 **PK:** `(symbol, report_type, period_date, period_type)`  
 (`period_type` defaults to `''` so NULL is not required in PK.)

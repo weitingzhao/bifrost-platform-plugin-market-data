@@ -242,3 +242,90 @@ def test_eod_pipeline_trading_day_lag_not_false_missed(
     assert eod["last_fire"] == "2026-08-17T22:00:00Z"
     assert report["schedule"]["missed"] == 0
     assert report["husbandry"]["verdict"] != "missed"
+
+
+class _HistCur:
+    def __init__(self, parent: "_HistConn") -> None:
+        self.parent = parent
+        self._rows: list[Any] = []
+
+    def execute(self, query: str, params: Any = None) -> None:
+        self.parent.statements.append((query, params))
+        q = query.lower()
+        if "group by 1, 2, 3" in q or (
+            "job_ingest" in q and "::date" in q and "group by" in q
+        ):
+            self._rows = list(self.parent.history_rows)
+        else:
+            self._rows = []
+
+    def fetchall(self) -> list[Any]:
+        return list(self._rows)
+
+    def __enter__(self) -> "_HistCur":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _HistConn:
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, Any]] = []
+        self.history_rows: list[Any] = []
+
+    def cursor(self) -> _HistCur:
+        return _HistCur(self)
+
+
+def test_build_ingest_history_fills_empty_days() -> None:
+    from datetime import date
+
+    from bifrost_market_data.api.ingest_dashboard import build_ingest_history
+
+    conn = _HistConn()
+    conn.history_rows = [
+        (date(2026, 8, 30), "financials", "done", 100),
+        (date(2026, 8, 30), "financials", "failed", 2),
+        (date(2026, 8, 31), "stock_daily", "done", 18),
+        (date(2026, 8, 31), "option_daily", "pending", 5),
+    ]
+    now = datetime(2026, 8, 31, 20, 0, tzinfo=timezone.utc)
+    report = build_ingest_history(conn, days=3, now=now)
+
+    assert report["ok"] is True
+    assert report["days"] == 3
+    assert report["start_day"] == "2026-08-29"
+    assert report["end_day"] == "2026-08-31"
+    assert len(report["days_series"]) == 3
+
+    d0, d1, d2 = report["days_series"]
+    assert d0["day"] == "2026-08-29"
+    assert d0["total"] == 0
+    assert d1["day"] == "2026-08-30"
+    assert d1["done"] == 100
+    assert d1["failed"] == 2
+    assert d1["total"] == 102
+    assert d1["by_kind"][0]["kind"] == "financials"
+    assert d2["day"] == "2026-08-31"
+    assert d2["done"] == 18
+    assert d2["pending"] == 5
+    assert d2["total"] == 23
+
+    kinds = {r["kind"]: r for r in report["kind_totals"]}
+    assert kinds["financials"]["done"] == 100
+    assert kinds["financials"]["failed"] == 2
+    assert kinds["stock_daily"]["done"] == 18
+
+    assert conn.statements
+    assert conn.statements[0][1] == (datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc),)
+
+
+def test_build_ingest_history_clamps_days() -> None:
+    from bifrost_market_data.api.ingest_dashboard import build_ingest_history
+
+    conn = _HistConn()
+    now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+    report = build_ingest_history(conn, days=99, now=now)
+    assert report["days"] == 30
+    assert len(report["days_series"]) == 30

@@ -86,11 +86,26 @@ def polygon_error_to_http(exc: PolygonAPIError) -> HTTPException:
     return HTTPException(status_code=status, detail=exc.message)
 
 
-def connect_db(*, timeout: int = 10) -> Any:
-    """Open a psycopg connection using plugin config."""
+def connect_db(*, timeout: int = 10, statement_timeout: str = "60s") -> Any:
+    """Open a psycopg connection using plugin config.
+
+    The ``bifrost`` role defaults to ``statement_timeout=2s`` (writer safety).
+    Coverage / inventory / quality reads regularly exceed that on large
+    ``raw_market.*`` tables, so API connections raise the session limit.
+    Workers that connect via ``postgres_connect_kwargs`` keep the role default.
+
+    Note: ``SET … TO %s`` is rejected by Postgres (no bind params for SET);
+    pass ``-c statement_timeout=…`` via libpq ``options`` instead.
+    """
     import psycopg
 
-    return psycopg.connect(**postgres_connect_kwargs(load_config()), connect_timeout=timeout)
+    # Normalize "60s" / "1min" → milliseconds for -c (libpq accepts unit suffix).
+    sto = str(statement_timeout).strip() or "60s"
+    kw = dict(postgres_connect_kwargs(load_config()))
+    existing = str(kw.get("options") or "").strip()
+    flag = f"-c statement_timeout={sto}"
+    kw["options"] = f"{existing} {flag}".strip() if existing else flag
+    return psycopg.connect(**kw, connect_timeout=timeout)
 
 
 def require_db() -> Any:

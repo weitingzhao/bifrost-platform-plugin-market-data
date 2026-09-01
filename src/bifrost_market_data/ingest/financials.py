@@ -41,6 +41,11 @@ async def handle_financials(job: JobRow, client: Any, conn: Any) -> Mapping[str,
         period_type = str(
             item.get("timeframe") or item.get("fiscal_period") or timeframe or ""
         ).strip()
+        # When the 10-Q / 10-K was actually filed, as opposed to period_date,
+        # which is the fiscal period end. Present on quarterly and annual rows;
+        # null on TTM rows and on fiscal-Q4 quarterly rows, whose filing is
+        # reported by the matching annual row.
+        filing_date = parse_date(item.get("filing_date"))
         fiscal_year = as_int(item.get("fiscal_year"))
         fiscal_quarter = as_int(item.get("fiscal_quarter"))
         financials = item.get("financials") if isinstance(item.get("financials"), dict) else {}
@@ -59,6 +64,7 @@ async def handle_financials(job: JobRow, client: Any, conn: Any) -> Mapping[str,
                     fiscal_year,
                     fiscal_quarter,
                     stmt,
+                    filing_date,
                 )
             )
             wrote_any = True
@@ -74,6 +80,7 @@ async def handle_financials(job: JobRow, client: Any, conn: Any) -> Mapping[str,
                     fiscal_year,
                     fiscal_quarter,
                     dict(item),
+                    filing_date,
                 )
             )
 

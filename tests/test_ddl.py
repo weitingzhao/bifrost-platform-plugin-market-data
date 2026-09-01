@@ -162,3 +162,50 @@ def test_create_roles_sql_exists() -> None:
     assert "features_daily" not in text
     assert "GRANT USAGE ON SCHEMA features TO market_reader" in text
     assert "GRANT SELECT ON ALL TABLES IN SCHEMA features TO market_reader" in text
+
+
+def test_filing_date_migration_is_additive_and_indexed() -> None:
+    """filing_date must arrive as a nullable column, never as a table rewrite.
+
+    The six financials entity tables hold ~590k rows. ADD COLUMN with no default
+    is metadata-only in PostgreSQL 11+, and the migration must stay that way.
+    """
+    from bifrost_market_data.schema.wave8_migrations import (
+        FINANCIALS_ENTITY_TABLES,
+        add_financials_filing_date,
+    )
+
+    cur = _FakeCursor()
+    add_financials_filing_date(cur)
+    sql = "\n".join(cur.statements)
+
+    for table in FINANCIALS_ENTITY_TABLES:
+        assert f"ALTER TABLE IF EXISTS raw_market.{table}" in sql
+        assert f"{table}_filing_date" in sql
+    assert "ADD COLUMN IF NOT EXISTS filing_date date" in sql
+    # A default would force a rewrite of every row.
+    assert "ADD COLUMN IF NOT EXISTS filing_date date DEFAULT" not in sql
+    # Partial index: TTM rows never carry one.
+    assert "WHERE filing_date IS NOT NULL" in sql
+    # The compat view has to expose it or nothing downstream can read it.
+    assert "CREATE OR REPLACE VIEW raw_market.stock_financials" in sql
+    assert sql.count("filing_date, fetched_at") == len(FINANCIALS_ENTITY_TABLES)
+
+
+def test_filing_date_migration_not_on_bifrost_role_path() -> None:
+    """apply_wave8_migrations runs as the bifrost role; the ALTER needs ownership.
+
+    raw_market tables are owned by postgres. Wiring this migration into the
+    wave8 path would make that job fail on every run — it belongs on apply_ddl,
+    which the job manifest documents as the superuser path.
+    """
+    import inspect
+
+    from bifrost_market_data.schema import ddl as ddl_mod
+
+    # The call, not the mention — apply_wave8_migrations' docstring names it to
+    # explain the exclusion.
+    assert "add_financials_filing_date(cur)" not in inspect.getsource(
+        ddl_mod.apply_wave8_migrations
+    )
+    assert "add_financials_filing_date(cur)" in inspect.getsource(ddl_mod.apply_ddl)

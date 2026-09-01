@@ -226,16 +226,37 @@ def test_freshness_pass() -> None:
 
 def test_freshness_stale() -> None:
     conn = _QConn()
-    old = datetime.now(timezone.utc) - timedelta(hours=48)
+    # Mid-week noon so weekend allowance does not apply.
+    now = datetime(2026, 8, 26, 15, 0, tzinfo=timezone.utc)  # Wednesday
+    old = now - timedelta(hours=48)
     conn.freshness_rows = [
         ("stock_daily", old, 10, "ok", old),
         ("option_snapshot", old, 5, "ok", old),
         ("option_open_interest", old, 5, "ok", old),
         ("calendar", old, 1, "ok", old),
     ]
-    result = check_freshness(conn, max_age_hours=24)
+    result = check_freshness(conn, max_age_hours=24, now=now)
     assert result["ok"] is False
     assert len(result["failures"]) > 0
+
+
+def test_freshness_monday_pre_eod_allows_weekend_gap() -> None:
+    """Fri night ~33h age on Monday morning must PASS under 72h allowance."""
+    from bifrost_market_data.quality import freshness_age_limit_hours
+
+    now = datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc)  # Monday
+    assert freshness_age_limit_hours(now) == 72.0
+    conn = _QConn()
+    last = now - timedelta(hours=33)
+    conn.freshness_rows = [
+        ("stock_daily", last, 10, "ok", last),
+        ("option_snapshot", last, 5, "ok", last),
+        ("option_open_interest", last, 5, "ok", last),
+        ("calendar", last, 1, "ok", last),
+    ]
+    result = check_freshness(conn, now=now)
+    assert result["ok"] is True
+    assert result["max_age_hours"] == 72.0
 
 
 def test_run_all_checks() -> None:

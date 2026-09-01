@@ -32,9 +32,10 @@ sync-platform-write-token:
 	bash scripts/sync-platform-write-token.sh
 
 sync-write-auth-overlay:
-	kubectl -n plugin-market-data create configmap market-data-write-auth-deps \
+	kubectl -n plugin-market-data create configmap market-data-api-schema-hotfix \
 	  --from-file=deps.py=src/bifrost_market_data/api/deps.py \
 	  --dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n plugin-market-data rollout restart deploy/market-data-api
 
 install-redis-massive:
 	./scripts/install-redis-massive.sh

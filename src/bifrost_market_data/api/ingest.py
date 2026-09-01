@@ -389,6 +389,19 @@ def ingest_queue_dashboard(
         conn.close()
 
 
+@router.get("/history")
+def ingest_history(
+    days: int = Query(14, ge=1, le=30),
+) -> dict[str, Any]:
+    """Daily job volume histogram from job_ingest (UTC days; trim ~7d)."""
+    from bifrost_market_data.api.ingest_dashboard import build_ingest_history
+
+    conn = require_db()
+    try:
+        return build_ingest_history(conn, days=int(days))
+    finally:
+        conn.close()
+
 
 @router.get("/kinds")
 def list_ingest_kinds() -> dict[str, Any]:

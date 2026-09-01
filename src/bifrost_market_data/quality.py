@@ -11,6 +11,9 @@ from bifrost_market_data.scheduler.daily import resolve_watchlist_symbols_for_co
 STOCK_DAILY_MIN_SYMBOLS = 4000
 STOCK_DAILY_GAP_LOOKBACK_DAYS = 30
 FRESHNESS_MAX_AGE_HOURS = 24.0
+# Align with platform-api marketdata freshnessWeekendMaxAgeH: Sat/Sun and
+# Monday before UTC 22:00 (next EOD window) — Fri night snapshot must not FAIL.
+FRESHNESS_WEEKEND_MAX_AGE_HOURS = 72.0
 
 # Dimensions expected to be actively refreshed by daily CronJobs.
 EXPECTED_FRESHNESS_DIMENSIONS = (
@@ -19,6 +22,14 @@ EXPECTED_FRESHNESS_DIMENSIONS = (
     "option_open_interest",
     "calendar",
 )
+
+
+def freshness_age_limit_hours(now: datetime) -> float:
+    """Session-bound EOD dimensions: weekend / Mon-pre-EOD allowance."""
+    wd = now.weekday()  # Mon=0 … Sun=6
+    if wd >= 5 or (wd == 0 and now.hour < 22):
+        return FRESHNESS_WEEKEND_MAX_AGE_HOURS
+    return FRESHNESS_MAX_AGE_HOURS
 
 
 def fetch_stock_daily_symbol_count(conn: Any) -> int:
@@ -297,14 +308,23 @@ def check_option_oi_coverage(
 def check_freshness(
     conn: Any,
     *,
-    max_age_hours: float = FRESHNESS_MAX_AGE_HOURS,
+    max_age_hours: float | None = None,
     expected_dimensions: Sequence[str] = EXPECTED_FRESHNESS_DIMENSIONS,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """All expected dimensions must be present, status=ok, and age < max_age_hours."""
+    """All expected dimensions must be present, status=ok, and age < limit.
+
+    When ``max_age_hours`` is omitted, use ``freshness_age_limit_hours(now)``
+    (24h weekday / 72h weekend & Monday before UTC 22:00).
+    """
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
+    age_limit = (
+        float(max_age_hours)
+        if max_age_hours is not None
+        else freshness_age_limit_hours(now_utc)
+    )
 
     with conn.cursor() as cur:
         cur.execute(
@@ -351,7 +371,7 @@ def check_freshness(
             continue
         age = info.get("age_hours")
         status = str(info.get("status") or "")
-        ok_dim = status == "ok" and age is not None and float(age) < float(max_age_hours)
+        ok_dim = status == "ok" and age is not None and float(age) < float(age_limit)
         if not ok_dim:
             failures.append(
                 f"{dim}: status={status} age_hours={age}"
@@ -360,7 +380,7 @@ def check_freshness(
             {
                 **info,
                 "ok": ok_dim,
-                "max_age_hours": max_age_hours,
+                "max_age_hours": age_limit,
             }
         )
 
@@ -368,7 +388,7 @@ def check_freshness(
     return {
         "check": "freshness",
         "ok": ok,
-        "max_age_hours": max_age_hours,
+        "max_age_hours": age_limit,
         "dimensions": details,
         "failures": failures,
         "detail": "ok" if ok else "; ".join(failures),
@@ -381,7 +401,7 @@ def run_all_checks(
     watchlist_symbols: Sequence[str] | None = None,
     min_symbols: int = STOCK_DAILY_MIN_SYMBOLS,
     lookback_days: int = STOCK_DAILY_GAP_LOOKBACK_DAYS,
-    max_age_hours: float = FRESHNESS_MAX_AGE_HOURS,
+    max_age_hours: float | None = None,
 ) -> dict[str, Any]:
     """Run all P7 quality checks. Returns report with ``ok`` aggregate flag."""
     symbols = (

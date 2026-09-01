@@ -73,30 +73,60 @@ def create_stock_financials_compat_view(cur: _Cursor) -> None:
         """
         CREATE OR REPLACE VIEW raw_market.stock_financials AS
         SELECT symbol, 'income_statement'::text AS report_type,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.income_statement
         UNION ALL
         SELECT symbol, 'balance_sheet'::text,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.balance_sheet
         UNION ALL
         SELECT symbol, 'cash_flow_statement'::text,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.cash_flow
         UNION ALL
         SELECT symbol, 'ratios'::text,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.ratios
         UNION ALL
         SELECT symbol, 'short_interest'::text,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.short_interest
         UNION ALL
         SELECT symbol, 'short_volume'::text,
-               period_date, period_type, fiscal_year, fiscal_quarter, data, fetched_at
+               period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date, fetched_at
         FROM raw_market.short_volume
         """
     )
+
+
+def add_financials_filing_date(cur: _Cursor) -> None:
+    """Add ``filing_date`` to the financials entity tables and the compat view.
+
+    ``period_date`` is the fiscal period END. Polygon's ``filing_date`` is when
+    the 10-Q / 10-K was actually filed, which is the date an earnings event study
+    needs. For NVDA the gap runs 24-31 days and is not constant, so
+    ``period_date`` plus a fixed offset is not a substitute.
+
+    The default financials response already carries the field on quarterly and
+    annual rows — the ingest was reading it only as a fallback for period_date
+    and then discarding it. Fiscal-Q4 quarterly rows carry no filing_date because
+    that period is reported in the 10-K; the matching annual row has it.
+
+    Separate from migrate_stock_financials_split, which returns early once
+    stock_financials is a view — the state every deployed environment is in.
+    """
+    for table in FINANCIALS_ENTITY_TABLES:
+        cur.execute(
+            f"ALTER TABLE IF EXISTS raw_market.{table} "
+            "ADD COLUMN IF NOT EXISTS filing_date date"
+        )
+        # Partial: TTM rows never carry a filing date, and the earnings calendar
+        # only ever scans the rows that do.
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS {table}_filing_date "
+            f"ON raw_market.{table} (filing_date) WHERE filing_date IS NOT NULL"
+        )
+    create_stock_financials_compat_view(cur)
 
 
 def migrate_stock_financials_split(cur: _Cursor) -> None:

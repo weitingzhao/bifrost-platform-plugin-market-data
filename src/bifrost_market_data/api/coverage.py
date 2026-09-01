@@ -59,6 +59,10 @@ def _analytics_metric_summary(conn: Any, legacy_table: str) -> dict[str, Any] | 
             "latest": iso_value(row[2]),
         }
     except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return None
 
 
@@ -68,27 +72,33 @@ def query_inventory(conn: Any) -> dict[str, Any]:
 
     stock_daily: dict[str, Any] | None = None
     if table_exists(conn, "market", "stock_daily"):
+        # Split aggregates: a single COUNT(DISTINCT)+COUNT+MIN/MAX scan exceeds the
+        # bifrost role's 2s statement_timeout and aborts the whole inventory txn.
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT
-                        COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
-                        COUNT(*)::bigint AS total_rows,
-                        MIN(bar_date) AS min_date,
-                        MAX(bar_date) AS max_date
-                    FROM raw_market.stock_daily
-                    """
+                    "SELECT MIN(bar_date), MAX(bar_date) FROM raw_market.stock_daily"
                 )
-                row = cur.fetchone()
-            if row:
+                bounds = cur.fetchone()
+                cur.execute("SELECT COUNT(*)::bigint FROM raw_market.stock_daily")
+                total_row = cur.fetchone()
+                cur.execute(
+                    "SELECT COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint "
+                    "FROM raw_market.stock_daily"
+                )
+                sym_row = cur.fetchone()
+            if bounds or total_row or sym_row:
                 stock_daily = {
-                    "symbols": int(row[0] or 0),
-                    "total_rows": int(row[1] or 0),
-                    "min_date": iso_value(row[2]),
-                    "max_date": iso_value(row[3]),
+                    "symbols": int((sym_row[0] if sym_row else 0) or 0),
+                    "total_rows": int((total_row[0] if total_row else 0) or 0),
+                    "min_date": iso_value(bounds[0] if bounds else None),
+                    "max_date": iso_value(bounds[1] if bounds else None),
                 }
         except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             stock_daily = None
 
     # Stock minute schema exists but is not in the active ingest policy.
@@ -122,7 +132,10 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 option_payload["total_contracts"] = int(row[1] or 0)
                 option_payload["total_expiries"] = int(row[2] or 0)
         except Exception:
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     if table_exists(conn, "market", "option_snapshot"):
         try:
             with conn.cursor() as cur:
@@ -139,7 +152,10 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 option_payload["snapshot_symbols"] = int(row[0] or 0)
                 option_payload["snapshot_latest"] = iso_value(row[1])
         except Exception:
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     if table_exists(conn, "market", "option_open_interest"):
         try:
             with conn.cursor() as cur:
@@ -156,7 +172,10 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 option_payload["oi_symbols"] = int(row[0] or 0)
                 option_payload["oi_latest"] = iso_value(row[1])
         except Exception:
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     if any(
         option_payload[k]
         for k in (

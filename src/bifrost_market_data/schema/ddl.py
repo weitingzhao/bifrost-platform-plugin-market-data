@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from bifrost_market_data.schema.wave8_migrations import (
     FINANCIALS_ENTITY_TABLES,
+    add_financials_filing_date,
     migrate_option_open_interest_partitioned,
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
@@ -33,7 +34,13 @@ class _Connection(Protocol):
 
 
 def apply_wave8_migrations(conn: _Connection) -> None:
-    """Wave 8 idempotent migrations only (no full raw_market DDL — safe for bifrost role)."""
+    """Wave 8 idempotent migrations only (no full raw_market DDL — safe for bifrost role).
+
+    add_financials_filing_date is deliberately NOT here: raw_market tables are
+    owned by ``postgres``, so its ALTER needs ownership and would make this
+    job-run path fail on every invocation. It lives in apply_ddl, which the
+    job manifest already documents as the superuser path.
+    """
     with conn.cursor() as cur:
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
@@ -50,6 +57,7 @@ def apply_ddl(conn: _Connection) -> None:
         _create_partition_helper(cur)
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
+        add_financials_filing_date(cur)
         retire_data_ops_compat_schema(cur)
         _create_views(cur)
         _ensure_partitions(cur)

@@ -775,3 +775,113 @@ def build_queue_dashboard(
             "slots": plan,
         },
     }
+
+
+_HISTORY_STATUSES = ("done", "failed", "pending", "running")
+
+
+def build_ingest_history(
+    conn: Any,
+    *,
+    days: int = 14,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Daily job volume from ``ops_jobs.job_ingest`` (UTC calendar days).
+
+    Buckets by ``COALESCE(finished_at, created_at)``. Empty calendar days are
+    filled with zeros so the UI can draw a continuous series. Trim typically
+    keeps ~7 days of rows — older days may be empty even when ``days`` is larger.
+    """
+    days_n = max(1, min(int(days), 30))
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    today = now_utc.date()
+    start_day = today - timedelta(days=days_n - 1)
+    cutoff = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              (COALESCE(finished_at, created_at) AT TIME ZONE 'UTC')::date AS day,
+              kind,
+              status,
+              COUNT(*)::bigint AS n
+            FROM ops_jobs.job_ingest
+            WHERE COALESCE(finished_at, created_at) >= %s
+              AND status IN ('done', 'failed', 'pending', 'running')
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
+            """,
+            (cutoff,),
+        )
+        rows = cur.fetchall() or []
+
+    # day -> kind -> status -> count
+    nested: dict[Any, dict[str, dict[str, int]]] = {}
+    kind_totals: dict[str, dict[str, int]] = {}
+    for day, kind, status, n in rows:
+        kind_s = str(kind or "")
+        status_s = str(status or "")
+        count = int(n or 0)
+        if not kind_s or status_s not in _HISTORY_STATUSES:
+            continue
+        by_kind = nested.setdefault(day, {})
+        by_status = by_kind.setdefault(kind_s, {s: 0 for s in _HISTORY_STATUSES})
+        by_status[status_s] = by_status.get(status_s, 0) + count
+        kt = kind_totals.setdefault(kind_s, {s: 0 for s in _HISTORY_STATUSES})
+        kt[status_s] = kt.get(status_s, 0) + count
+
+    def _status_block(src: Mapping[str, int]) -> dict[str, int]:
+        done = int(src.get("done", 0))
+        failed = int(src.get("failed", 0))
+        pending = int(src.get("pending", 0))
+        running = int(src.get("running", 0))
+        return {
+            "done": done,
+            "failed": failed,
+            "pending": pending,
+            "running": running,
+            "total": done + failed + pending + running,
+        }
+
+    days_series: list[dict[str, Any]] = []
+    for i in range(days_n):
+        d = start_day + timedelta(days=i)
+        kinds_map = nested.get(d, {})
+        day_totals = {s: 0 for s in _HISTORY_STATUSES}
+        by_kind_rows: list[dict[str, Any]] = []
+        for kind_s, st in sorted(kinds_map.items()):
+            block = _status_block(st)
+            for s in _HISTORY_STATUSES:
+                day_totals[s] += block[s]
+            by_kind_rows.append({"kind": kind_s, **block})
+        by_kind_rows.sort(key=lambda r: (-int(r["total"]), str(r["kind"])))
+        day_block = _status_block(day_totals)
+        days_series.append(
+            {
+                "day": d.isoformat(),
+                **day_block,
+                "by_kind": by_kind_rows,
+            }
+        )
+
+    kind_total_rows = [
+        {"kind": k, **_status_block(st)} for k, st in kind_totals.items()
+    ]
+    kind_total_rows.sort(key=lambda r: (-int(r["total"]), str(r["kind"])))
+
+    return {
+        "ok": True,
+        "days": days_n,
+        "start_day": start_day.isoformat(),
+        "end_day": today.isoformat(),
+        "retention_note": (
+            "job_ingest trim typically keeps ~7d; older calendar days may be empty"
+        ),
+        "days_series": days_series,
+        "kind_totals": kind_total_rows,
+        "generated_at": iso_z(now_utc),
+    }
