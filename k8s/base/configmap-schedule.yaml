@@ -20,7 +20,8 @@ data:
       iv_radar_benchmarks: [SPY, QQQ, IWM, SPX, AAPL, MSFT, GOOG, AMZN, META, NVDA, TSLA]
       slots:
         stock-eod:
-          cron: "30 21 * * *"
+          # Align with Dagster market_universe_calendar @ 22:00 UTC (~17:00 America/Chicago).
+          cron: "0 22 * * *"
           priority: 5
         eod-pipeline:
           cron: "0 22 * * *"

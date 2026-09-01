@@ -10,9 +10,9 @@ metadata:
     app.kubernetes.io/part-of: bifrost-market-data
     bifrost.market-data/slot: stock-eod
 spec:
-  schedule: "30 21 * * *"
+  schedule: "0 22 * * *"
   timeZone: UTC
-  # Suspended: Dagster research_trading_day / plugin_batch owns this slot
+  # Suspended: Dagster market_universe_calendar @ 22:00 UTC owns primary fire
   suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
