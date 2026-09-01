@@ -70,6 +70,10 @@ spec:
               mountPath: /config/market-data.yaml
               subPath: market-data.yaml
               readOnly: true
+            - name: schedule
+              mountPath: /config/schedule.yaml
+              subPath: schedule.yaml
+              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -97,3 +101,6 @@ spec:
         - name: config
           configMap:
             name: market-data-config
+        - name: schedule
+          configMap:
+            name: market-data-schedule
