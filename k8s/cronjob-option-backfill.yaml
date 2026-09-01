@@ -1,0 +1,45 @@
+# Option daily backfill CronJob — Wave LO-5 (suspended until Owner Polygon tier decision).
+# See bifrost-research/docs/BACKTEST_DATA_COVERAGE.md and docs/OPTION_BACKFILL_PROGRAM.md
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: market-data-option-backfill
+  namespace: plugin-market-data
+  labels:
+    app.kubernetes.io/name: market-data-option-backfill
+    app.kubernetes.io/part-of: bifrost-market-data
+spec:
+  schedule: "0 6 * * 0"
+  timeZone: UTC
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backfill
+              image: 192.168.10.73:30500/bifrost-market-data:0.10.0
+              imagePullPolicy: Always
+              args:
+                - python
+                - -m
+                - bifrost_market_data.worker.backfill
+                - --kind=option_daily
+                - --symbols=NVDA,TSLA
+                - --days=90
+              envFrom:
+                - secretRef:
+                    name: market-data-secrets
+                    optional: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
