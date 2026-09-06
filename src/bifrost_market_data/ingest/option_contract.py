@@ -42,13 +42,16 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
     expired = payload.get("expired")
     if expired is None:
         expired = False
-    # Index chains (SPX) are large — allow a higher page budget when mapped.
-    max_pages = int(payload.get("max_pages") or (80 if is_index_option_underlying(storage) else 20))
+    # SPX lists ~36k live contracts (1,000 a page); the old 20-page cap truncated
+    # SPX, SPY and QQQ. Index chains get more room still.
+    max_pages = int(payload.get("max_pages") or (120 if is_index_option_underlying(storage) else 60))
 
     data = await client.fetch_options_contracts(
         underlying_ticker=api_underlying,
         expired=bool(expired),
         expiration_date=payload.get("expiration_date"),
+        expiration_date_gte=payload.get("expiration_date_gte"),
+        expiration_date_lte=payload.get("expiration_date_lte"),
         max_pages=max_pages,
     )
     results = list(data.get("results") or [])

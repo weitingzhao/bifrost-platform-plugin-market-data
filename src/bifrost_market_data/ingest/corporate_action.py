@@ -1,4 +1,5 @@
-"""kind=splits / dividends → market.corporate_action."""
+"""kind=splits / dividends (per symbol) and splits_market / dividends_market
+(whole market by date window) → market.corporate_action."""
 
 from __future__ import annotations
 
@@ -142,3 +143,109 @@ async def handle_dividends(job: JobRow, client: Any, conn: Any) -> Mapping[str, 
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }
+
+
+def _split_row(symbol: str, item: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    ex_date = parse_date(item.get("execution_date") or item.get("ex_date"))
+    if ex_date is None:
+        return None
+    adj = item.get("adjustment_type")
+    return (
+        symbol,
+        "split",
+        ex_date,
+        None,
+        None,
+        as_float(item.get("split_from") or item.get("ratio_from")),
+        as_float(item.get("split_to") or item.get("ratio_to")),
+        None,
+        None,
+        f"adjustment_type={adj}" if adj else None,
+    )
+
+
+def _dividend_row(symbol: str, item: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    ex_date = parse_date(item.get("ex_dividend_date") or item.get("ex_date"))
+    if ex_date is None:
+        return None
+    currency = item.get("currency")
+    dtype = item.get("dividend_type") or item.get("frequency")
+    return (
+        symbol,
+        "dividend",
+        ex_date,
+        parse_date(item.get("record_date")),
+        parse_date(item.get("pay_date") or item.get("payment_date")),
+        None,
+        None,
+        as_float(item.get("cash_amount") or item.get("amount")),
+        str(currency).strip() if currency else None,
+        str(dtype) if dtype else None,
+    )
+
+
+_UPDATE_COLS = (
+    "record_date",
+    "payment_date",
+    "ratio_from",
+    "ratio_to",
+    "amount",
+    "currency",
+    "description",
+)
+
+
+def _market_window(payload: Mapping[str, Any]) -> tuple[str, str]:
+    start = str(payload.get("from") or "").strip()
+    end = str(payload.get("to") or "").strip()
+    if not start or not end:
+        raise ValueError("market corporate-action payload requires from and to")
+    return start, end
+
+
+async def handle_splits_market(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
+    """Every split with an execution date in ``[from, to]`` — the whole market in a few pages."""
+    start, end = _market_window(job.payload or {})
+    data = await client.fetch_splits_market(start, end)
+    rows: list[tuple[Any, ...]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("ticker") or item.get("symbol") or "").strip().upper()
+        row = _split_row(symbol, item) if symbol else None
+        if row is not None:
+            rows.append(row)
+    n = batch_upsert(
+        conn,
+        "market.corporate_action",
+        _COLS,
+        rows,
+        conflict_keys=("symbol", "action_type", "ex_date"),
+        update_cols=_UPDATE_COLS,
+        set_fetched_at=True,
+    )
+    return {"rows_written": n, "action_type": "split", "from": start, "to": end, "pages": data.get("pages")}
+
+
+async def handle_dividends_market(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
+    """Every dividend with an ex-date in ``[from, to]``."""
+    start, end = _market_window(job.payload or {})
+    data = await client.fetch_dividends_market(start, end)
+    rows: list[tuple[Any, ...]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("ticker") or item.get("symbol") or "").strip().upper()
+        row = _dividend_row(symbol, item) if symbol else None
+        if row is not None:
+            rows.append(row)
+    n = batch_upsert(
+        conn,
+        "market.corporate_action",
+        _COLS,
+        rows,
+        conflict_keys=("symbol", "action_type", "ex_date"),
+        update_cols=_UPDATE_COLS,
+        set_fetched_at=True,
+    )
+    return {"rows_written": n, "action_type": "dividend", "from": start, "to": end, "pages": data.get("pages")}

@@ -48,6 +48,9 @@ async def test_financials_upsert_nested_statements() -> None:
             all_rows.extend(params)
     income_row = next(r for r in all_rows if "revenues" in r[5])
     assert json.loads(income_row[5])["revenues"]["value"] == 100
+    # A real answer clears any earlier void note for the symbol.
+    assert result["void"] is False
+    assert any("delete from ops_jobs.symbol_source_void" in st[0].lower() for st in conn.statements)
 
 
 @pytest.mark.asyncio
@@ -56,6 +59,10 @@ async def test_financials_empty() -> None:
     conn = FakeConn()
     result = await handle_financials(make_job("financials", {"symbol": "AAPL"}), client, conn)
     assert result["rows_written"] == 0
+    assert result["void"] is True
+    void = next(st for st in conn.statements if "symbol_source_void" in st[0])
+    assert "ON CONFLICT (symbol, data_type)" in void[0]
+    assert void[1][:2] == ("AAPL", "financials")
 
 
 @pytest.mark.asyncio

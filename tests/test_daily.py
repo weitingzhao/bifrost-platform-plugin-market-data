@@ -133,6 +133,26 @@ class _DailyCursor:
                 rows.append((r["symbol"], r["trade_date"], r["expiry"], r["atm_iv"]))
             self.parent._fetchall = rows
             self.parent._fetchone = None
+        elif "/* near-spot */" in q:
+            # (syms, as_of, syms, as_of, n_exp, per_right)
+            syms = set(params[0])
+            as_of = params[1]
+            n_exp = int(params[4])
+            per_right = int(params[5])
+            picked: list[tuple[str]] = []
+            for und in sorted(syms):
+                spot = self.parent.spots.get(und)
+                if spot is None:
+                    continue
+                mine = [c for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of]
+                expiries = sorted({c[2] for c in mine})[:n_exp]
+                for exp in expiries:
+                    for right in ("C", "P"):
+                        cands = [c for c in mine if c[2] == exp and c[0][-9] == right]
+                        cands.sort(key=lambda c: (abs((c[3] if len(c) > 3 else 0) - spot), c[3] if len(c) > 3 else 0))
+                        picked.extend((c[0],) for c in cands[:per_right])
+            self.parent._fetchall = sorted(picked)
+            self.parent._fetchone = None
         elif "from market.option_contract" in q or "from raw_market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
             as_of = params[1] if params and len(params) > 1 else None
@@ -140,7 +160,7 @@ class _DailyCursor:
             max_per = int(params[3]) if params and len(params) > 3 else 40
             counts: dict[str, int] = {}
             rows: list[tuple[str]] = []
-            for ticker, und, expiry in self.parent.option_contracts:
+            for ticker, und, expiry, *_rest in self.parent.option_contracts:
                 if und not in underlyings:
                     continue
                 if as_of is not None and expiry < as_of:
@@ -167,7 +187,7 @@ class _DailyCursor:
                 raise RuntimeError('relation "public.watchlist" does not exist')
             self.parent._fetchall = [(s,) for s in self.parent.watchlist]
             self.parent._fetchone = None
-        elif "returning id" in q:
+        elif "returning id" in q and "unnest(" not in q:
             kind = params[0] if params else None
             ph = params[2] if params and len(params) > 2 else None
             key = (kind, ph)
@@ -177,6 +197,26 @@ class _DailyCursor:
                 self.parent.seen_keys.add(key)
                 self.parent.next_id += 1
                 self.parent._fetchone = (self.parent.next_id,)
+        elif "unnest(" in q and "insert into ops_jobs.job_ingest" in q:
+            # bulk enqueue: (kinds[], payloads[], hashes[], priorities[], max_attempts[])
+            rows = []
+            for kind, ph in zip(params[0], params[2]):
+                key = (kind, ph)
+                if key in self.parent.seen_keys:
+                    continue
+                self.parent.seen_keys.add(key)
+                self.parent.next_id += 1
+                rows.append((self.parent.next_id, kind, ph))
+            self.parent._fetchall = rows
+            self.parent._fetchone = None
+        elif "symbol_source_void" in q:
+            if q.lstrip().startswith("select"):
+                self.parent._fetchall = [(sym,) for sym in self.parent.voided]
+            self.parent._fetchone = None
+        elif "watchlist_cache" in q:
+            if q.lstrip().startswith("select"):
+                self.parent._fetchall = [(sym,) for sym in self.parent.watchlist_cache]
+            self.parent._fetchone = None
         elif "from ops_jobs.job_ingest" in q and "created_at >=" in q:
             # session-once evidence probe
             self.parent._fetchone = (1,) if self.parent.session_evidence else None
@@ -226,15 +266,21 @@ class _DailyConn:
         cs_universe: list[str] | None = None,
         income_covered: list[str] | None = None,
         session_evidence: bool = False,
+        spots: dict[str, float] | None = None,
+        voided: list[str] | None = None,
+        watchlist_cache: list[str] | None = None,
     ) -> None:
         self.session_evidence = session_evidence
+        self.spots = spots or {}
+        self.voided = voided or []
+        self.watchlist_cache = watchlist_cache or []
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
         self.raise_on_watchlist = raise_on_watchlist
         self.raise_on_readiness = raise_on_readiness
         self.calendar = calendar or {}
-        # (option_ticker, underlying, expiry)
+        # (option_ticker, underlying, expiry[, strike])
         self.option_contracts = option_contracts or []
         # JOIN-shaped rows for oi-gap-heal extract
         self.extract_rows = extract_rows or []
@@ -409,7 +455,9 @@ def test_enqueue_corporate() -> None:
         scheduler_cfg={"slots": {"corporate": {"priority": 2}}},
     )
     kinds = [j["kind"] for j in result["jobs"]]
-    assert kinds == ["splits", "dividends"]
+    # Whole market by ex-date window — two jobs, not two per symbol.
+    assert kinds == ["splits_market", "dividends_market"]
+    assert result["jobs"][0]["payload"] == {"from": "2024-06-13", "to": "2024-08-19"}
 
 
 def test_enqueue_option_refresh_batch() -> None:
@@ -454,28 +502,45 @@ def test_enqueue_option_refresh_rotates_by_date() -> None:
     assert u1 != u2 or len(symbols) <= 2
 
 
-def test_enqueue_option_bars() -> None:
-    contracts = [
-        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
-        ("O:AAPL240719P00200000", "AAPL", date(2024, 7, 19)),
-        ("O:MSFT240719C00400000", "MSFT", date(2024, 7, 19)),
-    ]
-    conn = _DailyConn(option_contracts=contracts)
+def test_enqueue_option_bars_targets_the_money() -> None:
+    """Next expiries, strikes nearest the close — not the lowest strikes of the nearest expiry."""
+    exp1, exp2, exp3, exp4 = date(2024, 6, 21), date(2024, 6, 28), date(2024, 7, 5), date(2024, 7, 12)
+    contracts = []
+    for exp in (exp1, exp2, exp3, exp4):
+        for strike in (50, 100, 150, 190, 200, 210, 250, 300):
+            ymd = exp.strftime("%y%m%d")
+            contracts.append((f"O:AAPL{ymd}C{int(strike * 1000):08d}", "AAPL", exp, float(strike)))
+            contracts.append((f"O:AAPL{ymd}P{int(strike * 1000):08d}", "AAPL", exp, float(strike)))
+    conn = _DailyConn(option_contracts=contracts, spots={"AAPL": 201.0})
     result = enqueue_slot(
         conn,
         "option-bars",
         target_date=date(2024, 6, 20),
-        watchlist_symbols=["AAPL", "MSFT"],
-        scheduler_cfg={"slots": {"option-bars": {"priority": 4, "max_per_underlying": 40}}},
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-bars": {"priority": 4, "expiries": 2, "strikes_each_side": 1}},
+        },
     )
-    assert result["enqueued"] == 3
-    assert all(j["kind"] == "option_daily" for j in result["jobs"])
-    assert {j["payload"]["option_ticker"] for j in result["jobs"]} == {
-        "O:AAPL240719C00200000",
-        "O:AAPL240719P00200000",
-        "O:MSFT240719C00400000",
-    }
-    assert all(j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
+    tickers = sorted(j["payload"]["option_ticker"] for j in result["jobs"])
+    # 2 expiries × 2 rights × 3 strikes (190/200/210) = 12; nothing from exp3/exp4, nothing at 50 or 300.
+    assert len(tickers) == 12
+    assert all(t[6:12] in ("240621", "240628") for t in tickers)
+    assert {t[-8:] for t in tickers} == {"00190000", "00200000", "00210000"}
+    assert all(j["kind"] == "option_daily" and j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
+
+
+def test_enqueue_option_bars_skips_underlyings_without_a_close() -> None:
+    contracts = [("O:SPX240621C05000000", "SPX", date(2024, 6, 21), 5000.0)]
+    conn = _DailyConn(option_contracts=contracts, spots={})  # no index level on this plan
+    result = enqueue_slot(
+        conn,
+        "option-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["SPX"],
+        scheduler_cfg={"iv_radar_benchmarks": [], "slots": {"option-bars": {}}},
+    )
+    assert result["enqueued"] == 0
 
 
 def test_option_trades_universe_always_includes_spx() -> None:
@@ -505,10 +570,10 @@ def test_option_trades_slot_retired() -> None:
 
 def test_enqueue_minute_bars() -> None:
     contracts = [
-        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
-        ("O:AAPL240719P00200000", "AAPL", date(2024, 7, 19)),
+        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19), 200.0),
+        ("O:AAPL240719P00200000", "AAPL", date(2024, 7, 19), 200.0),
     ]
-    conn = _DailyConn(option_contracts=contracts)
+    conn = _DailyConn(option_contracts=contracts, spots={"AAPL": 199.5})
     result = enqueue_slot(
         conn,
         "minute-bars",
@@ -995,7 +1060,7 @@ def test_reference_and_universe_skip_watchlist_lookup() -> None:
 
 
 def test_enqueue_oi_gap_heal() -> None:
-    """D6=B: weekly slot runs extract inline (no Polygon jobs)."""
+    """The weekly extract is worker jobs in bounded chunks, not an inline API query."""
     conn = _DailyConn(
         watchlist=["AAPL"],
         calendar={
@@ -1003,32 +1068,23 @@ def test_enqueue_oi_gap_heal() -> None:
             date(2024, 6, 19): True,
             date(2024, 6, 20): True,
         },
-        extract_rows=[
-            (
-                "O:AAPL250620C00150000",
-                "AAPL",
-                100,
-                date(2024, 6, 20),
-                date(2025, 6, 20),
-                150.0,
-                "C",
-                "AAPL",
-            ),
-        ],
     )
     result = enqueue_slot(
         conn,
         "oi-gap-heal",
         target_date=date(2024, 6, 20),
         watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3}}},
+        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3, "chunk_size": 3}}},
     )
     assert result["slot"] == "oi-gap-heal"
-    assert result["enqueued"] == 0
-    assert result["candidates"] == 1
     assert result["from_date"] == "2024-06-18"
     assert result["to_date"] == "2024-06-20"
-    assert any("DO NOTHING" in s[0] for s in conn.statements if "INSERT INTO" in s[0])
+    # AAPL ∪ SPY/QQQ/IWM = 4 underlyings in chunks of 3 → 2 jobs, no vendor kind.
+    assert result["enqueued"] == 2
+    assert all(j["kind"] == "oi_gap_heal" for j in result["jobs"])
+    assert result["jobs"][0]["payload"] == {"from": "2024-06-18", "to": "2024-06-20", "underlyings": ["AAPL", "IWM", "QQQ"]}
+    assert result["jobs"][1]["payload"]["underlyings"] == ["SPY"]
+    assert not any("option_snapshot" in st[0].lower() for st in conn.statements)
 
 
 def test_oi_gap_heal_runs_on_weekend() -> None:
@@ -1051,8 +1107,8 @@ def test_oi_gap_heal_runs_on_weekend() -> None:
         watchlist_symbols=["AAPL"],
         scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3}}},
     )
-    assert result.get("skipped") is not True or result.get("reason") == "no trading days"
-    assert result["enqueued"] == 0
+    assert result.get("skipped") is not True
+    assert result["enqueued"] >= 1
 
 
 def test_migrated_analytics_slots_rejected() -> None:
@@ -1061,3 +1117,78 @@ def test_migrated_analytics_slots_rejected() -> None:
     for slot in ("max-pain", "atm-iv-pcr", "iv-percentile"):
         with pytest.raises(ValueError, match="moved to bifrost_research"):
             enqueue_slot(conn, slot, target_date=date(2024, 6, 20))
+
+
+def test_enqueue_fundamentals_market() -> None:
+    """Whole-market ratios + short data for the last completed session, three jobs."""
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "fundamentals-market",
+        target_date=date(2024, 6, 21),  # Friday
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2, "short_interest_lookback_days": 20}}},
+    )
+    by_kind = {j["kind"]: j["payload"] for j in result["jobs"]}
+    assert set(by_kind) == {"ratios_market", "short_volume_market", "short_interest_market"}
+    assert by_kind["ratios_market"] == {"date": "2024-06-21"}
+    assert by_kind["short_volume_market"] == {"date": "2024-06-21"}
+    assert by_kind["short_interest_market"] == {"settlement_date_gte": "2024-06-01"}
+    # Not holiday-gated: it fires the morning after a session, which may be a Saturday.
+    weekend = enqueue_slot(
+        _DailyConn(["AAPL"]),
+        "fundamentals-market",
+        target_date=date(2024, 6, 21),
+        fire_date=date(2024, 6, 22),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"fundamentals-market": {}}},
+    )
+    assert weekend["enqueued"] == 3
+
+
+def test_fundamentals_rotate_skips_vendor_voids() -> None:
+    """A name the vendor answered nothing for waits a month instead of leading the queue daily."""
+    conn = _DailyConn(
+        cs_universe=["AAA", "BBB", "CCC", "DDD"],
+        income_covered=["AAA"],
+        voided=["CCC"],
+    )
+    result = enqueue_slot(
+        conn,
+        "fundamentals-rotate",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=[],
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {
+                "fundamentals-rotate": {
+                    "batch_size": 2,
+                    "universe": "cs",
+                    "prioritize_missing": True,
+                    "include_ratios": False,
+                    "include_short_interest": False,
+                    "include_short_volume": False,
+                }
+            },
+        },
+    )
+    batch = {j["payload"]["symbol"] for j in result["jobs"]}
+    assert batch == {"BBB", "DDD"}  # the two missing names that are not voids
+
+
+def test_watchlist_falls_back_to_cache_not_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bifrost_market_data.scheduler import daily as mod
+
+    cfg = {"watchlist_source": "platform-api", "platform_api_url": "http://platform.test"}
+    # Reachable: the union is returned and cached.
+    monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: ["NVDA", "TSLA"])
+    conn = _DailyConn(watchlist=["AAPL"])
+    assert mod.load_watchlist_symbols(conn, cfg) == ["NVDA", "TSLA"]
+    assert any("watchlist_cache" in st[0].lower() and "insert" in st[0].lower() for st in conn.statements)
+    # Unreachable: the cached union wins over the (Trade-owned, usually absent) DB query.
+    monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: None)
+    conn = _DailyConn(watchlist=["AAPL"], watchlist_cache=["NVDA", "TSLA"])
+    assert mod.load_watchlist_symbols(conn, cfg) == ["NVDA", "TSLA"]
+    # Unreachable and no cache: the old DB fallback still applies.
+    conn = _DailyConn(watchlist=["AAPL"])
+    assert mod.load_watchlist_symbols(conn, cfg) == ["AAPL"]

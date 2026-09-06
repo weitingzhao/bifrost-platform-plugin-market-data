@@ -9,7 +9,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 
-from bifrost_market_data.ingest._upsert import batch_upsert, parse_option_ticker
+from bifrost_market_data.ingest._upsert import batch_upsert, parse_date, parse_option_ticker
+from bifrost_market_data.worker.claim import JobRow
 
 _COLS = (
     "option_ticker",
@@ -187,4 +188,37 @@ def extract_oi_from_snapshots(
         "candidates": len(rows),
         "rows_attempted": n,
         "skipped": skipped,
+    }
+
+
+async def handle_oi_gap_heal(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
+    """kind=oi_gap_heal — the weekly DB-to-DB extract, one underlying at a time.
+
+    Bounded memory: each underlying is its own SELECT, so a two-week window of
+    the biggest chains never sits in one ``fetchall``. No vendor call.
+    """
+    _ = client
+    payload = job.payload or {}
+    from_date = parse_date(payload.get("from"))
+    to_date = parse_date(payload.get("to"))
+    underlyings = [str(u).strip().upper() for u in (payload.get("underlyings") or []) if str(u).strip()]
+    if from_date is None or to_date is None:
+        raise ValueError("oi_gap_heal payload requires from and to")
+    if not underlyings:
+        raise ValueError("oi_gap_heal payload requires underlyings (bounded extract)")
+    rows_attempted = 0
+    candidates = 0
+    skipped = 0
+    for und in underlyings:
+        result = extract_oi_from_snapshots(conn, underlyings=[und], from_date=from_date, to_date=to_date)
+        rows_attempted += int(result.get("rows_attempted") or 0)
+        candidates += int(result.get("candidates") or 0)
+        skipped += int(result.get("skipped") or 0)
+    return {
+        "rows_written": rows_attempted,
+        "candidates": candidates,
+        "skipped": skipped,
+        "underlyings": len(underlyings),
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
     }

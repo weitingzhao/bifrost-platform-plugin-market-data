@@ -32,6 +32,9 @@ data:
         corporate:
           cron: "0 23 * * *"
           priority: 2
+          # Whole market by ex-date window, not per watchlist symbol.
+          lookback_days: 7
+          lookahead_days: 60
         option-refresh:
           cron: "20 */6 * * *"
           priority: 4
@@ -39,14 +42,15 @@ data:
         option-bars:
           cron: "45 22 * * *"
           priority: 4
-          expiry_days: 60
-          max_per_underlying: 40
+          # At-the-money: next 3 expiries × ±10 strikes per right, per underlying.
+          expiries: 3
+          strikes_each_side: 10
         # option-trades retired 0.10.3: option trades are not in Options Starter.
         minute-bars:
           cron: "15 23 * * *"
           priority: 3
-          expiry_days: 45
-          max_per_underlying: 10
+          expiries: 2
+          strikes_each_side: 5
           batch_size: 80
         calendar:
           cron: "0 22 * * *"
@@ -78,6 +82,12 @@ data:
         stock-movers:
           cron: "10 21 * * *"
           priority: 4
+        fundamentals-market:
+          # Ratios + short volume for the last completed session, short interest
+          # for the latest settlement; whole market at 1,000 rows a page.
+          cron: "30 4 * * 2-6"
+          priority: 2
+          short_interest_lookback_days: 20
         oi-gap-heal:
           cron: "0 4 * * 6"
           lookback_days: 30

@@ -170,3 +170,41 @@ def post_source_void(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+@router.get("/symbol-void")
+def get_symbol_void(data_type: str = "financials", limit: int = 50) -> dict[str, Any]:
+    """Symbols the vendor returned nothing for (skipped by the rotate for a month)."""
+    conn = require_db()
+    try:
+        if not table_exists(conn, "ops_jobs", "symbol_source_void"):
+            return {"ok": True, "data_type": data_type, "count": 0, "symbols": []}
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM ops_jobs.symbol_source_void WHERE data_type = %s",
+                (data_type,),
+            )
+            row = cur.fetchone()
+            count = int((row[0] if not isinstance(row, dict) else next(iter(row.values()))) or 0) if row else 0
+            cur.execute(
+                """
+                SELECT symbol, checks, last_checked
+                FROM ops_jobs.symbol_source_void
+                WHERE data_type = %s
+                ORDER BY last_checked DESC, symbol
+                LIMIT %s
+                """,
+                (data_type, max(1, min(int(limit), 500))),
+            )
+            rows = cur.fetchall() or []
+        symbols = [
+            {
+                "symbol": r[0] if not isinstance(r, dict) else r.get("symbol"),
+                "checks": int((r[1] if not isinstance(r, dict) else r.get("checks")) or 0),
+                "last_checked": iso_value(r[2] if not isinstance(r, dict) else r.get("last_checked")),
+            }
+            for r in rows
+        ]
+        return {"ok": True, "data_type": data_type, "count": count, "symbols": symbols}
+    finally:
+        conn.close()

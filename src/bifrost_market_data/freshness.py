@@ -7,6 +7,13 @@ from typing import Any, Mapping
 # Jobs that write the same logical table map to one freshness dimension.
 _DIMENSION_ALIASES: dict[str, str] = {
     "stock_daily_grouped": "stock_daily",
+    # Full-market pulls fill the same tables as the per-symbol kinds.
+    "splits_market": "splits",
+    "dividends_market": "dividends",
+    "ratios_market": "ratios",
+    "short_volume_market": "short_volume",
+    "short_interest_market": "short_interest",
+    "oi_gap_heal": "option_open_interest",
 }
 
 

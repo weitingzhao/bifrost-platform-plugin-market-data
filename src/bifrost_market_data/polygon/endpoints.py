@@ -67,6 +67,8 @@ def options_contracts_params(
     limit: int = 250,
     order: str = "asc",
     sort: str = "ticker",
+    expiration_date_gte: str | None = None,
+    expiration_date_lte: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "limit": min(int(limit), 1000),
@@ -79,6 +81,10 @@ def options_contracts_params(
         params["expiration_date"] = expiration_date
     if expired is not None:
         params["expired"] = "true" if expired else "false"
+    if expiration_date_gte:
+        params["expiration_date.gte"] = expiration_date_gte
+    if expiration_date_lte:
+        params["expiration_date.lte"] = expiration_date_lte
     return params
 
 
@@ -166,10 +172,20 @@ def splits_path() -> str:
     return "/stocks/v1/splits"
 
 
-def splits_params(*, ticker: str | None = None, limit: int = 1000) -> dict[str, Any]:
+def splits_params(
+    *,
+    ticker: str | None = None,
+    limit: int = 1000,
+    execution_date_gte: str | None = None,
+    execution_date_lte: str | None = None,
+) -> dict[str, Any]:
     params: dict[str, Any] = {"limit": min(int(limit), 5000)}
     if ticker:
         params["ticker"] = str(ticker).strip().upper()
+    if execution_date_gte:
+        params["execution_date.gte"] = execution_date_gte
+    if execution_date_lte:
+        params["execution_date.lte"] = execution_date_lte
     return params
 
 
@@ -178,10 +194,20 @@ def dividends_path() -> str:
     return "/stocks/v1/dividends"
 
 
-def dividends_params(*, ticker: str | None = None, limit: int = 1000) -> dict[str, Any]:
+def dividends_params(
+    *,
+    ticker: str | None = None,
+    limit: int = 1000,
+    ex_dividend_date_gte: str | None = None,
+    ex_dividend_date_lte: str | None = None,
+) -> dict[str, Any]:
     params: dict[str, Any] = {"limit": min(int(limit), 5000)}
     if ticker:
         params["ticker"] = str(ticker).strip().upper()
+    if ex_dividend_date_gte:
+        params["ex_dividend_date.gte"] = ex_dividend_date_gte
+    if ex_dividend_date_lte:
+        params["ex_dividend_date.lte"] = ex_dividend_date_lte
     return params
 
 
@@ -433,11 +459,19 @@ def ratios_path() -> str:
     return "/stocks/financials/v1/ratios"
 
 
-def ratios_params(*, ticker: str, limit: int = 10, sort: str | None = None) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "ticker": str(ticker).strip().upper(),
-        "limit": min(int(limit), 1000),
-    }
+def ratios_params(
+    *,
+    ticker: str | None = None,
+    date: str | None = None,
+    limit: int = 10,
+    sort: str | None = None,
+) -> dict[str, Any]:
+    """Per-ticker history, or — with ``date`` and no ticker — the whole market for one day."""
+    params: dict[str, Any] = {"limit": min(int(limit), 1000)}
+    if ticker:
+        params["ticker"] = str(ticker).strip().upper()
+    if date:
+        params["date"] = date
     if sort:
         params["sort"] = sort
     return params
@@ -449,17 +483,19 @@ def short_interest_path() -> str:
 
 def short_interest_params(
     *,
-    ticker: str,
+    ticker: str | None = None,
     settlement_date: str | None = None,
+    settlement_date_gte: str | None = None,
     limit: int = 10,
     sort: str | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "ticker": str(ticker).strip().upper(),
-        "limit": min(int(limit), 1000),
-    }
+    params: dict[str, Any] = {"limit": min(int(limit), 1000)}
+    if ticker:
+        params["ticker"] = str(ticker).strip().upper()
     if settlement_date:
         params["settlement_date"] = settlement_date
+    if settlement_date_gte:
+        params["settlement_date.gte"] = settlement_date_gte
     if sort:
         params["sort"] = sort
     return params
@@ -471,15 +507,14 @@ def short_volume_path() -> str:
 
 def short_volume_params(
     *,
-    ticker: str,
+    ticker: str | None = None,
     date: str | None = None,
     limit: int = 10,
     sort: str | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "ticker": str(ticker).strip().upper(),
-        "limit": min(int(limit), 1000),
-    }
+    params: dict[str, Any] = {"limit": min(int(limit), 1000)}
+    if ticker:
+        params["ticker"] = str(ticker).strip().upper()
     if date:
         params["date"] = date
     if sort:

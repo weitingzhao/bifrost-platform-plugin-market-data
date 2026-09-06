@@ -43,6 +43,11 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
         "short_volume",
         "splits",
         "dividends",
+        "splits_market",
+        "dividends_market",
+        "ratios_market",
+        "short_volume_market",
+        "short_interest_market",
         "calendar",
         "ticker_related",
     ),
@@ -54,6 +59,7 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
         "option_contract",
         "option_expiration",
         "option_open_interest",
+        "oi_gap_heal",
     ),
 }
 

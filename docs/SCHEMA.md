@@ -379,7 +379,29 @@ Replaces `public.job_massive_backfill` as the PG-as-broker queue.
 
 ### `ops_jobs.ingest_freshness`
 
-Per-dimension freshness for Platform probes (`dimension` PK).
+Per-dimension freshness for Platform probes (`dimension` PK). Every scheduled
+slot names a freshness dimension (0.10.4): job rows are trimmed, freshness rows
+are not, so schedule adherence survives the trim.
+
+### `ops_jobs.symbol_source_void` (subscription-focus P2)
+
+Names the vendor returned nothing for. Written by the `financials` handler on
+an empty answer, cleared on a non-empty one; the fundamentals rotate skips
+symbols checked within 30 days so a void is re-tried monthly, not daily.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| symbol | text | PK part |
+| data_type | text | PK part; `financials` today |
+| checks | integer | consecutive empty answers |
+| first_seen / last_checked | timestamptz | |
+| note | text | |
+
+### `ops_jobs.watchlist_cache` (subscription-focus P2)
+
+The last good watchlist union from platform-api (`symbol` PK, `source`,
+`updated_at`). When platform-api is unreachable at 22:00 UTC the scheduler
+reads this instead of shrinking the universe to the benchmarks.
 
 ~~`data_ops.us_trading_calendar`~~ — **retired**. Trading-day checks use
 `market.us_market_holiday` (weekday − NYSE closed).

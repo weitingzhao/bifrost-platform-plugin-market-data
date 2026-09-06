@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
 from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
+from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import is_trading_day
 
 # Swimlane horizon (UTC). Drain lookback is longer so weekend catch-up bars clip in.
@@ -39,11 +40,18 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "freshness": "option_snapshot",
     },
     "universe-daily": {"kinds": ["stock_daily_grouped"], "freshness": "stock_daily"},
-    "corporate": {"kinds": ["splits", "dividends"], "freshness": "dividends"},
+    "corporate": {"kinds": ["splits_market", "dividends_market"], "freshness": "dividends"},
     "option-refresh": {"kinds": ["option_contract"], "freshness": "option_contract"},
     "option-bars": {"kinds": ["option_daily"], "freshness": "option_daily"},
-    # Retired 0.10.3: option trades are not in Options Starter.
-    "option-trades": {"kinds": [], "freshness": None, "inline": True, "retired": True},
+    # Retired 0.10.3: option trades are not in Options Starter. Stays on the
+    # board as a placeholder so the reader sees what an upgrade would add.
+    "option-trades": {
+        "kinds": [],
+        "freshness": None,
+        "inline": True,
+        "retired": True,
+        "planned_on_upgrade": True,
+    },
     "minute-bars": {"kinds": ["stock_minute", "option_minute"], "freshness": "stock_minute"},
     "calendar": {"kinds": ["calendar"], "freshness": "calendar"},
     "reference": {"kinds": ["ticker_sync"], "freshness": "ticker_sync"},
@@ -51,10 +59,13 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "related-rotate": {"kinds": ["ticker_related"], "freshness": "ticker_related"},
     "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
     "stock-movers": {"kinds": ["stock_movers"], "freshness": "stock_movers"},
+    "fundamentals-market": {
+        "kinds": ["ratios_market", "short_volume_market", "short_interest_market"],
+        "freshness": "ratios",
+    },
     "oi-gap-heal": {
-        "kinds": [],
+        "kinds": ["oi_gap_heal"],
         "freshness": "option_open_interest",
-        "inline": True,
         "maintenance": True,
     },
     "max-pain": {
@@ -107,7 +118,8 @@ SLOT_NOTES: dict[str, str] = {
     "related-rotate": "Related-companies rotate",
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
-    "oi-gap-heal": "OI extract from snapshots (inline)",
+    "fundamentals-market": "Ratios + short data, whole market by date",
+    "oi-gap-heal": "OI extract from snapshots (worker jobs)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",
@@ -117,6 +129,12 @@ SLOT_NOTES: dict[str, str] = {
 
 MIGRATED_SLOT_IDS = frozenset(
     sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("migrated")
+)
+
+# Slots retired only because the current subscription lacks the data. Surfaced
+# even when schedule.yaml no longer lists them: a placeholder, not a miss.
+PLANNED_ON_UPGRADE_SLOT_IDS = frozenset(
+    sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("planned_on_upgrade")
 )
 
 
@@ -513,13 +531,22 @@ def _slot_adherence(
             "drain": None,
         }
     if retired:
+        req = SLOT_REQUIREMENTS.get(slot_id, {})
+        planned = bool(evidence.get("planned_on_upgrade"))
+        detail = (
+            f"planned — needs {req.get('requires')}; enabled by upgrading the subscription"
+            if planned and req.get("requires")
+            else "retired"
+        )
         return {
             "slot": slot_id,
             "cron": cron or None,
             "note": SLOT_NOTES.get(slot_id, "retired"),
             "ok": True,
             "adherence": "retired",
-            "detail": "retired — not covered by the current subscription",
+            "detail": detail,
+            "requires": req.get("requires"),
+            "planned_on_upgrade": planned,
             "last_fire": None,
             "next_fires": [],
             "inline": inline,
@@ -720,8 +747,9 @@ def build_queue_dashboard(
             )
         )
 
-    # Surface migrated analytics slots even when removed from schedule.yaml.
-    for slot_id in sorted(MIGRATED_SLOT_IDS):
+    # Surface migrated analytics slots and planned-on-upgrade slots even when
+    # removed from schedule.yaml.
+    for slot_id in sorted(MIGRATED_SLOT_IDS | PLANNED_ON_UPGRADE_SLOT_IDS):
         if slot_id in active_slot_ids:
             continue
         plan.append(

@@ -112,3 +112,56 @@ def test_registry_covers_all_pool_kinds() -> None:
     client = mock_client()
     registry = build_handler_registry(client, connect=FakeConn)
     assert set(registry.keys()) == kinds
+
+
+@pytest.mark.asyncio
+async def test_full_market_fundamentals_and_corporate_handlers() -> None:
+    from bifrost_market_data.ingest.corporate_action import handle_dividends_market, handle_splits_market
+    from bifrost_market_data.ingest.financials_market import (
+        handle_ratios_market,
+        handle_short_interest_market,
+        handle_short_volume_market,
+    )
+    from datetime import date as _date
+
+    client = mock_client(
+        fetch_ratios_market={"results": [{"ticker": "AAPL", "date": "2026-09-04", "return_on_equity": 1.5}, {"date": "2026-09-04"}], "pages": 6},
+        fetch_short_volume_market={"results": [{"ticker": "AAPL", "date": "2026-09-04", "short_volume_ratio": 34.9}], "pages": 12},
+        fetch_short_interest_market={"results": [{"ticker": "AAPL", "settlement_date": "2026-08-31", "short_interest": 1}], "pages": 3},
+        fetch_dividends_market={"results": [{"ticker": "AAPL", "ex_dividend_date": "2026-09-10", "cash_amount": 0.25, "currency": "USD"}], "pages": 1},
+        fetch_splits_market={"results": [{"ticker": "NVDA", "execution_date": "2026-09-08", "split_from": 1, "split_to": 4}], "pages": 1},
+    )
+    r = await handle_ratios_market(make_job("ratios_market", {"date": "2026-09-04"}), client, FakeConn())
+    assert r["rows_written"] == 1 and r["pages"] == 6  # the row without a ticker is dropped
+    r = await handle_short_volume_market(make_job("short_volume_market", {"date": "2026-09-04"}), client, FakeConn())
+    assert r["rows_written"] == 1
+    conn = FakeConn()
+    r = await handle_short_interest_market(make_job("short_interest_market", {"settlement_date_gte": "2026-08-15"}), client, conn)
+    assert r["rows_written"] == 1
+    row = next(p for _, p in conn.statements if isinstance(p, list))[0]
+    assert row[0] == "AAPL" and row[1] == _date(2026, 8, 31) and row[2] == "biweekly"
+    conn = FakeConn()
+    r = await handle_dividends_market(make_job("dividends_market", {"from": "2026-09-01", "to": "2026-10-30"}), client, conn)
+    assert r["rows_written"] == 1
+    client.fetch_dividends_market.assert_awaited_once_with("2026-09-01", "2026-10-30")
+    r = await handle_splits_market(make_job("splits_market", {"from": "2026-09-01", "to": "2026-10-30"}), client, FakeConn())
+    assert r["rows_written"] == 1
+
+
+@pytest.mark.asyncio
+async def test_oi_gap_heal_job_extracts_per_underlying() -> None:
+    from bifrost_market_data.ingest.option_oi_extract import handle_oi_gap_heal
+
+    conn = FakeConn()
+    result = await handle_oi_gap_heal(
+        make_job("oi_gap_heal", {"from": "2026-08-25", "to": "2026-09-05", "underlyings": ["NVDA", "SPX"]}),
+        None,
+        conn,
+    )
+    assert result["underlyings"] == 2
+    assert result["from_date"] == "2026-08-25"
+    selects = [st for st in conn.statements if "distinct on" in st[0].lower()]
+    assert len(selects) == 2  # one bounded SELECT per underlying
+    assert selects[0][1][2] == ["NVDA"] and selects[1][1][2] == ["SPX"]
+    with pytest.raises(ValueError, match="underlyings"):
+        await handle_oi_gap_heal(make_job("oi_gap_heal", {"from": "2026-08-25", "to": "2026-09-05"}), None, conn)

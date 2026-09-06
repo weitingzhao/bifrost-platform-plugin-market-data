@@ -7,8 +7,18 @@ from typing import Any
 
 from bifrost_market_data.ingest._upsert import make_handler
 from bifrost_market_data.ingest.calendar import handle_calendar
-from bifrost_market_data.ingest.corporate_action import handle_dividends, handle_splits
+from bifrost_market_data.ingest.corporate_action import (
+    handle_dividends,
+    handle_dividends_market,
+    handle_splits,
+    handle_splits_market,
+)
 from bifrost_market_data.ingest.financials import handle_financials
+from bifrost_market_data.ingest.financials_market import (
+    handle_ratios_market,
+    handle_short_interest_market,
+    handle_short_volume_market,
+)
 from bifrost_market_data.ingest.financials_ext import (
     handle_ratios,
     handle_short_interest,
@@ -19,6 +29,7 @@ from bifrost_market_data.ingest.option_daily import handle_option_daily
 from bifrost_market_data.ingest.option_expiration import handle_option_expiration
 from bifrost_market_data.ingest.option_minute import handle_option_minute
 from bifrost_market_data.ingest.option_oi import handle_option_open_interest
+from bifrost_market_data.ingest.option_oi_extract import handle_oi_gap_heal
 from bifrost_market_data.ingest.option_snapshot import handle_option_snapshot
 from bifrost_market_data.ingest.option_trades import handle_option_trades
 from bifrost_market_data.ingest.stock_daily import handle_stock_daily
@@ -46,6 +57,7 @@ _RAW_HANDLERS: dict[str, Any] = {
     "option_contract": handle_option_contract,
     "option_expiration": handle_option_expiration,
     "option_open_interest": handle_option_open_interest,
+    "oi_gap_heal": handle_oi_gap_heal,
     "ticker_sync": handle_ticker_sync,
     "ticker_related": handle_ticker_related,
     "ticker_type": handle_ticker_type,
@@ -55,6 +67,11 @@ _RAW_HANDLERS: dict[str, Any] = {
     "short_volume": handle_short_volume,
     "splits": handle_splits,
     "dividends": handle_dividends,
+    "splits_market": handle_splits_market,
+    "dividends_market": handle_dividends_market,
+    "ratios_market": handle_ratios_market,
+    "short_volume_market": handle_short_volume_market,
+    "short_interest_market": handle_short_interest_market,
     "calendar": handle_calendar,
 }
 
@@ -90,6 +107,7 @@ __all__ = [
     "handle_option_contract",
     "handle_option_expiration",
     "handle_option_open_interest",
+    "handle_oi_gap_heal",
     "handle_ticker_sync",
     "handle_ticker_related",
     "handle_ticker_type",
@@ -99,5 +117,10 @@ __all__ = [
     "handle_short_volume",
     "handle_splits",
     "handle_dividends",
+    "handle_splits_market",
+    "handle_dividends_market",
+    "handle_ratios_market",
+    "handle_short_volume_market",
+    "handle_short_interest_market",
     "handle_calendar",
 ]

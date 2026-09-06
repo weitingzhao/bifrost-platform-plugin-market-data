@@ -124,7 +124,12 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["queue"]["scheduled_future"] == 0
     assert report["queue"]["running"] == 2
     assert report["throughput"]["done_last_15m"] == 30
-    assert len(report["schedule"]["slots"]) == 5  # 2 active + 3 migrated
+    assert len(report["schedule"]["slots"]) == 6  # 2 active + 3 migrated + 1 planned-on-upgrade
+    placeholder = next(s for s in report["schedule"]["slots"] if s["slot"] == "option-trades")
+    assert placeholder["adherence"] == "retired"
+    assert placeholder["planned_on_upgrade"] is True
+    assert placeholder["requires"] == "Options Developer"
+    assert "upgrading the subscription" in placeholder["detail"]
     migrated = [s for s in report["schedule"]["slots"] if s.get("migrated")]
     assert len(migrated) == 3
     assert all(s["adherence"] == "migrated" for s in migrated)

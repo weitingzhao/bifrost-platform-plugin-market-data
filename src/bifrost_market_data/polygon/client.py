@@ -303,14 +303,22 @@ class PolygonClient:
         underlying_ticker: str | None = None,
         expiration_date: str | None = None,
         expired: bool | None = False,
-        max_pages: int = 20,
+        max_pages: int = 60,
+        expiration_date_gte: str | None = None,
+        expiration_date_lte: str | None = None,
     ) -> dict[str, Any]:
-        """GET ``/v3/reference/options/contracts`` with pagination."""
+        """GET ``/v3/reference/options/contracts`` with pagination.
+
+        ``max_pages`` defaults to 60 (60k contracts at 1,000/page): SPX alone
+        lists ~36k live contracts, so the old 20-page cap truncated it.
+        """
         path = ep.options_contracts_path()
         params = ep.options_contracts_params(
             underlying_ticker=underlying_ticker,
             expiration_date=expiration_date,
             expired=expired,
+            expiration_date_gte=expiration_date_gte,
+            expiration_date_lte=expiration_date_lte,
         )
         return await self._paginate(path, params, max_pages=max_pages)
 
@@ -590,6 +598,55 @@ class PolygonClient:
         if not isinstance(data, dict):
             raise PolygonAPIError("unexpected short volume payload", body=data, url=path)
         return data
+
+    # ---- full-market pulls (Financials & Ratios / Stocks Starter) ----
+    # One paginated call per date replaces thousands of per-ticker calls.
+
+    async def fetch_ratios_market(self, date: str, *, max_pages: int = 20) -> dict[str, Any]:
+        path = ep.ratios_path()
+        return await self._paginate(path, ep.ratios_params(date=date, limit=1000), max_pages=max_pages)
+
+    async def fetch_short_volume_market(self, date: str, *, max_pages: int = 30) -> dict[str, Any]:
+        path = ep.short_volume_path()
+        return await self._paginate(path, ep.short_volume_params(date=date, limit=1000), max_pages=max_pages)
+
+    async def fetch_short_interest_market(
+        self, settlement_date_gte: str, *, max_pages: int = 30
+    ) -> dict[str, Any]:
+        path = ep.short_interest_path()
+        return await self._paginate(
+            path,
+            ep.short_interest_params(settlement_date_gte=settlement_date_gte, limit=1000),
+            max_pages=max_pages,
+        )
+
+    async def fetch_dividends_market(
+        self, ex_dividend_date_gte: str, ex_dividend_date_lte: str, *, max_pages: int = 20
+    ) -> dict[str, Any]:
+        path = ep.dividends_path()
+        return await self._paginate(
+            path,
+            ep.dividends_params(
+                ex_dividend_date_gte=ex_dividend_date_gte,
+                ex_dividend_date_lte=ex_dividend_date_lte,
+                limit=1000,
+            ),
+            max_pages=max_pages,
+        )
+
+    async def fetch_splits_market(
+        self, execution_date_gte: str, execution_date_lte: str, *, max_pages: int = 5
+    ) -> dict[str, Any]:
+        path = ep.splits_path()
+        return await self._paginate(
+            path,
+            ep.splits_params(
+                execution_date_gte=execution_date_gte,
+                execution_date_lte=execution_date_lte,
+                limit=1000,
+            ),
+            max_pages=max_pages,
+        )
 
     async def fetch_indicator(
         self,

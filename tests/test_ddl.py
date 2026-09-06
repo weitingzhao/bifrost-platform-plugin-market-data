@@ -108,8 +108,10 @@ def test_expected_object_counts() -> None:
     assert "ticker_type" in MARKET_TABLES
     assert "stock_financials" not in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 0
-    assert len(DATA_OPS_TABLES) == 3
+    assert len(DATA_OPS_TABLES) == 5
     assert "data_source_void" in DATA_OPS_TABLES
+    assert "symbol_source_void" in DATA_OPS_TABLES
+    assert "watchlist_cache" in DATA_OPS_TABLES
     assert "us_trading_calendar" not in DATA_OPS_TABLES
     assert len(MARKET_VIEWS) == 4
     assert "stock_financials" in MARKET_VIEWS

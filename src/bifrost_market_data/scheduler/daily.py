@@ -20,7 +20,9 @@ import yaml
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.freshness import update_freshness
-from bifrost_market_data.scheduler.enqueue import insert_job, trim_old_jobs
+from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk, trim_old_jobs
+from bifrost_market_data.subscription import SLOT_REQUIREMENTS
+from bifrost_market_data.symbol_void import load_voided_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ SLOT_NAMES = (
     "stock-snapshot",
     "stock-movers",
     "oi-gap-heal",
+    "fundamentals-market",
 )
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
@@ -60,11 +63,11 @@ SESSION_ONCE_SLOTS: dict[str, tuple[str, ...]] = {
 }
 SESSION_ONCE_WINDOW_HOURS = 12
 
-# Retired slots — the current Massive subscriptions (Options Starter, Stocks
-# Starter, Financials & Ratios) do not cover the data. Kept in SLOT_NAMES so
-# Dagster / CLI callers get a skip instead of a 400 until the plan changes.
+# Retired slots — the current Massive subscriptions do not cover the data.
+# Kept in SLOT_NAMES so Dagster / CLI callers get a skip instead of a 400
+# until the plan changes; the wording lives in subscription.py.
 UNENTITLED_SLOTS: dict[str, str] = {
-    "option-trades": "option trades need Options Developer; current plan is Options Starter",
+    slot: req["reason"] for slot, req in SLOT_REQUIREMENTS.items()
 }
 
 # Slots that skip enqueue on NYSE closed / weekend (must match adherence logic).
@@ -205,6 +208,43 @@ def _session_evidence_exists(conn: Any, kinds: Sequence[str], *, hours: int) -> 
     return row is not None
 
 
+def _store_watchlist_cache(conn: Any, symbols: Sequence[str], *, source: str) -> None:
+    """Remember the last good union so an outage does not shrink the universe."""
+    syms = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+    if not syms:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM ops_jobs.watchlist_cache")
+            cur.executemany(
+                "INSERT INTO ops_jobs.watchlist_cache (symbol, source, updated_at) VALUES (%s, %s, now())",
+                [(s, source) for s in syms],
+            )
+        if hasattr(conn, "commit"):
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 — the cache is a courtesy, not the source
+        logger.warning("watchlist cache store failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def _read_watchlist_cache(conn: Any) -> list[str]:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol FROM ops_jobs.watchlist_cache ORDER BY symbol")
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("watchlist cache read failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+    return _rows_to_symbols(rows)
+
+
 def resolve_target_date(value: str | date | None = None) -> date:
     """Resolve target trading date. Default: latest weekday on NY calendar (today if weekday)."""
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -249,7 +289,15 @@ def load_watchlist_symbols(
         if platform_url:
             symbols = load_watchlist_from_platform(platform_url)
             if symbols is not None:
+                _store_watchlist_cache(conn, symbols, source="platform-api")
                 return symbols
+            cached = _read_watchlist_cache(conn)
+            if cached:
+                logger.warning(
+                    "platform-api watchlist union unreachable; using the cached union (%d symbols)",
+                    len(cached),
+                )
+                return cached
             logger.warning("platform-api fallback to DB watchlist query")
         else:
             logger.warning(
@@ -429,6 +477,12 @@ def resolve_fundamentals_rotate_symbols(
     else:
         pool = union_iv_radar_benchmarks(watchlist_symbols, scheduler_cfg)
 
+    # Names the vendor answered nothing for are skipped for a month; the
+    # missing-first rule used to put exactly those at the front every day.
+    voided = load_voided_symbols(conn, "financials")
+    if voided:
+        pool = [s for s in pool if s not in voided]
+
     prioritize_missing = bool(slot_cfg.get("prioritize_missing", True))
     if not prioritize_missing or not pool:
         return _rotate_symbols(pool, day_s)
@@ -479,57 +533,68 @@ def option_trades_universe(
     return sorted([*keep, must])
 
 
-def load_option_tickers(
+def load_option_tickers_near_spot(
     conn: Any,
     underlyings: Sequence[str],
     *,
     as_of: date,
-    expiry_days: int = 60,
-    max_per_underlying: int = 40,
+    expiries: int = 3,
+    strikes_each_side: int = 10,
 ) -> list[str]:
-    """Load near-term option_tickers from market.option_contract for underlyings.
+    """Contracts around the money: the next ``expiries`` expiries per underlying
+    and, per expiry and right, the ``2·strikes_each_side+1`` strikes nearest the
+    latest close. The old selection took the lowest strikes of the nearest
+    expiry — for a $230 stock that was C50…C105 expiring that day.
 
-    Caps per-underlying count to keep Polygon job volume bounded.
+    Underlyings without a close in ``stock_daily`` (index roots such as SPX on
+    a plan without index levels) are skipped.
     """
     syms = [str(s).strip().upper() for s in underlyings if str(s).strip()]
     if not syms:
         return []
-    expiry_days = max(0, int(expiry_days))
-    max_per = max(1, int(max_per_underlying))
-    end = as_of + timedelta(days=expiry_days)
-    tickers: list[str] = []
+    n_exp = max(1, int(expiries))
+    per_right = max(1, 2 * int(strikes_each_side) + 1)
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT option_ticker FROM (
-              SELECT
-                option_ticker,
-                underlying,
-                ROW_NUMBER() OVER (
-                  PARTITION BY underlying
-                  ORDER BY expiry ASC, strike ASC, option_right ASC
-                ) AS rn
-              FROM raw_market.option_contract
-              WHERE underlying = ANY(%s)
-                AND expiry >= %s
-                AND expiry <= %s
-            ) ranked
-            WHERE rn <= %s
-            ORDER BY option_ticker
+            /* near-spot */
+            WITH spot AS (
+              SELECT DISTINCT ON (symbol) symbol, close
+              FROM raw_market.stock_daily
+              WHERE symbol = ANY(%s) AND bar_date <= %s AND close IS NOT NULL
+              ORDER BY symbol, bar_date DESC
+            ),
+            exp AS (
+              SELECT underlying, expiry,
+                     DENSE_RANK() OVER (PARTITION BY underlying ORDER BY expiry) AS erank
+              FROM (
+                SELECT DISTINCT underlying, expiry
+                FROM raw_market.option_contract
+                WHERE underlying = ANY(%s) AND expiry >= %s
+              ) d
+            ),
+            ranked AS (
+              SELECT c.option_ticker,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY c.underlying, c.expiry, c.option_right
+                       ORDER BY abs(c.strike - s.close), c.strike
+                     ) AS srank
+              FROM raw_market.option_contract c
+              JOIN spot s ON s.symbol = c.underlying
+              JOIN exp e ON e.underlying = c.underlying AND e.expiry = c.expiry
+              WHERE e.erank <= %s
+            )
+            SELECT option_ticker FROM ranked WHERE srank <= %s ORDER BY option_ticker
             """,
-            (syms, as_of, end, max_per),
+            (syms, as_of, syms, as_of, n_exp, per_right),
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-        if rows is None:
-            rows = []
-        for row in rows:
-            if isinstance(row, Mapping):
-                t = row.get("option_ticker") or next(iter(row.values()), None)
-            else:
-                t = row[0] if row else None
-            if t:
-                tickers.append(str(t).strip().upper())
-    return tickers
+    out: list[str] = []
+    for row in rows or []:
+        t = row.get("option_ticker") if isinstance(row, Mapping) else (row[0] if row else None)
+        if t:
+            out.append(str(t).strip().upper())
+    return out
 
 
 def _slot_cfg(scheduler_cfg: Mapping[str, Any], slot: str) -> dict[str, Any]:
@@ -657,59 +722,52 @@ def enqueue_slot(
         }
 
     if slot_key == "oi-gap-heal":
-        # D6=B: weekly DB-to-DB extract over recent trading days (no Polygon).
-        # Inline — pure SQL gap-fill, no worker job kind.
-        from bifrost_market_data.ingest.option_oi_extract import extract_oi_from_snapshots
+        # DB-to-DB extract over recent trading days, run by the options workers
+        # a few underlyings at a time. It used to run inline in the API request
+        # and pull two weeks of snapshots into a 256Mi pod.
         from bifrost_market_data.quality import fetch_recent_trading_days
 
         lookback = int(scfg.get("lookback_days") or 14)
-        symbols = (
+        chunk = max(1, int(scfg.get("chunk_size") or 5))
+        base_symbols = (
             list(watchlist_symbols)
             if watchlist_symbols is not None
             else load_watchlist_symbols(conn, cfg)
         )
+        symbols = [storage_underlying(s) for s in union_iv_radar_benchmarks(base_symbols, cfg)]
         trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
-        if not trading_days:
+        if not trading_days or not symbols:
             return {
                 "slot": slot_key,
                 "lookback_days": lookback,
                 "symbols": len(symbols),
                 "skipped": True,
-                "reason": "no trading days",
+                "reason": "no trading days" if not trading_days else "no symbols",
                 "enqueued": 0,
                 "deduped": 0,
+                "jobs": [],
             }
-        extract_result = extract_oi_from_snapshots(
-            conn,
-            underlyings=symbols or None,
-            from_date=trading_days[0],
-            to_date=trading_days[-1],
-        )
-        # Inline slot creates no job_ingest rows — still touch freshness so
-        # queue-dashboard adherence has evidence after Cron/Dagster/manual fire.
-        try:
-            rows = int(
-                extract_result.get("rows_attempted")
-                or extract_result.get("candidates")
-                or 0
-            )
-            update_freshness(conn, "option_open_interest", rows, status="ok")
-        except Exception:  # noqa: BLE001 — freshness must not fail the slot
-            logger.exception("oi-gap-heal freshness update failed")
-        logger.info(
-            "oi-gap-heal from=%s to=%s candidates=%s skipped=%s",
-            extract_result.get("from_date"),
-            extract_result.get("to_date"),
-            extract_result.get("candidates"),
-            extract_result.get("skipped"),
-        )
+        from_s = trading_days[0].isoformat()
+        to_s = trading_days[-1].isoformat()
+        specs: list[tuple[str, dict[str, Any], int, int]] = []
+        jobs_out: list[dict[str, Any]] = []
+        for i in range(0, len(symbols), chunk):
+            payload = {"from": from_s, "to": to_s, "underlyings": symbols[i : i + chunk]}
+            specs.append(("oi_gap_heal", payload, priority, 3))
+            jobs_out.append({"kind": "oi_gap_heal", "payload": payload})
+        ids = insert_jobs_bulk(conn, specs)
+        for job_entry, job_id in zip(jobs_out, ids):
+            job_entry["id"] = job_id
+            job_entry["deduped"] = job_id is None
         return {
             "slot": slot_key,
             "lookback_days": lookback,
             "symbols": len(symbols),
-            "enqueued": 0,
-            "deduped": 0,
-            **extract_result,
+            "from_date": from_s,
+            "to_date": to_s,
+            "enqueued": sum(1 for j in jobs_out if not j["deduped"]),
+            "deduped": sum(1 for j in jobs_out if j["deduped"]),
+            "jobs": jobs_out,
         }
 
     if slot_key in UNENTITLED_SLOTS:
@@ -782,19 +840,13 @@ def enqueue_slot(
         symbols = load_watchlist_symbols(conn, cfg)
     else:
         symbols = []
-    enqueued = 0
-    deduped = 0
     jobs: list[dict[str, Any]] = []
+    specs: list[tuple[str, dict[str, Any], int, int]] = []
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
-        nonlocal enqueued, deduped
-        job_id = insert_job(conn, kind=kind, payload=payload, priority=pri if pri is not None else priority)
-        if job_id is None:
-            deduped += 1
-            jobs.append({"kind": kind, "payload": payload, "id": None, "deduped": True})
-        else:
-            enqueued += 1
-            jobs.append({"kind": kind, "payload": payload, "id": job_id, "deduped": False})
+        # Collected here, written in one statement below.
+        specs.append((kind, payload, pri if pri is not None else priority, 3))
+        jobs.append({"kind": kind, "payload": payload, "id": None, "deduped": True})
 
     if slot_key == "stock-eod":
         for sym in symbols:
@@ -817,9 +869,16 @@ def enqueue_slot(
         )
 
     elif slot_key == "corporate":
-        for sym in symbols:
-            _add("splits", {"symbol": sym})
-            _add("dividends", {"symbol": sym})
+        # Whole market by date window (a few pages) instead of one call per
+        # watchlist symbol: Research needs ex-dates for every name it screens.
+        back = int(scfg.get("lookback_days") or 7)
+        ahead = int(scfg.get("lookahead_days") or 60)
+        window = {
+            "from": (day - timedelta(days=back)).isoformat(),
+            "to": (day + timedelta(days=ahead)).isoformat(),
+        }
+        _add("splits_market", dict(window))
+        _add("dividends_market", dict(window))
 
     elif slot_key == "option-refresh":
         batch_size = int(scfg.get("batch_size") or 12)
@@ -839,14 +898,13 @@ def enqueue_slot(
             _add("option_contract", {"underlying": sym, "expired": False})
 
     elif slot_key == "option-bars":
-        expiry_days = int(scfg.get("expiry_days") or 60)
-        max_per = int(scfg.get("max_per_underlying") or 40)
-        tickers = load_option_tickers(
+        bars_syms = union_iv_radar_benchmarks(symbols, cfg)
+        tickers = load_option_tickers_near_spot(
             conn,
-            symbols,
+            bars_syms,
             as_of=day,
-            expiry_days=expiry_days,
-            max_per_underlying=max_per,
+            expiries=int(scfg.get("expiries") or 3),
+            strikes_each_side=int(scfg.get("strikes_each_side") or 10),
         )
         for ot in tickers:
             _add("option_daily", {"option_ticker": ot, "from": day_s, "to": day_s})
@@ -865,16 +923,14 @@ def enqueue_slot(
                         "timespan": timespan,
                     },
                 )
-        # Option minute bars: rotate a bounded batch of near-term contracts.
-        expiry_days = int(scfg.get("expiry_days") or 45)
-        max_per = int(scfg.get("max_per_underlying") or 10)
+        # Option minute bars: rotate a bounded batch of at-the-money contracts.
         batch_size = int(scfg.get("batch_size") or 80)
-        tickers = load_option_tickers(
+        tickers = load_option_tickers_near_spot(
             conn,
             symbols,
             as_of=day,
-            expiry_days=expiry_days,
-            max_per_underlying=max_per,
+            expiries=int(scfg.get("expiries") or 2),
+            strikes_each_side=int(scfg.get("strikes_each_side") or 5),
         )
         if tickers:
             offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(tickers)
@@ -938,6 +994,24 @@ def enqueue_slot(
         for sym in batch:
             _add("ticker_related", {"symbol": sym}, pri=priority)
 
+    elif slot_key == "fundamentals-market":
+        # Ratios and short data for the last completed session, whole market.
+        # Short interest settles twice a month; a 20-day window catches the
+        # latest settlement without re-pulling history.
+        from bifrost_market_data.quality import fetch_completed_trading_days
+
+        sessions = fetch_completed_trading_days(conn, 1, as_of=day)
+        session = sessions[-1] if sessions else day
+        session_s = session.isoformat()
+        si_back = int(scfg.get("short_interest_lookback_days") or 20)
+        _add("ratios_market", {"date": session_s}, pri=priority)
+        _add("short_volume_market", {"date": session_s}, pri=priority)
+        _add(
+            "short_interest_market",
+            {"settlement_date_gte": (session - timedelta(days=si_back)).isoformat()},
+            pri=priority,
+        )
+
     elif slot_key == "stock-snapshot":
         # Full-market All Tickers Snapshot (D2=A); one job, mode=all.
         _add(
@@ -953,6 +1027,13 @@ def enqueue_slot(
             {"direction": "both", "session_date": day_s},
             pri=priority,
         )
+
+    ids = insert_jobs_bulk(conn, specs)
+    for job_entry, job_id in zip(jobs, ids):
+        job_entry["id"] = job_id
+        job_entry["deduped"] = job_id is None
+    enqueued = sum(1 for j in jobs if not j["deduped"])
+    deduped = len(jobs) - enqueued
 
     return {
         "slot": slot_key,

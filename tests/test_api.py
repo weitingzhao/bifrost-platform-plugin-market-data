@@ -151,3 +151,21 @@ def test_analytics_atm_iv_404_when_empty(monkeypatch) -> None:
     client = TestClient(create_app())
     resp = client.get("/market/analytics/atm-iv", params={"symbol": "ZZZZ"})
     assert resp.status_code == 404
+
+
+def test_capabilities_matrix_names_the_upgrade_path() -> None:
+    from fastapi.testclient import TestClient
+
+    from bifrost_market_data.api.app import create_app
+
+    resp = TestClient(create_app()).get("/market/capabilities")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert {s["id"] for s in body["subscriptions"]} == {"stocks-starter", "options-starter", "financials-ratios"}
+    by_id = {c["id"]: c for c in body["capabilities"]}
+    assert by_id["option_chain_snapshot"]["status"] == "entitled"
+    assert by_id["option_trades"]["status"] == "planned"
+    assert by_id["option_trades"]["requires"] == "Options Developer"
+    assert body["retired_slots"][0]["slot"] == "option-trades"
+    assert "upgrading the subscription" in body["policy"]

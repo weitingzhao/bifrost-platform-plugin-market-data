@@ -39,6 +39,25 @@ async def test_ticker_sync_universe() -> None:
     assert result["rows_written"] == 1
     assert result["mode"] == "universe"
     assert "market.ticker" in conn.upsert_sqls()[0]
+    # A complete listing deactivates names the vendor no longer lists.
+    deact = [st for st in conn.statements if "set active = false" in st[0].lower()]
+    assert len(deact) == 1
+    assert deact[0][1] == ("stocks", "CS", "CS", ["AAPL"])
+
+
+@pytest.mark.asyncio
+async def test_ticker_sync_universe_truncated_does_not_deactivate() -> None:
+    client = mock_client(
+        fetch_reference_tickers={
+            "results": [{"ticker": "AAPL", "market": "stocks", "type": "CS", "active": True}],
+            "pages": 100,
+            "truncated": True,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_ticker_sync(make_job("ticker_sync", {"mode": "universe"}), client, conn)
+    assert result["deactivated"] == 0
+    assert not any("set active = false" in st[0].lower() for st in conn.statements)
 
 
 @pytest.mark.asyncio

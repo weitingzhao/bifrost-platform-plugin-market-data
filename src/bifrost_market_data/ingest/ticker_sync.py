@@ -138,6 +138,7 @@ async def handle_ticker_sync(job: JobRow, client: Any, conn: Any) -> Mapping[str
         if row:
             rows.append(row)
 
+    deactivated = 0
     try:
         n = batch_upsert(
             conn,
@@ -156,12 +157,29 @@ async def handle_ticker_sync(job: JobRow, client: Any, conn: Any) -> Mapping[str
                     f"UPDATE {physical_table_name('market.ticker')} SET updated_at = now() WHERE symbol = ANY(%s)",
                     (symbols,),
                 )
+                # A complete listing is the vendor's word on what still trades:
+                # names that dropped out of it are delisted, not merely stale.
+                # Only on an untruncated walk of the same type / market slice.
+                if bool(active) and not data.get("truncated"):
+                    cur.execute(
+                        f"""
+                        UPDATE {physical_table_name('market.ticker')}
+                        SET active = false, updated_at = now()
+                        WHERE market = %s
+                          AND COALESCE(active, true)
+                          AND (%s::text IS NULL OR instrument_type = %s)
+                          AND NOT (symbol = ANY(%s))
+                        """,
+                        (market, ticker_type, ticker_type, symbols),
+                    )
+                    deactivated = int(getattr(cur, "rowcount", 0) or 0)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     return {
         "rows_written": n,
+        "deactivated": deactivated,
         "mode": "universe",
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),

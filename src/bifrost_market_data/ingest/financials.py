@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import as_int, parse_date
 from bifrost_market_data.ingest.financials_tables import upsert_financials_rows
+from bifrost_market_data.symbol_void import clear_symbol_void, record_symbol_void
 from bifrost_market_data.worker.claim import JobRow
 
 # Wave 1 hygiene: stop writing comprehensive_income (197k+ rows unused by
@@ -85,9 +86,16 @@ async def handle_financials(job: JobRow, client: Any, conn: Any) -> Mapping[str,
             )
 
     n = upsert_financials_rows(conn, rows)
+    # An empty answer is a vendor void, not a transient miss: remember it so the
+    # rotate stops putting this name first in line every day.
+    if results:
+        clear_symbol_void(conn, symbol, "financials")
+    else:
+        record_symbol_void(conn, symbol, "financials", note="vendor returned no statements")
     return {
         "rows_written": n,
         "symbol": symbol,
+        "void": not results,
         "truncated": bool(data.get("truncated")),
         "pages": data.get("pages"),
     }

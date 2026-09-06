@@ -550,6 +550,40 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
+    # Per-symbol vendor voids (subscription-focus P2): names the vendor has no
+    # statements for, so the fundamentals rotate stops re-trying them daily.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.symbol_source_void (
+            symbol        text        NOT NULL,
+            data_type     text        NOT NULL,
+            checks        integer     NOT NULL DEFAULT 1,
+            first_seen    timestamptz NOT NULL DEFAULT now(),
+            last_checked  timestamptz NOT NULL DEFAULT now(),
+            note          text,
+            PRIMARY KEY (symbol, data_type)
+        )
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON TABLE ops_jobs.symbol_source_void IS
+          'Vendor returned nothing for (symbol, data_type); rotate skips it for a month.'
+        """
+    )
+
+    # Last good watchlist union (subscription-focus P2): the scheduler falls
+    # back to it when platform-api is unreachable instead of to an empty list.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.watchlist_cache (
+            symbol      text        PRIMARY KEY,
+            source      text        NOT NULL,
+            updated_at  timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+
     # Retired: flat is_trading calendar → derive from raw_market.us_market_holiday.
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
 
@@ -916,6 +950,8 @@ DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",
     "ingest_freshness",
     "data_source_void",
+    "symbol_source_void",
+    "watchlist_cache",
 )
 
 MARKET_VIEWS: tuple[str, ...] = (

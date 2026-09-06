@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bifrost_market_data.scheduler.enqueue import insert_job, payload_hash, trim_old_jobs
+from bifrost_market_data.scheduler.enqueue import insert_job, insert_jobs_bulk, payload_hash, trim_old_jobs
 
 
 class _EnqueueCursor:
@@ -14,7 +14,16 @@ class _EnqueueCursor:
     def execute(self, query: str, params: Any = None) -> None:
         self.parent.statements.append((query, params))
         q = query.lower()
-        if "returning id" in q:
+        if "unnest(" in q:
+            rows = []
+            for kind, ph in zip(params[0], params[2]):
+                if (kind, ph) in self.parent.seen_keys:
+                    continue
+                self.parent.seen_keys.add((kind, ph))
+                self.parent.next_id += 1
+                rows.append((self.parent.next_id, kind, ph))
+            self.parent._fetchall = rows
+        elif "returning id" in q:
             # Simulate dedup: same (kind, hash) already inserted → None
             kind = params[0] if params else None
             ph = params[2] if params and len(params) > 2 else None
@@ -32,6 +41,9 @@ class _EnqueueCursor:
 
     def fetchone(self) -> Any:
         return self.parent._fetchone
+
+    def fetchall(self) -> list[Any]:
+        return list(getattr(self.parent, "_fetchall", []))
 
     def __enter__(self) -> _EnqueueCursor:
         return self
@@ -100,3 +112,23 @@ def test_trim_old_jobs() -> None:
     assert n == 6  # two DELETE statements × rowcount 3
     assert conn.committed == 1
     assert any("DELETE FROM ops_jobs.job_ingest" in s[0] for s in conn.statements)
+
+
+def test_insert_jobs_bulk_one_statement_one_commit() -> None:
+    conn = _EnqueueConn()
+    ids = insert_jobs_bulk(
+        conn,
+        [
+            ("stock_daily", {"symbol": "AAPL"}, 5, 3),
+            ("stock_daily", {"symbol": "MSFT"}, 5, 3),
+            ("stock_daily", {"symbol": "AAPL"}, 5, 3),  # in-batch duplicate
+        ],
+    )
+    assert ids == [1, 2, None]
+    inserts = [st for st in conn.statements if "insert into" in st[0].lower()]
+    assert len(inserts) == 1
+    assert conn.committed == 1
+    # A second batch dedups against what is already pending.
+    again = insert_jobs_bulk(conn, [("stock_daily", {"symbol": "MSFT"}, 5, 3), ("calendar", {}, 1, 3)])
+    assert again == [None, 3]
+    assert insert_jobs_bulk(conn, []) == []

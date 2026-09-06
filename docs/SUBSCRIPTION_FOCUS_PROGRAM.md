@@ -39,7 +39,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 | Phase | 内容 | 状态 | 日期 |
 |---|---|---|---|
 | P1 止血 | 修 UnboundLocalError；限流改为付费档；停未授权拉取；EOD 去重（session-once、触发日 holiday skip、OI 随快照写、expiration 随合约写）；维护 slot 退出 gate；删 `trades-quotes` / `filings` / `float` 死路由；依从性证据改为 freshness 兜底 | ✅ 0.10.4 已发布（Console 验收观察 5 个交易日） | 2026-09-06 |
-| P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警 | ⏳ | — |
+| P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | 🔄 代码完成，0.11.0 发布中 | 2026-09-06 |
 | P3 模型 | `option_snapshot` 主键改观测时间；OI 从快照派生；job 幂等键带 session；健康判定按 session 完整性 | ⏳ 需 Owner 批准 DDL | — |
 | P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；Financials & Ratios 全量；国债收益率；Research staging 契约修正 | ⏳ | — |
 
@@ -57,6 +57,15 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 - 0.10.3（2026-09-06 17:40 UTC）：上述全部改动；集群实测 trim 后 `job_trim` freshness 更新、周日 eod-pipeline 返回 `non_trading_day`、option-trades 返回 `unentitled`。
 - 0.10.4（同日）：手工跑 trim 后发现 `keep_max: 5000` 会删掉上一 session 的 job 行，6 个只靠 job 行作证据的 slot 立刻变 missed。修法：每个 slot 都指定 freshness 维度（freshness 行不被 trim），`keep_max` 提到 40,000。
 - 注意：Kaniko 从 Gitea 镜像克隆，推 GitHub 后必须先 `make -C bifrost-trade-infra k3s-sync-gitea-mirrors`（macOS 没有 `timeout`，别用它包 make），构建后用临时 Pod 打印 `__version__` 确认再 apply。
+
+### P2 改动摘要（0.11.0 · research 0.67.0）
+
+- **占位而非删除（Owner 2026-09-06）**：`subscription.py` 是唯一的订阅事实源；`GET /market/capabilities` 给出 entitled / planned / unavailable 三类能力与升级所需套餐；queue-dashboard 把 `option-trades` 作为 `retired · planned_on_upgrade` 行保留在计划表里；Console Ingest 页新增「Subscription coverage」面板；Trade UI Discovery 流动性面板保留「Trades & Quotes — Not in the current plan」卡片。
+- **按授权矩阵重排 slot**：`corporate` 改为全市场按除权日窗口拉分红 / 拆股（两个 job 替代每标的两个）；新增 `fundamentals-market`（04:30 UTC 周二至周六）按日期拉全市场 ratios、short volume 与最近 settlement 的 short interest；`option-bars` / `minute-bars` 改为按最新收盘价选 ATM ±N 档 × 最近 N 个到期；合约目录分页上限 20 → 60（SPX 120）。
+- **宇宙卫生**：`ticker_sync` 全量列表未截断时把 vendor 不再列出的名字置为 `active=false`；新表 `ops_jobs.symbol_source_void` 记录 vendor 无数据的 symbol，`financials` 空结果写入、非空清除，rotate 跳过 30 天内确认的 void。
+- **watchlist 缓存**：新表 `ops_jobs.watchlist_cache`；platform-api 可达时刷新，不可达时回退到缓存而非空列表。
+- **重活出 API**：`oi-gap-heal` 改为 `oi_gap_heal` worker job（每个 job 5 个标的，逐标的 SELECT）；enqueue-slot 改为单语句批量插入（`insert_jobs_bulk`）。
+- **Dagster（research 0.67.0）**：所有 market slot asset 带 `RetryPolicy(3, 60s, exponential)`；`bifrost_run_failure_alert` sensor 把失败推到 Alertmanager 的 Bifrost 路由；`market_corporate_trades` → `market_corporate`；新增 `market_fundamentals_market_schedule`。
 
 ### P1 验收
 

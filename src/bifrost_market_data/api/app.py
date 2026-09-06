@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from bifrost_market_data import __version__
 from bifrost_market_data.api.analytics import router as analytics_router
+from bifrost_market_data.api.capabilities import router as capabilities_router
 from bifrost_market_data.api.chain_by_expiry import router as chain_by_expiry_router
 from bifrost_market_data.api.corp_actions import router as corp_actions_router
 from bifrost_market_data.api.coverage import router as coverage_router
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     # Mount under /market (P5 contract). Order: static prefixes before /stocks/{symbol}.
     market_prefix = "/market"
     app.include_router(analytics_router, prefix=market_prefix)
+    app.include_router(capabilities_router, prefix=market_prefix)
     app.include_router(chain_by_expiry_router, prefix=market_prefix)
     app.include_router(pcr_router, prefix=market_prefix)
     app.include_router(ingest_router, prefix=market_prefix)
