@@ -16,6 +16,7 @@ from bifrost_market_data.api.fundamentals import router as fundamentals_router
 from bifrost_market_data.api.fundamentals_db import router as fundamentals_db_router
 from bifrost_market_data.api.fundamentals_sepa import router as fundamentals_sepa_router
 from bifrost_market_data.api.deps import run_startup_schema_guard
+from bifrost_market_data.api.doctor import router as doctor_router
 from bifrost_market_data.api.health import router as health_router
 from bifrost_market_data.api.ingest import router as ingest_router
 from bifrost_market_data.api.ingest_ticker import router as ingest_ticker_router
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     market_prefix = "/market"
     app.include_router(analytics_router, prefix=market_prefix)
     app.include_router(capabilities_router, prefix=market_prefix)
+    app.include_router(doctor_router, prefix=market_prefix)
     app.include_router(chain_by_expiry_router, prefix=market_prefix)
     app.include_router(pcr_router, prefix=market_prefix)
     app.include_router(ingest_router, prefix=market_prefix)

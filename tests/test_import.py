@@ -6,7 +6,7 @@ from __future__ import annotations
 def test_package_version() -> None:
     import bifrost_market_data
 
-    assert bifrost_market_data.__version__ == "0.11.1"
+    assert bifrost_market_data.__version__ == "0.12.0"
 
 
 def test_subpackages_import() -> None:

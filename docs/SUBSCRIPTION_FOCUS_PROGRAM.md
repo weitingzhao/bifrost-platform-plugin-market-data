@@ -40,6 +40,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 |---|---|---|---|
 | P1 止血 | 修 UnboundLocalError；限流改为付费档；停未授权拉取；EOD 去重（session-once、触发日 holiday skip、OI 随快照写、expiration 随合约写）；维护 slot 退出 gate；删 `trades-quotes` / `filings` / `float` 死路由；依从性证据改为 freshness 兜底 | ✅ 0.10.4 已发布（Console 验收观察 5 个交易日） | 2026-09-06 |
 | P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | ✅ Plugin 0.11.1 + Dagster 0.67.0 已部署（验收观察中） | 2026-09-06 |
+| P2.5 Doctor | 手动自检 + 一键修复 + 可执行的 Agent 报告 + 每晚自愈：`GET /market/doctor` / `POST /market/doctor/heal`；Console Doctor 面板；MCP `market_data_doctor` / `market_data_heal`；Dagster `market_self_heal`（00:45 UTC 周二–六） | ✅ Plugin 0.12.0 + Dagster 0.68.1 | 2026-09-06 |
 | P3 模型 | `option_snapshot` 主键改观测时间；OI 从快照派生；job 幂等键带 session；健康判定按 session 完整性 | ⏳ 需 Owner 批准 DDL | — |
 | P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；Financials & Ratios 全量；国债收益率；Research staging 契约修正 | ⏳ | — |
 
@@ -93,6 +94,18 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 - Research `market_corporate_trades` 资产仍会调用 `option-trades`，现在得到 `skipped: unentitled`，无害；随 P2 的 dbt 契约修正一起改 Dagster。
 - Trade 前端 Option Discovery 的 last-trade / quotes 调用另行提交（前端仓库）。
 
+### P2.5 Doctor（0.12.0 / Dagster 0.68.1）
+
+Owner 的判断：全自动自维护但每天照样失败且无法自愈，等定时任务是设计缺陷。P2.5 把「看见问题 → 知道缺什么 → 立刻补上 → 确认补上了」做成一条链，四个入口共用同一份处方。
+
+- **`GET /market/doctor`**（`doctor.py`）：以「此刻表里应该有的 session」为基准（交易日 19:30 纽约时间后算当天，否则上一个完成的 session），逐项对比应有 vs 实有：期权链快照 / OI 按 optionable 标的覆盖、全市场 `stock_daily`（≥ 4,000 行）、watchlist 日线、`stock_snapshot`、ratios + short volume；calendar / reference / option-refresh / corporate / fundamentals-rotate 的 freshness 年龄；24h 内失败的 job（按 kind 聚合，含样例错误；含 "not entitled" 的不给处方）；卡住的 running；worker `/health`；vendor 一次廉价探测（`/v1/marketstatus/now`，key 走 Authorization 头）。每个 finding 有 `severity` / `expected` / `actual` / `fix` / `auto_fixable`，`prescriptions` 按 fix 去重（快照与 OI 缺失合成一条 `eod-pipeline` 处方，`date` 钉死到 session、`force` 绕过 session-once）。查询都限定在 universe 标的与单日范围，`statement_timeout=120s`。
+- **`POST /market/doctor/heal`**（写 token）：`{dry_run, finding_ids}`；执行 `enqueue-slot`（带 session 日期 + force）与 `retry-jobs`（原 kind / payload 重新入队，dedup 生效）；`rollout-restart` / `check-vendor-key` 只报告不执行（插件无权）。
+- **Console** `DoctorPanel`（Ingest tab 顶部）：Check now · 每行 Fix · Fix all（ConfirmDialog）· 修复后 60s 自动复查 · 「Copy doctor report for Agent」——粘贴给任何接了 `bifrost-platform` MCP 的 Agent 就能动手（附 MCP 调用与 curl）。
+- **平台 MCP**：`market_data_doctor`（viewer, GET）/ `market_data_heal`（operator, POST）进 catalog、stdio server、remediation runner；Massive Feed Recover runner 的工作流改为 doctor → heal → 排空 → 再 doctor。
+- **Dagster** `market_self_heal`（`45 0 * * 2-6` UTC，即交易日 20:45 EDT / 19:45 EST）：doctor → 有处方就 heal → 轮询 `queue-summary` 至排空（上限 `MARKET_SELF_HEAL_WAIT_SEC`，默认 900s）→ 再 doctor；仍 critical 才 fail（触发 Alertmanager）。无 RetryPolicy（重跑只会重复入队）。已加入 husbandry 白名单。
+
+不在 P2.5：快照类缺口只有当 session 是「今天」才自动修（历史 session 的快照无法回填，是 P3 主键改造的动机）。
+
 ---
 
 ## 3. Owner 待决事项
@@ -108,3 +121,5 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 ## 4. 发布方式
 
 Plugin 不在 Argo 下：推 GitHub → `make k3s-sync-gitea-mirrors`（infra）→ `kubectl -n cicd create -f bifrost-trade-infra/k8s/cicd/tekton/pipelinerun-build-market-data.yaml`（改 image tag）→ 确认 registry 有 tag → `kubectl apply -k k8s/base` → `make verify-market-data`。
+
+上线后先看 `GET /api/v1/plugins/market-data/api/market/doctor`：它就是这一版的验收面。
