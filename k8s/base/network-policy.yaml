@@ -38,3 +38,12 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Worker /health (8080) inside the namespace — the API's doctor probes the
+    # pools through the market-data-health-* Services.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: bifrost-market-data
+      ports:
+        - protocol: TCP
+          port: 8080
