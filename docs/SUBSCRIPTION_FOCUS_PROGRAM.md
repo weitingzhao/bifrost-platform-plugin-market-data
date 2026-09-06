@@ -39,7 +39,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 | Phase | 内容 | 状态 | 日期 |
 |---|---|---|---|
 | P1 止血 | 修 UnboundLocalError；限流改为付费档；停未授权拉取；EOD 去重（session-once、触发日 holiday skip、OI 随快照写、expiration 随合约写）；维护 slot 退出 gate；删 `trades-quotes` / `filings` / `float` 死路由；依从性证据改为 freshness 兜底 | ✅ 0.10.4 已发布（Console 验收观察 5 个交易日） | 2026-09-06 |
-| P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | 🔄 代码完成，0.11.0 发布中 | 2026-09-06 |
+| P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | ✅ Plugin 0.11.1 + Dagster 0.67.0 已部署（验收观察中） | 2026-09-06 |
 | P3 模型 | `option_snapshot` 主键改观测时间；OI 从快照派生；job 幂等键带 session；健康判定按 session 完整性 | ⏳ 需 Owner 批准 DDL | — |
 | P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；Financials & Ratios 全量；国债收益率；Research staging 契约修正 | ⏳ | — |
 
@@ -74,6 +74,12 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 - `reference` 全量列表把 61 个 vendor 已不再列出的名字置为 inactive。
 - `watchlist_cache` 已缓存 18 个 symbol。
 - 0.11.1：仪表盘 cron 解析支持 `2-6` 这类范围（`fundamentals-market` 曾显示 unsupported_cron）。
+
+### P2 部署记录
+
+- Plugin 0.11.0 → 0.11.1（2026-09-06 18:30 UTC 前后）：API + 7 个 worker 全部就位；`ops_jobs.symbol_source_void` / `watchlist_cache` 已建（postgres 建表，bifrost / data_writer / analytics_writer 授权）。
+- Dagster 0.67.0-dagster（18:36 UTC，`kubectl apply -f k8s/orchestration/dagster.yaml`；该目录被 Argo 排除，不走自动同步）：daemon 自动清掉了 `market_corporate_trades_schedule` 的旧状态，`bifrost_run_failure_alert` sensor 已在轮询。
+- 未纳入 P2、留给 P3/P4：Research 侧 dbt staging 的字段契约（`stg_short_*` 驼峰、`stg_ratios` 空占位）在 P4 与回填一起改；Console 检查清单里提到已删路由的文案。
 
 ### P1 验收
 
