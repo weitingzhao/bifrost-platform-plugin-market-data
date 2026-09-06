@@ -379,3 +379,23 @@ def test_retired_slot_is_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     assert slot["ok"] is True
     assert report["schedule"]["missed"] == 0
     assert report["husbandry"]["verdict"] != "missed"
+
+
+def test_freshness_alone_is_evidence_after_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trim can delete the job rows behind a fire; the freshness row must still carry it."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {"scheduler": {"slots": {"reference": {"cron": "30 21 * * *"}}}},
+    )
+    conn = _DashConn()
+    conn.window_rows = []  # trimmed
+    conn.freshness_rows = [("ticker_sync", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")]
+    now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    ref = next(s for s in report["schedule"]["slots"] if s["slot"] == "reference")
+    assert ref["adherence"] == "on_plan"
+    assert "freshness.ticker_sync" in ref["detail"]
+    assert report["husbandry"]["verdict"] != "missed"

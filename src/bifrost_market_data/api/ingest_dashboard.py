@@ -25,8 +25,11 @@ _TRADING_DAY_TIME = time(22, 30)
 _TRADING_DAY_OWNED_MIN_GRACE = timedelta(hours=6)
 _TRADING_DAY_OWNED_AFTER_ET = timedelta(hours=2)
 
-# Slot → job kinds created by enqueue_slot (for plan-vs-actual).
-# Empty list → slot is inline / analytics; use freshness_dimension when set.
+# Slot → job kinds created by enqueue_slot (for plan-vs-actual), plus the
+# freshness dimension the slot's jobs touch. Job rows are trimmed; freshness
+# rows are not — so every scheduled slot names a freshness dimension and its
+# evidence survives a trim that ran between the fire and the dashboard read.
+# Empty kinds → slot is inline / analytics; use freshness_dimension when set.
 SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "stock-eod": {"kinds": ["stock_daily"], "freshness": "stock_daily"},
     # The snapshot handler writes OI from the same download (0.10.3), so the
@@ -36,18 +39,18 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "freshness": "option_snapshot",
     },
     "universe-daily": {"kinds": ["stock_daily_grouped"], "freshness": "stock_daily"},
-    "corporate": {"kinds": ["splits", "dividends"], "freshness": None},
-    "option-refresh": {"kinds": ["option_contract"], "freshness": None},
-    "option-bars": {"kinds": ["option_daily"], "freshness": None},
+    "corporate": {"kinds": ["splits", "dividends"], "freshness": "dividends"},
+    "option-refresh": {"kinds": ["option_contract"], "freshness": "option_contract"},
+    "option-bars": {"kinds": ["option_daily"], "freshness": "option_daily"},
     # Retired 0.10.3: option trades are not in Options Starter.
     "option-trades": {"kinds": [], "freshness": None, "inline": True, "retired": True},
-    "minute-bars": {"kinds": ["stock_minute", "option_minute"], "freshness": None},
+    "minute-bars": {"kinds": ["stock_minute", "option_minute"], "freshness": "stock_minute"},
     "calendar": {"kinds": ["calendar"], "freshness": "calendar"},
-    "reference": {"kinds": ["ticker_sync"], "freshness": None},
-    "fundamentals-rotate": {"kinds": ["financials"], "freshness": None},
-    "related-rotate": {"kinds": ["ticker_related"], "freshness": None},
+    "reference": {"kinds": ["ticker_sync"], "freshness": "ticker_sync"},
+    "fundamentals-rotate": {"kinds": ["financials"], "freshness": "financials"},
+    "related-rotate": {"kinds": ["ticker_related"], "freshness": "ticker_related"},
     "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
-    "stock-movers": {"kinds": ["stock_movers"], "freshness": None},
+    "stock-movers": {"kinds": ["stock_movers"], "freshness": "stock_movers"},
     "oi-gap-heal": {
         "kinds": [],
         "freshness": "option_open_interest",

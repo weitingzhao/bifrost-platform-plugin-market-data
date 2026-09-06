@@ -69,7 +69,6 @@ EXPECTED_CRONS=(
   market-data-calendar
   market-data-option-refresh
   market-data-option-bars
-  market-data-option-trades
   market-data-minute-bars
   market-data-maintenance
   market-data-reference

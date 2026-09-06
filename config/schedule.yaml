@@ -15,7 +15,7 @@ scheduler:
   # Wave A IV Radar: unioned into eod-pipeline and option-refresh
   # (always included in the refresh batch). Analytics upserts moved to Research.
   # SPX = index options (Polygon dual-ticker: snapshot I:SPX, contracts SPX).
-  iv_radar_benchmarks: [SPY, QQQ, IWM, SPX]
+  iv_radar_benchmarks: [SPY, QQQ, IWM, SPX, AAPL, MSFT, GOOG, AMZN, META, NVDA, TSLA]
   # Explicit index-option roots (optional; inferred from benchmarks when omitted).
   # index_option_underlyings: [SPX]
 
@@ -74,7 +74,7 @@ scheduler:
     trim:
       cron: "15 2 * * *"
       keep_days: 7
-      keep_max: 5000
+      keep_max: 40000  # ~7 days at 5000 financials/day; adherence evidence must outlive the trim
       option_trades_keep_days: 30
     # Wave 14G-A: readiness-refresh retired (stock_readiness_daily dropped).
     stock-snapshot:
@@ -86,6 +86,6 @@ scheduler:
     oi-gap-heal:
       # D6=B: weekly re-scan recent days; DB-to-DB extract fills OI gaps
       cron: "0 4 * * 6"
-      lookback_days: 14
+      lookback_days: 30
     # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
     # (bifrost_research.scheduler.volatility). Plugin no longer schedules these.
