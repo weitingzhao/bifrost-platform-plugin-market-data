@@ -41,13 +41,7 @@ data:
           priority: 4
           expiry_days: 60
           max_per_underlying: 40
-        option-trades:
-          cron: "0 23 * * *"
-          priority: 3
-          expiry_days: 60
-          # 2 = smoke/entitlement-safe; raise after Polygon Options Trades entitlement is confirmed
-          max_per_underlying: 2
-          universe_limit: 50
+        # option-trades retired 0.10.3: option trades are not in Options Starter.
         minute-bars:
           cron: "15 23 * * *"
           priority: 3

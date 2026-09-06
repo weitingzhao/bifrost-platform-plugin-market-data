@@ -16,6 +16,7 @@ from bifrost_market_data.scheduler.daily import (
     load_schedule,
     load_watchlist_symbols,
     resolve_target_date,
+    today_ny,
 )
 from bifrost_market_data.scheduler.enqueue import insert_job
 
@@ -228,6 +229,9 @@ def enqueue_schedule_slot(
             watchlist_symbols=symbols,
             scheduler_cfg=scheduler_cfg,
             force=force,
+            # A cron-style call carries no date: gate holiday skips on the day
+            # it fired, not on the rolled-back target.
+            fire_date=None if target is not None else today_ny(),
         )
         return {"ok": True, **result}
     except ValueError as exc:

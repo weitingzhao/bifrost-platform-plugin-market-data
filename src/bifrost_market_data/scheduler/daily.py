@@ -18,11 +18,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
-from bifrost_market_data.ingest.index_options import (
-    load_index_option_roots_from_cfg,
-    spot_api_symbol,
-    storage_underlying,
-)
+from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.freshness import update_freshness
 from bifrost_market_data.scheduler.enqueue import insert_job, trim_old_jobs
 
@@ -52,6 +48,24 @@ SLOT_NAMES = (
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
 MIGRATED_ANALYTICS_SLOTS = frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"})
+
+# Slots whose data is one session's worth and whose cron fires once per
+# session. The Dagster trading-day catch-up (22:30 ET) re-fires the same two
+# slots ~4.5h after the 22:00 UTC primary; a second enqueue inside the window
+# is skipped unless forced, so the catch-up only lands when the primary left
+# no jobs behind.
+SESSION_ONCE_SLOTS: dict[str, tuple[str, ...]] = {
+    "stock-eod": ("stock_daily",),
+    "eod-pipeline": ("option_snapshot",),
+}
+SESSION_ONCE_WINDOW_HOURS = 12
+
+# Retired slots — the current Massive subscriptions (Options Starter, Stocks
+# Starter, Financials & Ratios) do not cover the data. Kept in SLOT_NAMES so
+# Dagster / CLI callers get a skip instead of a 400 until the plan changes.
+UNENTITLED_SLOTS: dict[str, str] = {
+    "option-trades": "option trades need Options Developer; current plan is Options Starter",
+}
 
 # Slots that skip enqueue on NYSE closed / weekend (must match adherence logic).
 SKIP_ON_HOLIDAY_SLOTS = frozenset(
@@ -160,6 +174,35 @@ def load_watchlist_from_platform(platform_url: str, *, timeout: float = 15.0) ->
     result = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
     logger.info("platform-api watchlist union: %d symbols", len(result))
     return result
+
+
+def today_ny() -> date:
+    """The NY calendar date right now — the date a cron fire happens on."""
+    return datetime.now(timezone.utc).astimezone(_NY).date()
+
+
+def _session_evidence_exists(conn: Any, kinds: Sequence[str], *, hours: int) -> bool:
+    """True when jobs of ``kinds`` were created within the last ``hours``."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM ops_jobs.job_ingest
+                WHERE kind = ANY(%s)
+                  AND created_at >= now() - make_interval(hours => %s)
+                LIMIT 1
+                """,
+                (list(kinds), int(hours)),
+            )
+            row = cur.fetchone() if hasattr(cur, "fetchone") else None
+    except Exception as exc:  # noqa: BLE001 — evidence probe must not block enqueue
+        logger.warning("session evidence probe failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    return row is not None
 
 
 def resolve_target_date(value: str | date | None = None) -> date:
@@ -502,10 +545,15 @@ def enqueue_slot(
     watchlist_symbols: Sequence[str] | None = None,
     scheduler_cfg: Mapping[str, Any] | None = None,
     force: bool = False,
+    fire_date: date | None = None,
 ) -> dict[str, Any]:
     """Generate jobs for one schedule slot. Returns summary dict.
 
-    ``force=True`` runs holiday-gated slots on weekends (used for CS financials catch-up).
+    ``force=True`` runs holiday-gated slots on weekends (used for CS financials
+    catch-up) and bypasses the session-once dedup. ``fire_date`` is the NY date
+    the cron fired on; holiday-gated slots are skipped when *that* day is not a
+    session, so a Saturday fire cannot re-run Friday just because the target
+    date rolled back to Friday.
     """
     slot_key = str(slot).strip().lower()
     if slot_key in MIGRATED_ANALYTICS_SLOTS:
@@ -637,6 +685,17 @@ def enqueue_slot(
             from_date=trading_days[0],
             to_date=trading_days[-1],
         )
+        # Inline slot creates no job_ingest rows — still touch freshness so
+        # queue-dashboard adherence has evidence after Cron/Dagster/manual fire.
+        try:
+            rows = int(
+                extract_result.get("rows_attempted")
+                or extract_result.get("candidates")
+                or 0
+            )
+            update_freshness(conn, "option_open_interest", rows, status="ok")
+        except Exception:  # noqa: BLE001 — freshness must not fail the slot
+            logger.exception("oi-gap-heal freshness update failed")
         logger.info(
             "oi-gap-heal from=%s to=%s candidates=%s skipped=%s",
             extract_result.get("from_date"),
@@ -653,17 +712,56 @@ def enqueue_slot(
             **extract_result,
         }
 
-    skip_on_holiday = slot_key in SKIP_ON_HOLIDAY_SLOTS
-    if skip_on_holiday and not force and not is_trading_day(conn, day):
-        logger.info("slot=%s target_date=%s is not a trading day, skipping", slot_key, day_s)
+    if slot_key in UNENTITLED_SLOTS:
+        logger.info("slot=%s retired: %s", slot_key, UNENTITLED_SLOTS[slot_key])
         return {
             "slot": slot_key,
             "target_date": day_s,
             "skipped": True,
+            "reason": "unentitled",
+            "detail": UNENTITLED_SLOTS[slot_key],
             "enqueued": 0,
             "deduped": 0,
             "jobs": [],
         }
+
+    skip_on_holiday = slot_key in SKIP_ON_HOLIDAY_SLOTS
+    gate_day = fire_date or day
+    if skip_on_holiday and not force and not is_trading_day(conn, gate_day):
+        logger.info(
+            "slot=%s fire_date=%s is not a trading day (target=%s), skipping",
+            slot_key,
+            gate_day.isoformat(),
+            day_s,
+        )
+        return {
+            "slot": slot_key,
+            "target_date": day_s,
+            "skipped": True,
+            "reason": "non_trading_day",
+            "enqueued": 0,
+            "deduped": 0,
+            "jobs": [],
+        }
+
+    if slot_key in SESSION_ONCE_SLOTS and not force:
+        kinds_seen = SESSION_ONCE_SLOTS[slot_key]
+        if _session_evidence_exists(conn, kinds_seen, hours=SESSION_ONCE_WINDOW_HOURS):
+            logger.info(
+                "slot=%s already enqueued within %sh (kinds=%s), skipping",
+                slot_key,
+                SESSION_ONCE_WINDOW_HOURS,
+                ",".join(kinds_seen),
+            )
+            return {
+                "slot": slot_key,
+                "target_date": day_s,
+                "skipped": True,
+                "reason": "evidence_exists",
+                "enqueued": 0,
+                "deduped": 0,
+                "jobs": [],
+            }
 
     # Full-market / calendar-like slots do not need the watchlist; skip the
     # platform-api + DB lookup so a union 404 cannot fail ticker_sync / grouped EOD.
@@ -703,25 +801,13 @@ def enqueue_slot(
             _add("stock_daily", {"symbol": sym, "from": day_s, "to": day_s})
 
     elif slot_key == "eod-pipeline":
+        # One chain snapshot per underlying; the handler derives the session's
+        # open interest from the same response, so no second download.
+        # Index spot (I:SPX) is not enqueued: it needs an Indices plan.
         pipeline_syms = union_iv_radar_benchmarks(symbols, cfg)
         for sym in pipeline_syms:
             storage = storage_underlying(sym)
-            _add("option_snapshot", {"underlying": storage})
-            _add("option_open_interest", {"underlying": storage, "trade_date": day_s})
-        # Index spot (I:SPX → store as SPX) so Research GEX has a close.
-        for root in load_index_option_roots_from_cfg(cfg):
-            spot = spot_api_symbol(root)
-            if not spot:
-                continue
-            _add(
-                "stock_daily",
-                {
-                    "symbol": spot,
-                    "storage_symbol": root,
-                    "from": day_s,
-                    "to": day_s,
-                },
-            )
+            _add("option_snapshot", {"underlying": storage, "trade_date": day_s})
 
     elif slot_key == "universe-daily":
         _add(
@@ -747,9 +833,10 @@ def enqueue_slot(
             batch = list(benches) + rest[: max(0, batch_size)]
         else:
             batch = list(benches)
+        # The contract handler upserts option_expiration from the same page
+        # walk, so a separate expiration job would re-download the catalogue.
         for sym in batch:
             _add("option_contract", {"underlying": sym, "expired": False})
-            _add("option_expiration", {"underlying": sym})
 
     elif slot_key == "option-bars":
         expiry_days = int(scfg.get("expiry_days") or 60)
@@ -763,30 +850,6 @@ def enqueue_slot(
         )
         for ot in tickers:
             _add("option_daily", {"option_ticker": ot, "from": day_s, "to": day_s})
-
-    elif slot_key == "option-trades":
-        # Daily REST tape (not WebSocket). Universe: SPX ∪ watchlist top 50.
-        universe_limit = int(scfg.get("universe_limit") or 50)
-        underlyings = option_trades_universe(symbols, limit=universe_limit)
-        expiry_days = int(scfg.get("expiry_days") or 60)
-        max_per = int(scfg.get("max_per_underlying") or 40)
-        tickers = load_option_tickers(
-            conn,
-            underlyings,
-            as_of=day,
-            expiry_days=expiry_days,
-            max_per_underlying=max_per,
-        )
-        for ot in tickers:
-            _add(
-                "option_trades",
-                {
-                    "option_ticker": ot,
-                    "from": day_s,
-                    "to": day_s,
-                    "trade_date": day_s,
-                },
-            )
 
     elif slot_key == "minute-bars":
         # Stock intraday: 1min / 5min / 1hour (replaces retired Trade stocks_ib Celery path).
@@ -968,6 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
             watchlist_symbols=symbols_override,
             scheduler_cfg=scheduler_cfg,
             force=bool(args.force),
+            fire_date=None if args.date else today_ny(),
         )
     finally:
         conn.close()

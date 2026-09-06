@@ -1,5 +1,12 @@
 # Option history backfill program — Wave LO-5
 
+> **Premise corrected 2026-09-06.** The table below assumed `tier: starter` meant
+> 5 requests/minute. The Owner's plan is paid Options Starter: **unlimited calls,
+> rolling 2-year window** (2024-08 aggregates → 403). A 22-symbol × 2-year backfill
+> is one night, not weeks. This program is superseded by
+> `docs/SUBSCRIPTION_FOCUS_PROGRAM.md` Phase P4; `worker/backfill.py` is still a
+> stub (passes the underlying as `option_ticker`) and must be rewritten first.
+
 Owner decision required before unsuspending `k8s/cronjob-option-backfill.yaml`.
 
 See also [`bifrost-research/docs/BACKTEST_DATA_COVERAGE.md`](../../bifrost-research/docs/BACKTEST_DATA_COVERAGE.md).

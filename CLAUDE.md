@@ -55,6 +55,11 @@ make sync-platform-write-token  # copy write-token → platform-stg/prod for Con
 make sync-write-auth-overlay    # ConfigMap overlay of deps.py (X-Market-Data-Write-Token on image 0.3.2)
 ```
 
+## 订阅事实（2026-09-06 实测）
+
+Owner 订阅 **Options Starter + Stocks Starter + Financials & Ratios**：无限调用（限流是自伤，`tier: starter` 已改为 8 req/s 软上限）；股票聚合滚动 5 年、期权聚合滚动 2 年；trades / quotes / last-trade / 指数行情 **403**（升级前不拉）。
+程序文档：`docs/SUBSCRIPTION_FOCUS_PROGRAM.md`。
+
 ## 修改纪律
 
 - 公开表/字段契约变更需同步 Trade 消费者 + Ops Console catalog

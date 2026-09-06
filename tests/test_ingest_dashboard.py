@@ -329,3 +329,53 @@ def test_build_ingest_history_clamps_days() -> None:
     report = build_ingest_history(conn, days=99, now=now)
     assert report["days"] == 30
     assert len(report["days_series"]) == 30
+
+
+def test_maintenance_slot_miss_does_not_flip_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A housekeeping miss (trim) is reported but never decides the schedule verdict."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {
+            "scheduler": {
+                "slots": {
+                    "stock-eod": {"cron": "30 21 * * *"},
+                    "trim": {"cron": "15 2 * * *"},
+                }
+            }
+        },
+    )
+    conn = _DashConn()  # no job_trim freshness row → trim has no evidence
+    now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    by_slot = {s["slot"]: s for s in report["schedule"]["slots"]}
+    assert by_slot["stock-eod"]["adherence"] == "on_plan"
+    assert by_slot["trim"]["adherence"] == "missed"
+    assert by_slot["trim"]["maintenance"] is True
+    assert by_slot["stock-eod"]["maintenance"] is False
+    assert report["schedule"]["missed"] == 0
+    assert report["schedule"]["maintenance_missed"] == ["trim"]
+    assert report["husbandry"]["verdict"] != "missed"
+    assert "maintenance missed: trim" in report["husbandry"]["detail"]
+
+
+def test_retired_slot_is_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cron left behind for a retired slot must read as retired, not missed."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {"scheduler": {"slots": {"option-trades": {"cron": "0 23 * * *"}}}},
+    )
+    conn = _DashConn()
+    conn.window_rows = []
+    now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
+    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    slot = next(s for s in report["schedule"]["slots"] if s["slot"] == "option-trades")
+    assert slot["adherence"] == "retired"
+    assert slot["ok"] is True
+    assert report["schedule"]["missed"] == 0
+    assert report["husbandry"]["verdict"] != "missed"

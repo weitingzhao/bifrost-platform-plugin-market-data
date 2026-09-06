@@ -11,7 +11,6 @@ from bifrost_market_data.api.analytics import router as analytics_router
 from bifrost_market_data.api.chain_by_expiry import router as chain_by_expiry_router
 from bifrost_market_data.api.corp_actions import router as corp_actions_router
 from bifrost_market_data.api.coverage import router as coverage_router
-from bifrost_market_data.api.filings import router as filings_router
 from bifrost_market_data.api.fundamentals import router as fundamentals_router
 from bifrost_market_data.api.fundamentals_db import router as fundamentals_db_router
 from bifrost_market_data.api.fundamentals_sepa import router as fundamentals_sepa_router
@@ -35,7 +34,6 @@ from bifrost_market_data.api.status_ext import router as status_ext_router
 from bifrost_market_data.api.stocks import router as stocks_router
 from bifrost_market_data.api.stocks_db import router as stocks_db_router
 from bifrost_market_data.api.technical import router as technical_router
-from bifrost_market_data.api.trades_quotes import router as trades_quotes_router
 
 
 @asynccontextmanager
@@ -70,7 +68,6 @@ def create_app() -> FastAPI:
     app.include_router(fundamentals_db_router, prefix=market_prefix)
     app.include_router(fundamentals_sepa_router, prefix=market_prefix)
     app.include_router(fundamentals_router, prefix=market_prefix)
-    app.include_router(filings_router, prefix=market_prefix)
     app.include_router(stocks_db_router, prefix=market_prefix)
     app.include_router(stocks_router, prefix=market_prefix)
     app.include_router(market_ops_router, prefix=market_prefix)
@@ -84,5 +81,4 @@ def create_app() -> FastAPI:
     app.include_router(corp_actions_router, prefix=market_prefix)
     app.include_router(status_ext_router, prefix=market_prefix)
     app.include_router(technical_router, prefix=market_prefix)
-    app.include_router(trades_quotes_router, prefix=market_prefix)
     return app

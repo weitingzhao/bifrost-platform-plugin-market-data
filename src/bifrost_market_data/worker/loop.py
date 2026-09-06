@@ -12,6 +12,7 @@ from typing import Any
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.freshness import (
     dimension_for_kind,
+    extra_freshness_from_result,
     rows_written_from_result,
     update_freshness,
 )
@@ -79,6 +80,7 @@ def build_default_handlers(
     """Create ingest handler registry and PolygonClient (caller must aclose client)."""
     from bifrost_market_data.ingest import build_handler_registry
     from bifrost_market_data.polygon.client import PolygonClient
+    from bifrost_market_data.polygon.rate_limit import bucket_from_config
 
     def _default_connect() -> Any:
         import psycopg
@@ -95,8 +97,9 @@ def build_default_handlers(
             )
         client = PolygonClient(
             api_key,
-            tier=str(poly.get("tier") or "developer"),
+            tier=str(poly.get("tier") or "starter"),
             rest_base=str(poly.get("rest_base") or "https://api.polygon.io"),
+            limiter=bucket_from_config(poly),
         )
     registry = build_handler_registry(client, connect=open_conn)
     return registry, client
@@ -145,6 +148,8 @@ async def process_one_job(
                 dimension_for_kind(job.kind),
                 rows_written_from_result(result),
             )
+            for extra_dim, extra_rows in extra_freshness_from_result(result).items():
+                update_freshness(conn, extra_dim, extra_rows)
         except Exception as freshness_err:
             logger.warning(
                 "job %s kind=%s freshness update failed: %s",

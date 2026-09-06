@@ -176,7 +176,14 @@ def check_option_snapshot_coverage(
     watchlist_symbols: Sequence[str] | None = None,
     as_of: date | None = None,
 ) -> dict[str, Any]:
-    """Optionable watchlist underlyings should have a snapshot on the last completed session."""
+    """Optionable watchlist underlyings should have a recent session snapshot.
+
+    Polygon option snapshots are point-in-time: a catch-up job today cannot
+    rewrite yesterday's ``snapshot_ts``. For live probes we therefore accept
+    any NY session day from the last completed target through today (inclusive)
+    so a same-day heal clears a prior miss. Historical ``as_of`` keeps the
+    exact-day contract for tests / backfill audits.
+    """
     raw_symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
@@ -192,7 +199,17 @@ def check_option_snapshot_coverage(
             "detail": "no completed trading day available",
         }
     target = trading_days[-1]
-    # Snapshots use timestamptz; match NY calendar day via date(snapshot_ts AT TIME ZONE 'America/New_York')
+    if as_of is None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            today_ny = datetime.now(ZoneInfo("America/New_York")).date()
+        except Exception:
+            today_ny = datetime.now(timezone.utc).date()
+        window_end = max(target, today_ny)
+    else:
+        window_end = target
+
     missing: list[str] = []
     if symbols:
         with conn.cursor() as cur:
@@ -201,9 +218,10 @@ def check_option_snapshot_coverage(
                 SELECT DISTINCT underlying
                 FROM raw_market.option_snapshot
                 WHERE underlying = ANY(%s)
-                  AND (snapshot_ts AT TIME ZONE 'America/New_York')::date = %s
+                  AND (snapshot_ts AT TIME ZONE 'America/New_York')::date >= %s
+                  AND (snapshot_ts AT TIME ZONE 'America/New_York')::date <= %s
                 """,
-                (list(symbols), target),
+                (list(symbols), target, window_end),
             )
             rows = cur.fetchall() if hasattr(cur, "fetchall") else []
         found: set[str] = set()
@@ -219,17 +237,23 @@ def check_option_snapshot_coverage(
         ok = True  # equity-only watchlist: option checks N/A
     else:
         ok = len(missing) == 0 and (len(symbols) > 0 or len(raw_symbols) == 0)
+    window_note = (
+        f"window={target.isoformat()}…{window_end.isoformat()}"
+        if window_end != target
+        else f"target={target.isoformat()}"
+    )
     return {
         "check": "option_snapshot_coverage",
         "ok": ok,
         "target_date": target.isoformat(),
+        "window_end": window_end.isoformat(),
         "watchlist_symbols": len(raw_symbols),
         "optionable_symbols": len(symbols),
         "skipped_non_optionable": skipped,
         "missing_count": len(missing),
         "missing_sample": missing[:20],
         "detail": (
-            f"target={target.isoformat()}; "
+            f"{window_note}; "
             f"missing={len(missing)}/{len(symbols)} optionable "
             f"(skipped {skipped} equity-only)"
         ),

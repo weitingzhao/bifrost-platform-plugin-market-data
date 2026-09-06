@@ -177,6 +177,10 @@ class _DailyCursor:
                 self.parent.seen_keys.add(key)
                 self.parent.next_id += 1
                 self.parent._fetchone = (self.parent.next_id,)
+        elif "from ops_jobs.job_ingest" in q and "created_at >=" in q:
+            # session-once evidence probe
+            self.parent._fetchone = (1,) if self.parent.session_evidence else None
+            self.parent._fetchall = []
         elif "delete from" in q:
             self.rowcount = 2
             self.parent._fetchone = None
@@ -221,7 +225,9 @@ class _DailyConn:
         raise_on_readiness: bool = False,
         cs_universe: list[str] | None = None,
         income_covered: list[str] | None = None,
+        session_evidence: bool = False,
     ) -> None:
+        self.session_evidence = session_evidence
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
@@ -306,16 +312,73 @@ def test_enqueue_eod_pipeline() -> None:
         scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
     )
     kinds = [j["kind"] for j in result["jobs"]]
-    assert kinds.count("option_snapshot") == 4  # AAPL ∪ SPY/QQQ/IWM
-    assert kinds.count("option_open_interest") == 4
+    # One snapshot per underlying (AAPL ∪ SPY/QQQ/IWM); OI comes out of the
+    # same download, so no option_open_interest job and no I:SPX spot job.
+    assert kinds == ["option_snapshot"] * 4
     assert {j["payload"]["underlying"] for j in result["jobs"]} == {
         "AAPL",
         "SPY",
         "QQQ",
         "IWM",
     }
-    oi = next(j for j in result["jobs"] if j["kind"] == "option_open_interest")
-    assert oi["payload"]["trade_date"] == "2024-06-20"
+    assert all(j["payload"]["trade_date"] == "2024-06-20" for j in result["jobs"])
+
+
+def test_eod_pipeline_skipped_when_fire_date_is_weekend() -> None:
+    """A Saturday cron fire rolls the target back to Friday; it must still skip."""
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2024, 6, 21),  # Friday (rolled back)
+        fire_date=date(2024, 6, 22),  # Saturday (when the cron fired)
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
+    assert result["skipped"] is True
+    assert result["reason"] == "non_trading_day"
+    assert result["jobs"] == []
+    # An explicit date (no fire_date) still runs Friday: that is the catch-up path.
+    result2 = enqueue_slot(
+        _DailyConn(["AAPL"]),
+        "eod-pipeline",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
+    assert result2["enqueued"] == 4
+
+
+def test_eod_pipeline_session_once_dedup() -> None:
+    """The 22:30 ET catch-up must not re-fetch what the 22:00 UTC fire already enqueued."""
+    conn = _DailyConn(["AAPL"], session_evidence=True)
+    result = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
+    assert result["skipped"] is True
+    assert result["reason"] == "evidence_exists"
+    forced = enqueue_slot(
+        _DailyConn(["AAPL"], session_evidence=True),
+        "eod-pipeline",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+        force=True,
+    )
+    assert forced["enqueued"] == 4
+    # option-refresh is not session-once: it legitimately fires every 6 hours.
+    refresh = enqueue_slot(
+        _DailyConn(["AAPL"], session_evidence=True),
+        "option-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 2}}},
+    )
+    assert refresh["enqueued"] > 0
 
 
 def test_enqueue_universe_daily() -> None:
@@ -359,8 +422,10 @@ def test_enqueue_option_refresh_batch() -> None:
         watchlist_symbols=symbols,
         scheduler_cfg={"slots": {"option-refresh": {"priority": 4, "batch_size": 2}}},
     )
-    # 3 benchmarks always + 2 rotated watchlist × (contract + expiration)
-    assert result["enqueued"] == 10
+    # 3 benchmarks always + 2 rotated watchlist; expirations come out of the
+    # contract page walk, so one job per underlying.
+    assert result["enqueued"] == 5
+    assert all(j["kind"] == "option_contract" for j in result["jobs"])
     underlyings = {j["payload"]["underlying"] for j in result["jobs"]}
     assert {"SPY", "QQQ", "IWM"}.issubset(underlyings)
     assert len(underlyings) == 5
@@ -422,37 +487,21 @@ def test_option_trades_universe_always_includes_spx() -> None:
     assert out == sorted(out)
 
 
-def test_enqueue_option_trades() -> None:
-    contracts = [
-        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19)),
-        ("O:SPX240719C05000000", "SPX", date(2024, 7, 19)),
-        ("O:MSFT240719C00400000", "MSFT", date(2024, 7, 19)),
-    ]
-    conn = _DailyConn(option_contracts=contracts)
+def test_option_trades_slot_retired() -> None:
+    """Options Starter has no trades entitlement: the slot is a no-op, not a 400."""
+    assert "option-trades" in SLOT_NAMES
+    conn = _DailyConn(["AAPL"])
     result = enqueue_slot(
         conn,
         "option-trades",
         target_date=date(2024, 6, 20),
-        watchlist_symbols=["AAPL", "MSFT"],
-        scheduler_cfg={
-            "slots": {
-                "option-trades": {
-                    "priority": 3,
-                    "max_per_underlying": 40,
-                    "universe_limit": 50,
-                }
-            }
-        },
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"option-trades": {"priority": 3}}},
     )
-    assert result["enqueued"] == 3
-    assert all(j["kind"] == "option_trades" for j in result["jobs"])
-    assert {j["payload"]["option_ticker"] for j in result["jobs"]} == {
-        "O:AAPL240719C00200000",
-        "O:SPX240719C05000000",
-        "O:MSFT240719C00400000",
-    }
-    assert all(j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
-
+    assert result["skipped"] is True
+    assert result["reason"] == "unentitled"
+    assert result["enqueued"] == 0
+    assert not any("returning id" in st[0].lower() for st in conn.statements)
 
 def test_enqueue_minute_bars() -> None:
     contracts = [

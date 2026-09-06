@@ -591,69 +591,6 @@ class PolygonClient:
             raise PolygonAPIError("unexpected short volume payload", body=data, url=path)
         return data
 
-    async def fetch_float(self, **params: Any) -> dict[str, Any]:
-        path = ep.float_path()
-        data = await self._request(path, ep.float_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected float payload", body=data, url=path)
-        return data
-
-    async def fetch_edgar_index(self, **params: Any) -> dict[str, Any]:
-        path = ep.edgar_index_path()
-        data = await self._request(path, ep.edgar_index_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected edgar index payload", body=data, url=path)
-        return data
-
-    async def fetch_10k_sections(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_10k_sections_path()
-        data = await self._request(path, ep.filing_10k_sections_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected 10-K sections payload", body=data, url=path)
-        return data
-
-    async def fetch_8k_text(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_8k_text_path()
-        data = await self._request(path, ep.filing_8k_text_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected 8-K text payload", body=data, url=path)
-        return data
-
-    async def fetch_13f_filings(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_13f_path()
-        data = await self._request(path, ep.filing_13f_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected 13-F payload", body=data, url=path)
-        return data
-
-    async def fetch_risk_factors(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_risk_factors_path()
-        data = await self._request(path, ep.filing_risk_factors_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected risk factors payload", body=data, url=path)
-        return data
-
-    async def fetch_risk_categories(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_risk_categories_path()
-        data = await self._request(path, ep.filing_risk_categories_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected risk categories payload", body=data, url=path)
-        return data
-
-    async def fetch_form_3(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_form_3_path()
-        data = await self._request(path, ep.insider_filing_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected form-3 payload", body=data, url=path)
-        return data
-
-    async def fetch_form_4(self, **params: Any) -> dict[str, Any]:
-        path = ep.filing_form_4_path()
-        data = await self._request(path, ep.insider_filing_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected form-4 payload", body=data, url=path)
-        return data
-
     async def fetch_indicator(
         self,
         indicator: str,
@@ -664,20 +601,6 @@ class PolygonClient:
         data = await self._request(path, ep.indicator_params(**params))
         if not isinstance(data, dict):
             raise PolygonAPIError("unexpected indicator payload", body=data, url=path)
-        return data
-
-    async def fetch_last_trade(self, options_ticker: str) -> dict[str, Any]:
-        path = ep.last_trade_path(options_ticker)
-        data = await self._request(path, {})
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected last trade payload", body=data, url=path)
-        return data
-
-    async def fetch_option_quotes(self, options_ticker: str, **params: Any) -> dict[str, Any]:
-        path = ep.option_quotes_path(options_ticker)
-        data = await self._request(path, ep.option_ticks_params(**params))
-        if not isinstance(data, dict):
-            raise PolygonAPIError("unexpected option quotes payload", body=data, url=path)
         return data
 
     async def fetch_option_trades(self, options_ticker: str, **params: Any) -> dict[str, Any]:

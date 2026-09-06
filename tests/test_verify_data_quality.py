@@ -31,22 +31,22 @@ class _QCur:
         elif "us_market_holiday" in q:
             self._rows = [(d,) for d in self.parent.closed_holidays]
             self._one = None
-        elif "from market.stock_daily" in q and "bar_date" in q:
+        elif "stock_daily" in q and "bar_date" in q:
             self._rows = list(self.parent.stock_daily_rows)
             self._one = None
-        elif "from market.option_contract" in q:
+        elif "option_contract" in q:
             self._rows = [(u,) for u in self.parent.optionable_underlyings]
             self._one = None
-        elif "from market.option_snapshot" in q:
+        elif "option_snapshot" in q:
             self._rows = [(u,) for u in self.parent.snapshot_underlyings]
             self._one = None
-        elif "from market.option_open_interest" in q:
+        elif "option_open_interest" in q:
             self._rows = list(self.parent.oi_rows)
             self._one = None
-        elif "from ops_jobs.ingest_freshness" in q:
+        elif "ingest_freshness" in q:
             self._rows = list(self.parent.freshness_rows)
             self._one = None
-        elif "from public.watchlist" in q or "watchlist" in q:
+        elif "watchlist" in q:
             self._rows = [(s,) for s in self.parent.watchlist]
             self._one = None
         else:

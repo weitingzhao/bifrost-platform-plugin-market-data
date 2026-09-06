@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -51,15 +51,25 @@ async def test_option_snapshot_upsert() -> None:
     )
     conn = FakeConn()
     result = await handle_option_snapshot(
-        make_job("option_snapshot", {"underlying": "AAPL"}),
+        make_job("option_snapshot", {"underlying": "AAPL", "trade_date": "2024-06-20"}),
         client,
         conn,
     )
     assert result["rows_written"] == 1
     assert result["contracts_written"] == 1
+    # The session's open interest comes out of the same download.
+    assert result["oi_rows_written"] == 1
+    assert result["trade_date"] == "2024-06-20"
+    assert result["freshness_extra"] == {"option_open_interest": 1}
     sqls = "\n".join(conn.upsert_sqls())
     assert "market.option_contract" in sqls
     assert "market.option_snapshot" in sqls
+    assert "market.option_open_interest" in sqls
+    oi_stmt = next(s for s in conn.statements if "option_open_interest" in s[0])
+    oi_row = oi_stmt[1][0]
+    assert oi_row[0] == "O:AAPL250620C00150000"
+    assert oi_row[5] == date(2024, 6, 20)
+    assert oi_row[6] == 1234
     # snapshot row values
     snap_stmt = next(s for s in conn.statements if "option_snapshot" in s[0])
     row = snap_stmt[1][0]
@@ -68,6 +78,43 @@ async def test_option_snapshot_upsert() -> None:
     assert row[4] == 0.5  # delta
     assert row[8] == 1234  # oi
     assert conn.committed == 1  # single transaction for multi-table write
+
+
+@pytest.mark.asyncio
+async def test_option_snapshot_oi_defaults_to_session_anchor() -> None:
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:AAPL250620C00150000",
+                        "expiration_date": "2025-06-20",
+                        "strike_price": 150,
+                        "contract_type": "call",
+                    },
+                    "open_interest": 7,
+                    "day": {"close": 1.1},
+                },
+                {
+                    # No OI on this contract → snapshot row only, no OI row.
+                    "details": {
+                        "ticker": "O:AAPL250620P00150000",
+                        "expiration_date": "2025-06-20",
+                        "strike_price": 150,
+                        "contract_type": "put",
+                    },
+                    "day": {"close": 0.9},
+                },
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_option_snapshot(make_job("option_snapshot", {"underlying": "AAPL"}), client, conn)
+    assert result["rows_written"] == 2
+    assert result["oi_rows_written"] == 1
+    assert result["trade_date"] == daily_snapshot_anchor().date().isoformat()
+    assert conn.committed == 1
 
 
 def test_snapshot_fallback_ts_is_stable_ny_session() -> None:

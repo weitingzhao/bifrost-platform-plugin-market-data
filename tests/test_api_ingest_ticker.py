@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -270,7 +272,7 @@ class TestUpsertOverview:
         orig_execute = _DummyCursor.execute
 
         def capture_execute(self, sql, params=None):
-            if params and "UPDATE market.ticker" in sql:
+            if params and re.search(r"UPDATE (raw_)?market\.ticker", sql):
                 captured.append(params)
             orig_execute(self, sql, params)
 

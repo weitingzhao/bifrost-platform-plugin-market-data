@@ -1,8 +1,13 @@
-"""kind=option_snapshot → market.option_snapshot (+ option_contract)."""
+"""kind=option_snapshot → market.option_snapshot (+ option_contract + option_open_interest).
+
+One chain download serves all three tables: the snapshot rows, the contract
+catalogue, and the session's open interest. A separate ``option_open_interest``
+job used to re-download the whole chain for the OI field alone.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import (
@@ -50,6 +55,16 @@ _CONTRACT_COLS = (
     "option_right",
     "exercise_style",
     "shares_per_contract",
+)
+
+_OI_COLS = (
+    "option_ticker",
+    "underlying",
+    "expiry",
+    "strike",
+    "option_right",
+    "trade_date",
+    "open_interest",
 )
 
 
@@ -130,6 +145,9 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     api_underlying = snapshot_api_underlying(underlying)
     expiration_date = payload.get("expiration_date")
     contract_type = payload.get("contract_type")
+    trade_date = parse_date(payload.get("trade_date"))
+    if trade_date is None:
+        trade_date = daily_snapshot_anchor().date()
 
     data = await client.fetch_options_snapshot(
         api_underlying,
@@ -139,6 +157,7 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     results = list(data.get("results") or [])
     snap_rows: list[tuple[Any, ...]] = []
     contract_rows: list[tuple[Any, ...]] = []
+    oi_rows: list[tuple[Any, ...]] = []
     seen_contracts: set[str] = set()
 
     for item in results:
@@ -174,6 +193,19 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
             )
         )
         ot = parts["option_ticker"]
+        oi = as_int(item.get("open_interest"))
+        if oi is not None:
+            oi_rows.append(
+                (
+                    ot,
+                    parts["underlying"],
+                    parts["expiry"],
+                    parts["strike"],
+                    parts["option_right"],
+                    trade_date,
+                    oi,
+                )
+            )
         if ot not in seen_contracts:
             seen_contracts.add(ot)
             contract_rows.append(
@@ -215,6 +247,16 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
         set_fetched_at=True,
         auto_commit=False,
     )
+    n_oi = batch_upsert(
+        conn,
+        "market.option_open_interest",
+        _OI_COLS,
+        oi_rows,
+        conflict_keys=("option_ticker", "trade_date"),
+        update_cols=("underlying", "expiry", "strike", "option_right", "open_interest"),
+        set_fetched_at=True,
+        auto_commit=False,
+    )
     try:
         conn.commit()
     except Exception:
@@ -223,6 +265,10 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     return {
         "rows_written": n,
         "contracts_written": n_contracts,
+        "oi_rows_written": n_oi,
+        "trade_date": trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
+        # The worker touches these freshness dimensions on top of the job's own.
+        "freshness_extra": {"option_open_interest": n_oi},
         "underlying": storage,
         "api_underlying": api_underlying,
         "truncated": bool(data.get("truncated")),

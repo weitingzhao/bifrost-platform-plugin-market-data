@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from bifrost_market_data.freshness import (
+    extra_freshness_from_result,
     dimension_for_kind,
     rows_written_from_result,
     update_freshness,
@@ -66,3 +67,12 @@ def test_update_freshness_upsert() -> None:
 def test_update_freshness_requires_dimension() -> None:
     with pytest.raises(ValueError):
         update_freshness(_Conn(), "", 1)
+
+
+def test_extra_freshness_from_result() -> None:
+    assert extra_freshness_from_result(None) == {}
+    assert extra_freshness_from_result({"rows_written": 3}) == {}
+    assert extra_freshness_from_result({"freshness_extra": {"option_open_interest": "12", "": 1}}) == {
+        "option_open_interest": 12
+    }
+    assert extra_freshness_from_result({"freshness_extra": {"x": "bad", "y": -3}}) == {"x": 0, "y": 0}

@@ -176,15 +176,3 @@ async def short_volume(
     except PolygonAPIError as exc:
         raise polygon_error_to_http(exc) from exc
 
-
-@router.get("/float")
-async def float_shares(
-    ticker: str = Query(...),
-    limit: int = Query(10, ge=1, le=5000),
-    sort: str | None = Query(None),
-    client: PolygonClient = Depends(get_polygon_client),
-) -> dict[str, Any]:
-    try:
-        return await client.fetch_float(ticker=ticker, limit=limit, sort=sort)
-    except PolygonAPIError as exc:
-        raise polygon_error_to_http(exc) from exc

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from datetime import date, timedelta
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs

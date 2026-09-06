@@ -102,16 +102,6 @@ def test_technical_indicator_sma(api_client: TestClient, mock_client: AsyncMock)
     assert kwargs["window"] == 20
 
 
-def test_trades_quotes_last_trade(api_client: TestClient, mock_client: AsyncMock) -> None:
-    mock_client.fetch_last_trade = AsyncMock(
-        return_value={"status": "OK", "results": {"p": 1.25}}
-    )
-    resp = api_client.get("/market/trades-quotes/last-trade/O:AAPL240621C00150000")
-    assert resp.status_code == 200
-    assert resp.json()["results"]["p"] == 1.25
-    mock_client.fetch_last_trade.assert_awaited_once_with("O:AAPL240621C00150000")
-
-
 def test_technical_indicator_rejects_unknown(api_client: TestClient) -> None:
     resp = api_client.get("/market/technical-indicators/xyz/AAPL")
     assert resp.status_code == 400

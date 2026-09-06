@@ -94,6 +94,25 @@ async def test_process_one_job_calls_freshness(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_process_one_job_touches_extra_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that fills a second table reports it via freshness_extra."""
+    monkeypatch.setattr("bifrost_market_data.worker.loop.mark_done", lambda conn, job_id, result=None: None)
+
+    async def snapshot_handler(job: JobRow) -> dict[str, Any]:
+        return {"rows_written": 5, "freshness_extra": {"option_open_interest": 7}}
+
+    conn = _FreshConn()
+    await process_one_job(
+        conn,
+        _job(kind="option_snapshot"),
+        handlers={"option_snapshot": snapshot_handler},
+        health=HealthState(pool="options"),
+    )
+    freshness_stmts = [s[1] for s in conn.statements if "ingest_freshness" in s[0].lower()]
+    assert freshness_stmts == [("option_snapshot", 5, "ok"), ("option_open_interest", 7, "ok")]
+
+
+@pytest.mark.asyncio
 async def test_process_one_job_freshness_failure_does_not_fail_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

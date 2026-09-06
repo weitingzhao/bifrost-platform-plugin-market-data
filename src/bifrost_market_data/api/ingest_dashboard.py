@@ -29,15 +29,18 @@ _TRADING_DAY_OWNED_AFTER_ET = timedelta(hours=2)
 # Empty list → slot is inline / analytics; use freshness_dimension when set.
 SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "stock-eod": {"kinds": ["stock_daily"], "freshness": "stock_daily"},
+    # The snapshot handler writes OI from the same download (0.10.3), so the
+    # slot's evidence is the snapshot job alone.
     "eod-pipeline": {
-        "kinds": ["option_snapshot", "option_open_interest"],
+        "kinds": ["option_snapshot"],
         "freshness": "option_snapshot",
     },
     "universe-daily": {"kinds": ["stock_daily_grouped"], "freshness": "stock_daily"},
     "corporate": {"kinds": ["splits", "dividends"], "freshness": None},
-    "option-refresh": {"kinds": ["option_contract", "option_expiration"], "freshness": None},
+    "option-refresh": {"kinds": ["option_contract"], "freshness": None},
     "option-bars": {"kinds": ["option_daily"], "freshness": None},
-    "option-trades": {"kinds": ["option_trades"], "freshness": "option_trades"},
+    # Retired 0.10.3: option trades are not in Options Starter.
+    "option-trades": {"kinds": [], "freshness": None, "inline": True, "retired": True},
     "minute-bars": {"kinds": ["stock_minute", "option_minute"], "freshness": None},
     "calendar": {"kinds": ["calendar"], "freshness": "calendar"},
     "reference": {"kinds": ["ticker_sync"], "freshness": None},
@@ -45,7 +48,12 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "related-rotate": {"kinds": ["ticker_related"], "freshness": None},
     "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
     "stock-movers": {"kinds": ["stock_movers"], "freshness": None},
-    "oi-gap-heal": {"kinds": [], "freshness": "option_open_interest", "inline": True},
+    "oi-gap-heal": {
+        "kinds": [],
+        "freshness": "option_open_interest",
+        "inline": True,
+        "maintenance": True,
+    },
     "max-pain": {
         "kinds": [],
         "freshness": None,
@@ -71,8 +79,15 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "retired": True,
     },
     # Inline maintenance — no job_ingest rows; evidence is ops_jobs.ingest_freshness.job_trim
-    "trim": {"kinds": [], "freshness": "job_trim", "inline": True},
+    "trim": {"kinds": [], "freshness": "job_trim", "inline": True, "maintenance": True},
 }
+
+# Maintenance slots (trim, gap-heal) keep their own adherence row but never
+# decide the schedule verdict: a housekeeping miss is not a data miss, and the
+# Research gate reads that verdict.
+MAINTENANCE_SLOT_IDS = frozenset(
+    sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("maintenance")
+)
 
 SLOT_NOTES: dict[str, str] = {
     "stock-eod": "Stock EOD bars",
@@ -81,7 +96,7 @@ SLOT_NOTES: dict[str, str] = {
     "corporate": "Splits / dividends",
     "option-refresh": "Option contracts / expirations",
     "option-bars": "Option daily bars",
-    "option-trades": "Option trades tape (REST)",
+    "option-trades": "Option trades tape — RETIRED (not in Options Starter)",
     "minute-bars": "Stock/option minutes",
     "calendar": "US trading calendar",
     "reference": "Ticker sync",
@@ -470,6 +485,7 @@ def _slot_adherence(
     fresh_dim = evidence.get("freshness")
     inline = bool(evidence.get("inline"))
     migrated = bool(evidence.get("migrated"))
+    retired = bool(evidence.get("retired"))
     fires_iso: list[str] = []
     if cron and horizon_start is not None and horizon_end is not None:
         try:
@@ -489,6 +505,22 @@ def _slot_adherence(
             "next_fires": [],
             "inline": inline,
             "migrated": True,
+            "evidence_kinds": kinds,
+            "fires_in_window": [],
+            "drain": None,
+        }
+    if retired:
+        return {
+            "slot": slot_id,
+            "cron": cron or None,
+            "note": SLOT_NOTES.get(slot_id, "retired"),
+            "ok": True,
+            "adherence": "retired",
+            "detail": "retired — not covered by the current subscription",
+            "last_fire": None,
+            "next_fires": [],
+            "inline": inline,
+            "retired": True,
             "evidence_kinds": kinds,
             "fires_in_window": [],
             "drain": None,
@@ -703,9 +735,17 @@ def build_queue_dashboard(
             )
         )
 
-    on_plan = sum(1 for s in plan if s.get("adherence") == "on_plan")
-    missed = sum(1 for s in plan if s.get("adherence") == "missed")
-    due = sum(1 for s in plan if s.get("adherence") == "due")
+    for entry in plan:
+        entry["maintenance"] = entry.get("slot") in MAINTENANCE_SLOT_IDS
+
+    # Only data slots decide the verdict; maintenance rows are reported beside it.
+    gated = [s for s in plan if not s.get("maintenance")]
+    on_plan = sum(1 for s in gated if s.get("adherence") == "on_plan")
+    missed = sum(1 for s in gated if s.get("adherence") == "missed")
+    due = sum(1 for s in gated if s.get("adherence") == "due")
+    maintenance_missed = [
+        str(s.get("slot")) for s in plan if s.get("maintenance") and s.get("adherence") == "missed"
+    ]
 
     if queue["active"] > 0:
         queue_verdict = "draining"
@@ -733,6 +773,8 @@ def build_queue_dashboard(
     else:
         husbandry_verdict = "healthy"
         husbandry_detail = f"{on_plan} slots on plan · queue idle"
+    if maintenance_missed:
+        husbandry_detail += f" · maintenance missed: {', '.join(maintenance_missed)}"
 
     return {
         "ok": True,
@@ -767,6 +809,7 @@ def build_queue_dashboard(
             "on_plan": on_plan,
             "due": due,
             "missed": missed,
+            "maintenance_missed": maintenance_missed,
             "grace_minutes": grace_minutes,
             "horizon": {
                 "start": iso_z(horizon_start),

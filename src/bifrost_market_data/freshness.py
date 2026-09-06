@@ -29,6 +29,25 @@ def rows_written_from_result(result: Mapping[str, Any] | None) -> int:
         return 0
 
 
+def extra_freshness_from_result(result: Mapping[str, Any] | None) -> dict[str, int]:
+    """Other dimensions a handler filled from the same fetch (``freshness_extra``)."""
+    if not result:
+        return {}
+    raw = result.get("freshness_extra")
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for dim, rows in raw.items():
+        key = str(dim or "").strip()
+        if not key:
+            continue
+        try:
+            out[key] = max(0, int(rows))
+        except (TypeError, ValueError):
+            out[key] = 0
+    return out
+
+
 def update_freshness(
     conn: Any,
     dimension: str,
