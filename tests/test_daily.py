@@ -1127,13 +1127,13 @@ def test_enqueue_fundamentals_market() -> None:
         "fundamentals-market",
         target_date=date(2024, 6, 21),  # Friday
         watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2, "short_interest_lookback_days": 20}}},
+        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2, "short_interest_lookback_days": 45}}},
     )
     by_kind = {j["kind"]: j["payload"] for j in result["jobs"]}
     assert set(by_kind) == {"ratios_market", "short_volume_market", "short_interest_market"}
     assert by_kind["ratios_market"] == {"date": "2024-06-21"}
     assert by_kind["short_volume_market"] == {"date": "2024-06-21"}
-    assert by_kind["short_interest_market"] == {"settlement_date_gte": "2024-06-01"}
+    assert by_kind["short_interest_market"] == {"settlement_date_gte": "2024-05-07"}
     # Not holiday-gated: it fires the morning after a session, which may be a Saturday.
     weekend = enqueue_slot(
         _DailyConn(["AAPL"]),

@@ -67,6 +67,14 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 - **重活出 API**：`oi-gap-heal` 改为 `oi_gap_heal` worker job（每个 job 5 个标的，逐标的 SELECT）；enqueue-slot 改为单语句批量插入（`insert_jobs_bulk`）。
 - **Dagster（research 0.67.0）**：所有 market slot asset 带 `RetryPolicy(3, 60s, exponential)`；`bifrost_run_failure_alert` sensor 把失败推到 Alertmanager 的 Bifrost 路由；`market_corporate_trades` → `market_corporate`；新增 `market_fundamentals_market_schedule`。
 
+### P2 集群实测（2026-09-06，0.11.0）
+
+- `fundamentals-market` 手工触发：ratios 6 页 5,016 行、short volume 16 页 15,160 行落库（此前 22 行 / 240 行）；short interest 20 天窗口为 0 行 → 0.11.1 改为 45 天（FINRA 结算后约 10 天才发布）。
+- `oi-gap-heal` 6 个 worker job 全部完成（每 job 5 个标的，最大 28 万候选行），API Pod 不再参与。
+- `reference` 全量列表把 61 个 vendor 已不再列出的名字置为 inactive。
+- `watchlist_cache` 已缓存 18 个 symbol。
+- 0.11.1：仪表盘 cron 解析支持 `2-6` 这类范围（`fundamentals-market` 曾显示 unsupported_cron）。
+
 ### P1 验收
 
 - Console market lane 连续 5 个交易日无误报

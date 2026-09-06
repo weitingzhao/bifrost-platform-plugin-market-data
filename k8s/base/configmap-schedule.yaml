@@ -87,7 +87,7 @@ data:
           # for the latest settlement; whole market at 1,000 rows a page.
           cron: "30 4 * * 2-6"
           priority: 2
-          short_interest_lookback_days: 20
+          short_interest_lookback_days: 45
         oi-gap-heal:
           cron: "0 4 * * 6"
           lookback_days: 30

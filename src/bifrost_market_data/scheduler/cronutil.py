@@ -11,18 +11,38 @@ from datetime import datetime, timedelta, timezone
 
 
 def _parse_field(field: str, minimum: int, maximum: int) -> set[int] | None:
-    """Return allowed values, or None if field is ``*`` (all)."""
+    """Return allowed values, or None if field is ``*`` (all).
+
+    Accepts ``*``, ``*/N``, ``A``, ``A-B``, ``A-B/N`` and comma lists of those —
+    the forms Dagster crons in the multi-schedule use (``30 4 * * 2-6``).
+    """
     f = field.strip()
     if f == "*":
         return None
-    if f.startswith("*/"):
-        step = int(f[2:])
-        if step <= 0:
-            raise ValueError(f"invalid step in cron field: {field!r}")
-        return {v for v in range(minimum, maximum + 1) if v % step == 0}
-    if "," in f:
-        return {int(p.strip()) for p in f.split(",") if p.strip() != ""}
-    return {int(f)}
+    out: set[int] = set()
+    for part in f.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            base, step_s = part.split("/", 1)
+            step = int(step_s)
+            if step <= 0:
+                raise ValueError(f"invalid step in cron field: {field!r}")
+        else:
+            base = part
+        if base == "*":
+            lo, hi = minimum, maximum
+        elif "-" in base:
+            lo_s, hi_s = base.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+        else:
+            lo = hi = int(base)
+        if lo > hi or lo < minimum or hi > maximum:
+            raise ValueError(f"cron field out of range: {field!r}")
+        out.update(v for v in range(lo, hi + 1) if (v - lo) % step == 0)
+    return out
 
 
 def parse_cron(expr: str) -> tuple[set[int] | None, set[int] | None, set[int] | None]:

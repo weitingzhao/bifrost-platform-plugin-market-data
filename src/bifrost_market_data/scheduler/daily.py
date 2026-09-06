@@ -996,14 +996,16 @@ def enqueue_slot(
 
     elif slot_key == "fundamentals-market":
         # Ratios and short data for the last completed session, whole market.
-        # Short interest settles twice a month; a 20-day window catches the
-        # latest settlement without re-pulling history.
+        # Short interest settles twice a month and FINRA publishes it about ten
+        # days later: a 45-day window always holds the latest published
+        # settlement (20 days missed it — the 08-14 settlement was the newest
+        # on 09-04) without re-pulling history.
         from bifrost_market_data.quality import fetch_completed_trading_days
 
         sessions = fetch_completed_trading_days(conn, 1, as_of=day)
         session = sessions[-1] if sessions else day
         session_s = session.isoformat()
-        si_back = int(scfg.get("short_interest_lookback_days") or 20)
+        si_back = int(scfg.get("short_interest_lookback_days") or 45)
         _add("ratios_market", {"date": session_s}, pri=priority)
         _add("short_volume_market", {"date": session_s}, pri=priority)
         _add(

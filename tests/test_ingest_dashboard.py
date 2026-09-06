@@ -404,3 +404,16 @@ def test_freshness_alone_is_evidence_after_trim(monkeypatch: pytest.MonkeyPatch)
     assert ref["adherence"] == "on_plan"
     assert "freshness.ticker_sync" in ref["detail"]
     assert report["husbandry"]["verdict"] != "missed"
+
+
+def test_parse_cron_day_of_week_range() -> None:
+    """``30 4 * * 2-6`` (Tue–Sat, the fundamentals-market slot) must parse, as must A-B/N."""
+    from bifrost_market_data.scheduler.cronutil import parse_cron
+
+    minutes, hours, dows = parse_cron("30 4 * * 2-6")
+    assert minutes == {30} and hours == {4} and dows == {2, 3, 4, 5, 6}
+    _, hours2, _ = parse_cron("0 0-12/6,22 * * *")
+    assert hours2 == {0, 6, 12, 22}
+    assert parse_cron("*/15 * * * *")[0] == {0, 15, 30, 45}
+    with pytest.raises(ValueError):
+        parse_cron("0 25 * * *")
