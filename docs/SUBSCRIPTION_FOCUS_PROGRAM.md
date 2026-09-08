@@ -41,7 +41,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 | P1 止血 | 修 UnboundLocalError；限流改为付费档；停未授权拉取；EOD 去重（session-once、触发日 holiday skip、OI 随快照写、expiration 随合约写）；维护 slot 退出 gate；删 `trades-quotes` / `filings` / `float` 死路由；依从性证据改为 freshness 兜底 | ✅ 0.10.4 已发布（Console 验收观察 5 个交易日） | 2026-09-06 |
 | P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | ✅ Plugin 0.11.1 + Dagster 0.67.0 已部署（验收观察中） | 2026-09-06 |
 | P2.5 Doctor | 手动自检 + 一键修复 + 可执行的 Agent 报告 + 每晚自愈：`GET /market/doctor` / `POST /market/doctor/heal`；Console Doctor 面板；MCP `market_data_doctor` / `market_data_heal`；Dagster `market_self_heal`（00:45 UTC 周二–六） | ✅ Plugin 0.12.0 + Dagster 0.68.1 | 2026-09-06 |
-| P3 模型 | `option_snapshot` 主键改观测时间；OI 从快照派生；job 幂等键带 session；健康判定按 session 完整性 | ⏳ 需 Owner 批准 DDL | — |
+| P3 模型 | `snapshot_ts` 重定义为观测时间（保留列名与主键形状）；OI 从快照派生、退役 gap-heal；job 幂等键按 session；健康判定按会话覆盖率 | ✅ Plugin 0.13.1 + Research 0.92.0（Owner 2026-09-08 批准方案 A） | 2026-09-08 |
 | P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；Financials & Ratios 全量；国债收益率；Research staging 契约修正 | ⏳ | — |
 
 ### P1 改动摘要（0.10.3）
@@ -105,6 +105,22 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 - **Dagster** `market_self_heal`（`45 0 * * 2-6` UTC，即交易日 20:45 EDT / 19:45 EST）：doctor → 有处方就 heal → 轮询 `queue-summary` 至排空（上限 `MARKET_SELF_HEAL_WAIT_SEC`，默认 900s）→ 再 doctor；仍 critical 才 fail（触发 Alertmanager）。无 RetryPolicy（重跑只会重复入队）。已加入 husbandry 白名单。
 
 不在 P2.5：快照类缺口只有当 session 是「今天」才自动修（历史 session 的快照无法回填，是 P3 主键改造的动机）。
+
+### P3 模型（0.13.0 / Research 0.92.0，Owner 批准方案 A）
+
+**根因**：`snapshot_ts` 填的是合约的**最后成交时间**，不是观测时间。没成交的合约被写回它上次成交那天，于是一次 EOD 抓取的 9,602 行只有 8,593 行落在当天会话，其余散落到最早 08-24；更糟的是后来的抓取会原地覆盖旧日期的行——`snapshot_ts` 落在 08-11～08-18 的行 `fetched_at` 最新是 09-05，也就是 8 月中旬那几天的 IV / greeks / day_close / OI 装的是 9 月的值，Research 回测读到的是错的。每标的每会话覆盖率因此只有 33%～72%（SPY 存 4,815，vendor 当场返回 11,966），P3 验收的 95% 用旧模型永远达不到。
+
+**方案 A（Owner 选定）**：列名和主键形状都不动，把 `snapshot_ts` 的语义改成「观测时间」——EOD 用该 session 的 16:00 NY 锚点，日内用真实时刻；旧值移到新列 `last_trade_ts`。因此 Research 6 个引擎、Trade API、插件 API 和视图一行都不用改，它们现有的 `date(snapshot_ts AT TIME ZONE 'NY')` 查询自动从错变对。
+
+**迁移**（`schema/wave9_migrations.py`，`init_schema.py --wave9-sql | psql -U postgres` 执行，raw_market 属 postgres 所有）：按 `fetched_at` 折算回真正被观测的 session，周末补跑折回它在治的那个交易日，同 ticker 同锚点保留 `max(fetched_at)`。先以 ROLLBACK 全量演练通过再正式执行，8.8 秒完成；944,024 行 → 823,411 行（12 万行被覆盖的重复历史折回本会话），错位残留 0，最后成交时间 823,411/823,411 全部保留。09-04 从散落的 56,590 行变成完整的 116,654 行 / 26 个标的 / 1 个观测时间戳（原来 35,123 个）。
+
+**新护栏**：vendor 的链快照永远是「此刻」的链，所以只有在下一次开盘之前补跑才诚实。`trading_calendar.chain_session()` 给出链当前反映的会话，`handle_option_snapshot` 拒绝任何不等于它的 `trade_date`（返回 `skipped: stale_session`），不再把今天的 greeks 写到过去的会话键上。周六补周五 → 允许；周一开盘后补周五 → 拒绝，doctor 也据此把该缺口标成「已丢失，不是待办」。
+
+**健康判定**：从「有没有行」改成会话覆盖率——每个标的的 `option_snapshot` / `option_open_interest` 对照 `option_contract` 里的活跃合约数，低于 **90%** 即告警（0.13.1 实测校准：vendor 的快照端点本来就比合约目录少返回约 5%，SPY 实测 11,966 / 12,576，所以 95% 按构造达不到；正常会话实测 94%–100%，旧模型坏掉的会话是 33%–72%）。分母只算该会话之前挂牌的合约（`first_seen_at`），否则会话之后新挂的合约会把历史覆盖率越算越低；`stock_daily` / `stock_snapshot` 门槛从 4,000 提到 12,000（实测约 12.5k / 13.2k）。新增 `doctor.eod_critical`：只看会话数据本身（链覆盖、OI、股票日线），Research 的 `husbandry_gate` 改读它，不再因为某个 rotate 或维护 slot 迟到就挡住 dbt。
+
+**退役**：`oi-gap-heal` slot / `oi_gap_heal` handler / `option_oi_extract.py` / `scripts/backfill_oi.py` / CronJob / Dagster 资产与调度全部删除——OI 现在随链快照按 session 写入，没有 gap 可补。**`vendor_gap_fix` 保留**：P3 原文列了它，但它是 `stock_daily_grouped` 的别名、与 OI 模型无关，且 `bifrost-trade-api` 的数据就绪页在调用，删它只会弄坏 Trade 的页面。
+
+**存储影响**：修好后每会话存全部约 115,618 个活跃合约（原来只有约 40% 落对位置），约 35MB/会话、90 天保留约 2.1GB。vendor 调用量不变——这些合约本来每次就全量下载了，只是存错了地方。
 
 ---
 

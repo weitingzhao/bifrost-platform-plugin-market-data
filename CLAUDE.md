@@ -73,6 +73,8 @@ make sync-write-auth-overlay    # ConfigMap overlay of deps.py (X-Market-Data-Wr
 Owner 订阅 **Options Starter + Stocks Starter + Financials & Ratios**：无限调用（限流是自伤，`tier: starter` 已改为 8 req/s 软上限）；股票聚合滚动 5 年、期权聚合滚动 2 年；trades / quotes / last-trade / 指数行情 **403**（升级前不拉）。
 程序文档：`docs/SUBSCRIPTION_FOCUS_PROGRAM.md`。
 
+`option_snapshot.snapshot_ts` 是**观测时间**（EOD = 该 session 的 16:00 NY 锚点），不是最后成交时间——后者在 `last_trade_ts`。链快照只反映当前会话，所以补跑只在下一次开盘前有效（`trading_calendar.chain_session`）。
+
 **先跑 doctor 再猜**：`GET /market/doctor` 给出「本 session 应有 vs 实有」与每项处方；`POST /market/doctor/heal`（写 token）执行处方。Console Ingest tab 的 Doctor 面板与 MCP `market_data_doctor` / `market_data_heal` 是同一份处方；Dagster `market_self_heal` 每晚 00:45 UTC 自动跑一遍。
 
 ## 修改纪律

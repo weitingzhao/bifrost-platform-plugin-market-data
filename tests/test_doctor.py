@@ -140,6 +140,9 @@ def test_partial_chain_coverage_is_a_finding_not_a_pass() -> None:
     assert "Worst: NVDA 30%" in snap["detail"]
     assert snap["fix"] == {"action": "enqueue-slot", "slot": "eod-pipeline", "force": True, "date": "2026-09-04"}
     assert by_id[f"option_open_interest:{SESSION.isoformat()}"]["severity"] == "warn"  # 1 of 4
+    # A contract listed after the session must not count against that session.
+    contract_sql = next(q for q, _p in conn.statements if "option_contract" in q)
+    assert "first_seen_at <" in contract_sql
     assert rep["eod_critical"]["verdict"] == "critical"
     assert "Option chain snapshot" in rep["eod_critical"]["detail"]
     assert by_id[f"stock_daily:{SESSION.isoformat()}"]["severity"] == "crit"
@@ -318,3 +321,14 @@ def test_lost_session_is_reported_as_lost_not_pending(monkeypatch: pytest.Monkey
     assert snap["fix"] is None
     assert "lost, not pending" in snap["detail"]
     assert not [p for p in rep["prescriptions"] if p.get("slot") == "eod-pipeline"]
+
+
+def test_a_normal_vendor_shortfall_is_not_an_alarm() -> None:
+    """The vendor returns ~95% of the catalogue; that must read as healthy."""
+    data = _healthy_data()
+    data["snapshot"] = {u: 940 for u in UNIVERSE}
+    data["oi"] = {u: 940 for u in UNIVERSE}
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    snap = next(f for f in rep["findings"] if f["id"].startswith("option_snapshot:"))
+    assert snap["severity"] == "ok"
+    assert rep["eod_critical"]["verdict"] == "healthy"
