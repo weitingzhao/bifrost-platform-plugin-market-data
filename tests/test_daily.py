@@ -134,7 +134,7 @@ class _DailyCursor:
             self.parent._fetchall = rows
             self.parent._fetchone = None
         elif "/* snapshot-window: spot */" in q:
-            syms = set(params[0])
+            syms = set(params[0])  # params[1] is the date floor
             self.parent._fetchall = [(u, self.parent.spots[u]) for u in sorted(syms) if u in self.parent.spots]
             self.parent._fetchone = None
         elif "/* snapshot-window: expiry */" in q:

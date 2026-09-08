@@ -698,10 +698,13 @@ def load_snapshot_windows(
                 /* snapshot-window: spot */
                 SELECT DISTINCT ON (symbol) symbol, close
                 FROM raw_market.stock_daily
-                WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
+                WHERE symbol = ANY(%s) AND bar_date >= %s AND close IS NOT NULL AND close > 0
                 ORDER BY symbol, bar_date DESC
                 """,
-                (syms,),
+                # The date floor is what makes this fast: unbounded, DISTINCT ON
+                # over 13.6M rows for 548 names timed out at 60s; the last week
+                # takes well under a second on the (symbol, bar_date) index.
+                (syms, as_of - timedelta(days=7)),
             )
             for row in cur.fetchall() or []:
                 sym, close = (row.get("symbol"), row.get("close")) if isinstance(row, Mapping) else (row[0], row[1])
