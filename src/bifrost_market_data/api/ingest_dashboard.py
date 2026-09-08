@@ -107,9 +107,7 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
 # Maintenance slots (trim, gap-heal) keep their own adherence row but never
 # decide the schedule verdict: a housekeeping miss is not a data miss, and the
 # Research gate reads that verdict.
-MAINTENANCE_SLOT_IDS = frozenset(
-    sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("maintenance")
-)
+MAINTENANCE_SLOT_IDS = frozenset(sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("maintenance"))
 
 SLOT_NOTES: dict[str, str] = {
     "stock-eod": "Stock EOD bars",
@@ -137,9 +135,7 @@ SLOT_NOTES: dict[str, str] = {
     "trim": "Trim old jobs (inline)",
 }
 
-MIGRATED_SLOT_IDS = frozenset(
-    sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("migrated")
-)
+MIGRATED_SLOT_IDS = frozenset(sid for sid, ev in SLOT_EVIDENCE.items() if ev.get("migrated"))
 
 # Slots retired only because the current subscription lacks the data. Surfaced
 # even when schedule.yaml no longer lists them: a placeholder, not a miss.
@@ -263,7 +259,9 @@ def _queue_composition(conn: Any) -> dict[str, Any]:
             "running": vals["running"],
             "active": vals["pending"] + vals["running"],
         }
-        for kind, vals in sorted(by_kind.items(), key=lambda kv: -(kv[1]["pending"] + kv[1]["running"]))
+        for kind, vals in sorted(
+            by_kind.items(), key=lambda kv: -(kv[1]["pending"] + kv[1]["running"])
+        )
     ]
     return {
         "pending": pending_total,
@@ -274,44 +272,42 @@ def _queue_composition(conn: Any) -> dict[str, Any]:
 
 
 def _throughput(conn: Any, now: datetime) -> dict[str, Any]:
-    windows = {"5m": 5, "15m": 15, "60m": 60}
-    done: dict[str, int] = {}
-    failed: dict[str, int] = {}
-    for label, minutes in windows.items():
-        start = now - timedelta(minutes=minutes)
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT status, COUNT(*)::bigint AS n
-                FROM ops_jobs.job_ingest
-                WHERE finished_at >= %s
-                  AND status IN ('done', 'failed')
-                GROUP BY status
-                """,
-                (start,),
-            )
-            rows = cur.fetchall() or []
-        d = f = 0
-        for row in rows:
-            if isinstance(row, Mapping):
-                status = str(row.get("status") or "")
-                n = int(row.get("n") or 0)
-            else:
-                status = str(row[0] or "")
-                n = int(row[1] or 0)
-            if status == "done":
-                d = n
-            elif status == "failed":
-                f = n
-        done[label] = d
-        failed[label] = f
-    per_min_15 = round(done["15m"] / 15.0, 2) if done["15m"] else 0.0
+    """Done / failed in the last 5, 15 and 60 minutes — one pass, not three.
+
+    This tile read 0 on 2026-09-08 while the queue was finishing ~694 jobs a
+    minute: three separate window queries, each a full scan of a 3.3M-row table
+    because nothing indexed ``finished_at``, each ~27s, each cancelled. A rate
+    of 0 when the truth is 694/min is worse than no number at all — it reads as
+    "the queue is stuck". One pass over the widest window, split by FILTER,
+    against ``job_ingest_finished_at`` (partial on the settled statuses).
+    """
+    w5, w15, w60 = (now - timedelta(minutes=m) for m in (5, 15, 60))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'done'   AND finished_at >= %s)::bigint,
+                COUNT(*) FILTER (WHERE status = 'done'   AND finished_at >= %s)::bigint,
+                COUNT(*) FILTER (WHERE status = 'done'   AND finished_at >= %s)::bigint,
+                COUNT(*) FILTER (WHERE status = 'failed' AND finished_at >= %s)::bigint
+            FROM ops_jobs.job_ingest
+            WHERE finished_at >= %s
+              AND status IN ('done', 'failed')
+            """,
+            (w5, w15, w60, w15, w60),
+        )
+        row = cur.fetchone()
+    if isinstance(row, Mapping):
+        values = list(row.values())
+    else:
+        values = list(row or [])
+    d5, d15, d60, f15 = (int(v or 0) for v in (values + [0, 0, 0, 0])[:4])
     return {
-        "done_last_5m": done["5m"],
-        "done_last_15m": done["15m"],
-        "done_last_60m": done["60m"],
-        "failed_last_15m": failed["15m"],
-        "jobs_per_min_15m": per_min_15,
+        "done_last_5m": d5,
+        "done_last_15m": d15,
+        "done_last_60m": d60,
+        "failed_last_15m": f15,
+        "jobs_per_min_15m": round(d15 / 15.0, 2) if d15 else 0.0,
     }
 
 
@@ -520,7 +516,9 @@ def _slot_adherence(
     fires_iso: list[str] = []
     if cron and horizon_start is not None and horizon_end is not None:
         try:
-            fires_iso = [iso_z(t) for t in iter_cron_fires(cron, start=horizon_start, end=horizon_end)]
+            fires_iso = [
+                iso_z(t) for t in iter_cron_fires(cron, start=horizon_start, end=horizon_end)
+            ]
         except ValueError:
             fires_iso = []
     drain = _slot_drain(kinds, activity or {})
@@ -614,18 +612,13 @@ def _slot_adherence(
 
     # Weekend/holiday cron with no evidence → fall back to last trading-day fire
     # (Fri EOD) so a real miss is still visible; empty lookback ⇒ on_plan skip.
-    if (
-        not evidence_ok
-        and slot_id in SKIP_ON_HOLIDAY_SLOTS
-    ):
+    if not evidence_ok and slot_id in SKIP_ON_HOLIDAY_SLOTS:
         try:
             trading_last = is_trading_day(conn, cron_last.date())
         except Exception:
             trading_last = True
         if not trading_last:
-            fallback, mode = _previous_expected_fire(
-                conn, slot_id=slot_id, cron=cron, before=now
-            )
+            fallback, mode = _previous_expected_fire(conn, slot_id=slot_id, cron=cron, before=now)
             if mode == "skip" or fallback is None:
                 return {
                     "slot": slot_id,
@@ -634,8 +627,7 @@ def _slot_adherence(
                     "ok": True,
                     "adherence": "on_plan",
                     "detail": (
-                        f"non-trading day skip — no enqueue expected "
-                        f"(cron_last={iso_z(cron_last)})"
+                        f"non-trading day skip — no enqueue expected (cron_last={iso_z(cron_last)})"
                     ),
                     "last_fire": iso_z(cron_last),
                     "next_fires": next_iso,
@@ -664,8 +656,7 @@ def _slot_adherence(
     if evidence_ok:
         adherence = "on_plan"
         detail = (
-            f"jobs_created={counts['created']} "
-            f"(done={counts['done']} failed={counts['failed']})"
+            f"jobs_created={counts['created']} (done={counts['done']} failed={counts['failed']})"
         )
         if fresh_hit:
             detail += f"; freshness.{fresh_dim}={fresh_last}"
@@ -952,9 +943,7 @@ def build_ingest_history(
             }
         )
 
-    kind_total_rows = [
-        {"kind": k, **_status_block(st)} for k, st in kind_totals.items()
-    ]
+    kind_total_rows = [{"kind": k, **_status_block(st)} for k, st in kind_totals.items()]
     kind_total_rows.sort(key=lambda r: (-int(r["total"]), str(r["kind"])))
 
     return {
@@ -962,9 +951,7 @@ def build_ingest_history(
         "days": days_n,
         "start_day": start_day.isoformat(),
         "end_day": today.isoformat(),
-        "retention_note": (
-            "job_ingest trim typically keeps ~7d; older calendar days may be empty"
-        ),
+        "retention_note": ("job_ingest trim typically keeps ~7d; older calendar days may be empty"),
         "days_series": days_series,
         "kind_totals": kind_total_rows,
         "generated_at": iso_z(now_utc),

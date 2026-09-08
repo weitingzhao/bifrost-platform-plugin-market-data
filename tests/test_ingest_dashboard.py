@@ -76,7 +76,8 @@ class _DashConn:
             ("stock_daily", "pending", 10),
             ("stock_daily", "running", 2),
         ]
-        self.finished_rows = [("done", 30), ("failed", 1)]
+        # one pass: done 5m / 15m / 60m, failed 15m
+        self.finished_rows = [(12, 30, 96, 1)]
         self.oldest_pending = datetime(2026, 8, 17, 20, 0, tzinfo=timezone.utc)
         self.freshness_rows = [
             ("stock_daily", datetime(2026, 8, 16, 22, 0, tzinfo=timezone.utc), 100, "ok"),
@@ -124,6 +125,13 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["queue"]["scheduled_future"] == 0
     assert report["queue"]["running"] == 2
     assert report["throughput"]["done_last_15m"] == 30
+    assert report["throughput"]["done_last_5m"] == 12
+    assert report["throughput"]["done_last_60m"] == 96
+    assert report["throughput"]["failed_last_15m"] == 1
+    assert report["throughput"]["jobs_per_min_15m"] == 2.0
+    # One statement for all three windows: a full scan of a 3.3M-row table was
+    # cancelled three times over and the tile showed 0 while the queue drained.
+    assert sum(1 for sql, _ in conn.statements if "finished_at >=" in sql.lower()) == 1
     assert len(report["schedule"]["slots"]) == 6  # 2 active + 3 migrated + 1 planned-on-upgrade
     placeholder = next(s for s in report["schedule"]["slots"] if s["slot"] == "option-trades")
     assert placeholder["adherence"] == "retired"
@@ -257,9 +265,7 @@ class _HistCur:
     def execute(self, query: str, params: Any = None) -> None:
         self.parent.statements.append((query, params))
         q = query.lower()
-        if "group by 1, 2, 3" in q or (
-            "job_ingest" in q and "::date" in q and "group by" in q
-        ):
+        if "group by 1, 2, 3" in q or ("job_ingest" in q and "::date" in q and "group by" in q):
             self._rows = list(self.parent.history_rows)
         else:
             self._rows = []
@@ -397,7 +403,9 @@ def test_freshness_alone_is_evidence_after_trim(monkeypatch: pytest.MonkeyPatch)
     )
     conn = _DashConn()
     conn.window_rows = []  # trimmed
-    conn.freshness_rows = [("ticker_sync", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")]
+    conn.freshness_rows = [
+        ("ticker_sync", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")
+    ]
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
     report = build_queue_dashboard(conn, now=now, grace_minutes=45)
     ref = next(s for s in report["schedule"]["slots"] if s["slot"] == "reference")

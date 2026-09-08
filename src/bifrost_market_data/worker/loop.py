@@ -16,6 +16,7 @@ from bifrost_market_data.freshness import (
     rows_written_from_result,
     update_freshness,
 )
+from bifrost_market_data.worker.pool import ConnectionPool
 from bifrost_market_data.worker.claim import (
     JobRow,
     claim_job,
@@ -266,6 +267,10 @@ async def run_loop(
 
     start_health_server_thread(health, port=health_port)
     sem = asyncio.Semaphore(max_concurrency)
+    # One connection per slot plus one for the reclaim tick. Opening one costs
+    # ~300ms against ~17ms to reuse, which is what kept a pool of eight running
+    # one job at a time.
+    pool = ConnectionPool(open_conn, size=max_concurrency + 1)
     in_flight: set[asyncio.Task[None]] = set()
 
     logger.info(
@@ -284,10 +289,10 @@ async def run_loop(
         await sem.acquire()
         conn = None
         try:
-            conn = await asyncio.to_thread(open_conn)
+            conn = await asyncio.to_thread(pool.acquire)
             job = await asyncio.to_thread(claim_fn, conn, list(kinds))
             if job is None:
-                await asyncio.to_thread(conn.close)
+                await asyncio.to_thread(pool.release, conn)
                 conn = None
                 sem.release()
                 return False
@@ -305,7 +310,7 @@ async def run_loop(
                     )
                 finally:
                     try:
-                        await asyncio.to_thread(c.close)
+                        await asyncio.to_thread(pool.release, c)
                     finally:
                         sem.release()
 
@@ -316,10 +321,8 @@ async def run_loop(
             return True
         except Exception:
             if conn is not None:
-                try:
-                    await asyncio.to_thread(conn.close)
-                except Exception:
-                    pass
+                # A connection that failed mid-claim is not worth passing on.
+                await asyncio.to_thread(pool.release, conn, reuse=False)
             sem.release()
             raise
 
@@ -330,7 +333,7 @@ async def run_loop(
             return
         conn = None
         try:
-            conn = await asyncio.to_thread(open_conn)
+            conn = await asyncio.to_thread(pool.acquire)
             stats = await asyncio.to_thread(
                 reclaim_fn,
                 conn,
@@ -349,10 +352,7 @@ async def run_loop(
             logger.exception("stale running reclaim failed")
         finally:
             if conn is not None:
-                try:
-                    await asyncio.to_thread(conn.close)
-                except Exception:
-                    pass
+                await asyncio.to_thread(pool.release, conn)
 
     try:
         while not stop.is_set():
@@ -397,6 +397,8 @@ async def run_loop(
         if in_flight:
             logger.info("draining %s in-flight jobs", len(in_flight))
             await asyncio.gather(*list(in_flight), return_exceptions=True)
+        logger.info("closing %s pooled connections (opened %s)", pool.idle, pool.opened)
+        pool.close()
         if owned_client is not None:
             try:
                 await owned_client.aclose()

@@ -565,6 +565,16 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         WHERE status = 'pending'
         """
     )
+    # The queue dashboard's throughput tile counts what settled in the last
+    # minutes. Without this it scanned the whole table and was cancelled, so the
+    # tile showed 0 jobs/min while the workers were finishing ~700 a minute.
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_finished_at
+        ON ops_jobs.job_ingest (finished_at DESC)
+        WHERE status IN ('done', 'failed')
+        """
+    )
 
     cur.execute(
         """
