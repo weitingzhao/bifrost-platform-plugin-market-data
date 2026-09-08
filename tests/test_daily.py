@@ -133,20 +133,14 @@ class _DailyCursor:
                 rows.append((r["symbol"], r["trade_date"], r["expiry"], r["atm_iv"]))
             self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif "/* snapshot-window */" in q:
-            # (syms, syms, as_of, n_exp) → (symbol, close, nth expiry)
+        elif "/* snapshot-window: spot */" in q:
             syms = set(params[0])
-            as_of = params[2]
-            n_exp = int(params[3])
-            rows = []
-            for und in sorted(syms):
-                spot = self.parent.spots.get(und)
-                if spot is None:
-                    continue
-                exps = sorted({c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of})
-                if len(exps) >= n_exp:
-                    rows.append((und, spot, exps[n_exp - 1]))
-            self.parent._fetchall = rows
+            self.parent._fetchall = [(u, self.parent.spots[u]) for u in sorted(syms) if u in self.parent.spots]
+            self.parent._fetchone = None
+        elif "/* snapshot-window: expiry */" in q:
+            und, as_of, n = params[0], params[1], int(params[2])
+            exps = sorted({c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of})[:n]
+            self.parent._fetchall = [(e,) for e in exps]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
             # (syms, as_of, syms, as_of, n_exp, per_right)
@@ -1438,7 +1432,7 @@ def test_eod_pipeline_without_the_universe_is_unchanged() -> None:
 
 
 
-def test_snapshot_windows_are_looked_up_in_chunks() -> None:
+def test_snapshot_windows_use_one_spot_query_and_a_point_query_per_name() -> None:
     from bifrost_market_data.scheduler import daily as dmod
 
     names = [f"S{i:03d}" for i in range(100)]
@@ -1448,6 +1442,8 @@ def test_snapshot_windows_are_looked_up_in_chunks() -> None:
     )
     w = dmod.load_snapshot_windows(conn, names, as_of=date(2026, 9, 9), expiries=1, strike_pct=0.10)
     assert len(w) == 100 and w["S000"] == (90.0, 110.0, "2026-10-16")
-    lookups = [q for q, _p in conn.statements if "/* snapshot-window */" in q]
-    assert len(lookups) == 3, "100 names at 40 per statement"
+    spot_lookups = [q for q, _p in conn.statements if "/* snapshot-window: spot */" in q]
+    expiry_lookups = [q for q, _p in conn.statements if "/* snapshot-window: expiry */" in q]
+    assert len(spot_lookups) == 1, "one spot query for every name"
+    assert len(expiry_lookups) == 100, "one indexed point query per name"
     assert any("statement_timeout" in q.lower() for q, _p in conn.statements)

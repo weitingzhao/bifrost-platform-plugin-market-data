@@ -662,11 +662,6 @@ def option_trades_universe(
     return sorted([*keep, must])
 
 
-#: Names per snapshot-window statement. Sized so a statement stays far inside
-#: the role's 2s statement_timeout even before the contract table is vacuumed.
-SNAPSHOT_WINDOW_CHUNK = 40
-
-
 def load_snapshot_windows(
     conn: Any,
     symbols: Sequence[str],
@@ -688,53 +683,66 @@ def load_snapshot_windows(
     n_exp = max(1, int(expiries))
     pct = max(0.0, float(strike_pct))
     out: dict[str, tuple[float, float, str]] = {}
-    # Chunked, with the transaction's own timeout: one statement over all 548
-    # core and edge names ran past the role's 2s statement_timeout, and the
-    # safe failure — no window, whole chain — is the expensive path at scale.
-    # A chunk that still fails costs only its own names their window.
-    for start in range(0, len(syms), SNAPSHOT_WINDOW_CHUNK):
-        chunk = syms[start : start + SNAPSHOT_WINDOW_CHUNK]
+    # Two shapes, both index-shaped. Spot for all names is one DISTINCT ON over
+    # stock_daily, which its (symbol, bar_date) index serves. The expiry bound
+    # is one point query per underlying on the (underlying, expiry) index —
+    # milliseconds each, and immune to the planner: a set query over forty
+    # names took forty seconds the day the contract table grew twentyfold and
+    # its statistics had not caught up.
+    spots: dict[str, float] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '60s'")
+            cur.execute(
+                """
+                /* snapshot-window: spot */
+                SELECT DISTINCT ON (symbol) symbol, close
+                FROM raw_market.stock_daily
+                WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
+                ORDER BY symbol, bar_date DESC
+                """,
+                (syms,),
+            )
+            for row in cur.fetchall() or []:
+                sym, close = (row.get("symbol"), row.get("close")) if isinstance(row, Mapping) else (row[0], row[1])
+                if sym and close is not None:
+                    spots[str(sym).upper()] = float(close)
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 — no window beats a wrong one
+        logger.warning("snapshot window spot lookup failed; snapshotting whole chains: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+    for sym in syms:
+        spot = spots.get(sym)
+        if spot is None:
+            continue
         try:
             with conn.cursor() as cur:
-                cur.execute("SET LOCAL statement_timeout = '60s'")
+                cur.execute("SET LOCAL statement_timeout = '10s'")
                 cur.execute(
                     """
-                    /* snapshot-window */
-                    WITH spot AS (
-                      SELECT DISTINCT ON (symbol) symbol, close
-                      FROM raw_market.stock_daily
-                      WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
-                      ORDER BY symbol, bar_date DESC
-                    ),
-                    exp AS (
-                      SELECT underlying, expiry,
-                             DENSE_RANK() OVER (PARTITION BY underlying ORDER BY expiry) AS erank
-                      FROM (SELECT DISTINCT underlying, expiry FROM raw_market.option_contract
-                            WHERE underlying = ANY(%s) AND expiry >= %s) d
-                    )
-                    SELECT s.symbol, s.close, e.expiry
-                    FROM spot s JOIN exp e ON e.underlying = s.symbol AND e.erank = %s
+                    /* snapshot-window: expiry */
+                    SELECT DISTINCT expiry FROM raw_market.option_contract
+                    WHERE underlying = %s AND expiry >= %s
+                    ORDER BY expiry LIMIT %s
                     """,
-                    (chunk, chunk, as_of, n_exp),
+                    (sym, as_of, n_exp),
                 )
-                rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+                exps = [(r.get("expiry") if isinstance(r, Mapping) else r[0]) for r in (cur.fetchall() or [])]
             conn.commit()
-        except Exception as exc:  # noqa: BLE001 — no window beats a wrong one
-            logger.warning("snapshot window lookup failed for %d names; snapshotting those whole: %s", len(chunk), exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("snapshot window expiry lookup failed for %s; snapshotting it whole: %s", sym, exc)
             try:
                 conn.rollback()
             except Exception:
                 pass
             continue
-        for row in rows or []:
-            if isinstance(row, Mapping):
-                sym, close, expiry = row.get("symbol"), row.get("close"), row.get("expiry")
-            else:
-                sym, close, expiry = (list(row) + [None, None, None])[:3]
-            if not sym or close is None or expiry is None:
-                continue
-            spot = float(close)
-            out[str(sym).upper()] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), expiry.isoformat())
+        if len(exps) < n_exp:
+            continue
+        out[sym] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), exps[n_exp - 1].isoformat())
     return out
 
 
