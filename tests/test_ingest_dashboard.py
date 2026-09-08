@@ -41,7 +41,16 @@ class _DashCur:
     def execute(self, query: str, params: Any = None) -> None:
         q = query.lower()
         self.parent.statements.append((query, params))
-        if "min(created_at)" in q and "group by kind" in q:
+        if "min(created_at)" in q and "kind = %s" in q:
+            # per-kind swimlane probe: MIN(created_at) for one kind
+            kind = (params or (None,))[0]
+            row = next((r for r in self.parent.activity_rows if r[0] == kind), None)
+            self._rows = [(row[1] if row else None,)]
+        elif "max(finished_at)" in q and "kind =" in q:
+            kind = (params or (None,))[0]
+            row = next((r for r in self.parent.activity_rows if r[0] == kind), None)
+            self._rows = [(row[2] if row else None,)]
+        elif "min(created_at)" in q and "group by kind" in q:
             self._rows = list(self.parent.activity_rows)
         elif "where status in ('pending', 'running')" in q and "group by kind" in q:
             self._rows = list(self.parent.queue_rows)
@@ -119,7 +128,7 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     conn = _DashConn()
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     assert report["ok"] is True
     assert report["queue"]["ready_now"] == 10
     assert report["queue"]["scheduled_future"] == 0
@@ -131,7 +140,10 @@ def test_build_queue_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["throughput"]["jobs_per_min_15m"] == 2.0
     # One statement for all three windows: a full scan of a 3.3M-row table was
     # cancelled three times over and the tile showed 0 while the queue drained.
-    assert sum(1 for sql, _ in conn.statements if "finished_at >=" in sql.lower()) == 1
+    throughput_sql = [
+        sql for sql, _ in conn.statements if "filter (where status = 'done'" in sql.lower()
+    ]
+    assert len(throughput_sql) == 1
     assert len(report["schedule"]["slots"]) == 6  # 2 active + 3 migrated + 1 planned-on-upgrade
     placeholder = next(s for s in report["schedule"]["slots"] if s["slot"] == "option-trades")
     assert placeholder["adherence"] == "retired"
@@ -180,7 +192,7 @@ def test_eod_pipeline_weekend_cron_not_false_missed(monkeypatch: pytest.MonkeyPa
     conn.window_rows = []
     # Monday mid-day UTC — previous cron fire is Sunday 22:00 (non-trading).
     now = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     eod = next(s for s in report["schedule"]["slots"] if s["slot"] == "eod-pipeline")
     assert eod["adherence"] == "on_plan"
     assert eod["last_fire"] == "2026-08-28T22:00:00Z"  # Fri trading-day fire
@@ -209,7 +221,7 @@ def test_weekend_cron_with_jobs_stays_on_plan(monkeypatch: pytest.MonkeyPatch) -
     conn.freshness_rows = []
     conn.window_rows = [("done", 36)]
     now = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     corp = next(s for s in report["schedule"]["slots"] if s["slot"] == "corporate")
     assert corp["adherence"] == "on_plan"
     assert corp["last_fire"] == "2026-08-30T23:00:00Z"
@@ -249,7 +261,7 @@ def test_eod_pipeline_trading_day_lag_not_false_missed(
     # Tue 01:00 UTC — after Mon 2026-08-17 22:00 fire, before Mon 22:30 ET
     # (Tue 02:30 UTC during EDT). Default 45m grace would already be expired.
     now = datetime(2026, 8, 18, 1, 0, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     eod = next(s for s in report["schedule"]["slots"] if s["slot"] == "eod-pipeline")
     assert eod["adherence"] == "due"
     assert eod["last_fire"] == "2026-08-17T22:00:00Z"
@@ -360,7 +372,7 @@ def test_maintenance_slot_miss_does_not_flip_verdict(monkeypatch: pytest.MonkeyP
     )
     conn = _DashConn()  # no job_trim freshness row → trim has no evidence
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     by_slot = {s["slot"]: s for s in report["schedule"]["slots"]}
     assert by_slot["stock-eod"]["adherence"] == "on_plan"
     assert by_slot["trim"]["adherence"] == "missed"
@@ -384,7 +396,7 @@ def test_retired_slot_is_not_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _DashConn()
     conn.window_rows = []
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     slot = next(s for s in report["schedule"]["slots"] if s["slot"] == "option-trades")
     assert slot["adherence"] == "retired"
     assert slot["ok"] is True
@@ -407,7 +419,7 @@ def test_freshness_alone_is_evidence_after_trim(monkeypatch: pytest.MonkeyPatch)
         ("ticker_sync", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")
     ]
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
-    report = build_queue_dashboard(conn, now=now, grace_minutes=45)
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     ref = next(s for s in report["schedule"]["slots"] if s["slot"] == "reference")
     assert ref["adherence"] == "on_plan"
     assert "freshness.ticker_sync" in ref["detail"]
@@ -425,3 +437,27 @@ def test_parse_cron_day_of_week_range() -> None:
     assert parse_cron("*/15 * * * *")[0] == {0, 15, 30, 45}
     with pytest.raises(ValueError):
         parse_cron("0 25 * * *")
+
+
+def test_the_dashboard_is_cached_for_a_short_while() -> None:
+    """Several viewers polling every few seconds must not each count millions
+    of rows. The payload says how old it is, so the panel can be honest."""
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    mod._CACHE.clear()
+    conn = _DashConn()
+    now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
+
+    first = mod.build_queue_dashboard(conn, now=now, grace_minutes=45)
+    queries_after_first = len(conn.statements)
+    second = mod.build_queue_dashboard(conn, now=now, grace_minutes=45)
+
+    assert first["age_sec"] == 0.0
+    assert len(conn.statements) == queries_after_first  # the second one asked nothing
+    assert second["queue"] == first["queue"]
+    assert second["age_sec"] >= 0.0
+
+    # A different grace window is a different question, and is computed.
+    mod.build_queue_dashboard(conn, now=now, grace_minutes=15)
+    assert len(conn.statements) > queries_after_first
+    mod._CACHE.clear()

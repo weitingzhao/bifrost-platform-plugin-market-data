@@ -575,6 +575,34 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         WHERE status IN ('done', 'failed')
         """
     )
+    # The swimlane asks each kind when it last finished and first arrived.
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_kind_created
+        ON ops_jobs.job_ingest (kind, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_kind_finished
+        ON ops_jobs.job_ingest (kind, finished_at DESC)
+        WHERE finished_at IS NOT NULL
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_open_status_kind
+        ON ops_jobs.job_ingest (status, kind)
+        WHERE status IN ('pending', 'running')
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_pending_created
+        ON ops_jobs.job_ingest (created_at)
+        WHERE status = 'pending'
+        """
+    )
 
     cur.execute(
         """

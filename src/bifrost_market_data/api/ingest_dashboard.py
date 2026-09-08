@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+from time import monotonic
+
 from datetime import datetime, time, timedelta, timezone
+from collections.abc import Sequence
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -14,6 +18,8 @@ from bifrost_market_data.trading_calendar import is_trading_day
 # Swimlane horizon (UTC). Drain lookback is longer so weekend catch-up bars clip in.
 SWIMLANE_PAST = timedelta(hours=24)
 SWIMLANE_FUTURE = timedelta(hours=6)
+logger = logging.getLogger(__name__)
+
 DRAIN_LOOKBACK = timedelta(hours=48)
 
 # Slots owned by Dagster research_trading_day (Mon–Fri 22:30 America/New_York),
@@ -311,43 +317,52 @@ def _throughput(conn: Any, now: datetime) -> dict[str, Any]:
     }
 
 
-def _kind_activity(conn: Any, since: datetime) -> dict[str, dict[str, Any]]:
-    """Per-kind first enqueue / last finish / still-active — for swimlane drain bars."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT kind,
-                   MIN(created_at) AS first_created,
-                   MAX(finished_at) AS last_finished,
-                   COUNT(*) FILTER (
-                       WHERE status IN ('pending', 'running')
-                   )::bigint AS active
-            FROM ops_jobs.job_ingest
-            WHERE created_at >= %s
-               OR status IN ('pending', 'running')
-            GROUP BY kind
-            """,
-            (since,),
-        )
-        raw = cur.fetchall() or []
+def _scalar(row: Any) -> Any:
+    """First column of a one-row answer, whatever row factory is in play."""
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        return next(iter(row.values()), None)
+    return row[0] if row else None
+
+
+def _kind_activity(conn: Any, since: datetime, kinds: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Per-kind first enqueue / last finish — for the swimlane drain bars.
+
+    One grouped scan used to answer this, with ``WHERE created_at >= %s OR
+    status IN ('pending','running')``. The OR defeats every index, and by
+    2026-09-08 the pending side alone was 3.3M rows: measured at 101s, which is
+    most of why the whole endpoint timed out and the panel froze on stale
+    numbers. Asked per kind instead, each half is a range scan of an index that
+    already exists, and there are only ever a handful of kinds. The active
+    count is not re-derived here — the queue composition has already counted it.
+    """
     out: dict[str, dict[str, Any]] = {}
-    for row in raw:
-        if isinstance(row, Mapping):
-            kind = str(row.get("kind") or "")
-            first = row.get("first_created")
-            last = row.get("last_finished")
-            active = int(row.get("active") or 0)
-        else:
-            kind = str(row[0] or "")
-            first = row[1]
-            last = row[2]
-            active = int(row[3] or 0)
-        if not kind:
-            continue
+    for kind in kinds:
+        first = last = None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MIN(created_at) FROM ops_jobs.job_ingest "
+                    "WHERE kind = %s AND created_at >= %s",
+                    (kind, since),
+                )
+                first = _scalar(cur.fetchone())
+                cur.execute(
+                    "SELECT MAX(finished_at) FROM ops_jobs.job_ingest "
+                    "WHERE kind = %s AND finished_at >= %s",
+                    (kind, since),
+                )
+                last = _scalar(cur.fetchone())
+        except Exception as exc:  # noqa: BLE001 — a swimlane bar is not worth a 500
+            logger.warning("kind activity read failed for %s: %s", kind, exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         out[kind] = {
             "first_created": first if isinstance(first, datetime) else None,
             "last_finished": last if isinstance(last, datetime) else None,
-            "active": active,
         }
     return out
 
@@ -696,13 +711,40 @@ def _slot_adherence(
     }
 
 
+# The composition counts millions of rows. Several viewers polling every few
+# seconds must not each pay for that, and the numbers do not change meaningfully
+# inside a minute. `age_sec` on the payload says how old the answer is, so the
+# panel can be honest rather than looking live when it is not.
+DASHBOARD_TTL_SEC = 45.0
+_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+
+
+def _cached(key: int, at: float) -> dict[str, Any] | None:
+    hit = _CACHE.get(key)
+    if hit is None:
+        return None
+    made_at, payload = hit
+    age = at - made_at
+    if age > DASHBOARD_TTL_SEC:
+        return None
+    out = dict(payload)
+    out["age_sec"] = round(age, 1)
+    return out
+
+
 def build_queue_dashboard(
     conn: Any,
     *,
     now: datetime | None = None,
     grace_minutes: int = 45,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     """Compose queue + schedule plan + adherence report."""
+    made_at = monotonic()
+    if use_cache:
+        cached = _cached(int(grace_minutes), made_at)
+        if cached is not None:
+            return cached
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
@@ -713,7 +755,10 @@ def build_queue_dashboard(
     freshness = _freshness_map(conn)
     horizon_start = now_utc - SWIMLANE_PAST
     horizon_end = now_utc + SWIMLANE_FUTURE
-    activity = _kind_activity(conn, now_utc - DRAIN_LOOKBACK)
+    active_by_kind = {str(k.get("kind")): int(k.get("active") or 0) for k in queue.get("kinds", [])}
+    activity = _kind_activity(conn, now_utc - DRAIN_LOOKBACK, list(active_by_kind))
+    for kind, row in activity.items():
+        row["active"] = active_by_kind.get(kind, 0)
 
     eta_min: float | None = None
     if throughput["jobs_per_min_15m"] > 0 and queue["pending"] > 0:
@@ -808,9 +853,10 @@ def build_queue_dashboard(
     if maintenance_missed:
         husbandry_detail += f" · maintenance missed: {', '.join(maintenance_missed)}"
 
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "generated_at": iso_z(now_utc),
+        "age_sec": 0.0,
         "husbandry": {
             "verdict": husbandry_verdict,
             "detail": husbandry_detail,
@@ -850,6 +896,9 @@ def build_queue_dashboard(
             "slots": plan,
         },
     }
+    if use_cache:
+        _CACHE[int(grace_minutes)] = (made_at, payload)
+    return payload
 
 
 _HISTORY_STATUSES = ("done", "failed", "pending", "running")
