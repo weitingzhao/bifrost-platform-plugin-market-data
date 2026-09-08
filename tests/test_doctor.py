@@ -189,7 +189,10 @@ def test_workers_and_vendor_findings_are_informational() -> None:
         _Conn(_healthy_data()),
         now=NOW,
         watchlist=UNIVERSE,
-        worker_health={"stocks": {"jobs_done": 5, "jobs_failed": 0, "last_claim_at": "x", "uptime_sec": 9}, "options": None},
+        worker_health={
+            "stocks": {"jobs_done": 5, "jobs_failed": 0, "last_claim_at": "x", "uptime_sec": 9, "loop_lag_sec": 0.2},
+            "options": None,
+        },
         vendor={"reachable": True, "status_code": 401, "detail": "vendor answered HTTP 401"},
     )
     by_id = {f["id"]: f for f in rep["findings"]}
@@ -331,4 +334,20 @@ def test_a_normal_vendor_shortfall_is_not_an_alarm() -> None:
     rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
     snap = next(f for f in rep["findings"] if f["id"].startswith("option_snapshot:"))
     assert snap["severity"] == "ok"
+    assert rep["eod_critical"]["verdict"] == "healthy"
+
+
+def test_a_saturated_pool_reads_as_busy_not_dead() -> None:
+    """A backfill holds the worker loop; that is degraded, not a dead pod."""
+    rep = doc.run_doctor(
+        _Conn(_healthy_data()),
+        now=NOW,
+        watchlist=UNIVERSE,
+        worker_health={
+            "stocks": {"jobs_done": 900, "jobs_failed": 0, "last_claim_at": "x", "uptime_sec": 99, "loop_lag_sec": 240.0}
+        },
+    )
+    f = next(x for x in rep["findings"] if x["id"] == "worker:stocks")
+    assert f["severity"] == "warn"
+    assert "saturated, not down" in f["detail"]
     assert rep["eod_critical"]["verdict"] == "healthy"

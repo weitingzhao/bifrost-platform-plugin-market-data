@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_STRIKE_PCT = 0.30
 DEFAULT_DTE = 90
 MAX_CONTRACT_PAGES = 200
+INSERT_CHUNK = 500
 
 
 def _closes(conn: Any, underlying: str, start: date, end: date) -> tuple[list[date], list[float]]:
@@ -118,7 +119,11 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
             )
         )
 
-    ids = insert_jobs_bulk(conn, specs)
+    # SPY lists thousands of contracts a month; one statement for all of them
+    # times out against a queue table this busy, so insert in bounded chunks.
+    ids: list[int | None] = []
+    for start in range(0, len(specs), INSERT_CHUNK):
+        ids.extend(insert_jobs_bulk(conn, specs[start : start + INSERT_CHUNK]))
     enqueued = sum(1 for i in ids if i is not None)
     return {
         "underlying": storage,

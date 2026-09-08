@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 import json
 import logging
 from dataclasses import dataclass, field
@@ -22,6 +24,13 @@ class HealthState:
     jobs_done: int = 0
     jobs_failed: int = 0
     status: str = "ok"
+    # Monotonic stamp of the worker loop's last pass. The handlers do their
+    # database work synchronously, so a heavy batch blocks the loop; reporting
+    # the lag is honest where a bare "ok" would not be.
+    last_tick: float = field(default_factory=time.monotonic)
+
+    def tick(self) -> None:
+        self.last_tick = time.monotonic()
 
     def record_claim(self, when: datetime | None = None) -> None:
         self.last_claim_at = when or datetime.now(timezone.utc)
@@ -44,6 +53,7 @@ class HealthState:
             "jobs_done": self.jobs_done,
             "jobs_failed": self.jobs_failed,
             "uptime_sec": int(uptime),
+            "loop_lag_sec": round(max(0.0, time.monotonic() - self.last_tick), 1),
         }
 
 
@@ -93,6 +103,37 @@ async def _handle_client(
             await writer.wait_closed()
         except Exception:
             pass
+
+
+def start_health_server_thread(
+    state: HealthState,
+    *,
+    host: str = "0.0.0.0",
+    port: int = 8080,
+) -> threading.Thread:
+    """Serve /health from its own thread and event loop.
+
+    The worker loop blocks on synchronous upserts — a 12,000-row grouped-daily
+    batch holds it for seconds — and a health endpoint sharing that loop simply
+    stops answering, which reads as a dead pod. Health is an observability
+    surface: it must answer even while the worker is busy, and say how far
+    behind the loop is.
+    """
+
+    def _serve() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            server = loop.run_until_complete(start_health_server(state, host=host, port=port))
+            loop.run_until_complete(server.serve_forever())
+        except Exception:  # noqa: BLE001 — the worker must outlive its probe
+            logger.exception("health server thread stopped")
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_serve, name="health-server", daemon=True)
+    thread.start()
+    return thread
 
 
 async def start_health_server(

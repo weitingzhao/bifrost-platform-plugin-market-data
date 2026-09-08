@@ -23,7 +23,7 @@ from bifrost_market_data.worker.claim import (
     mark_failed,
     reclaim_stale_running,
 )
-from bifrost_market_data.worker.health import HealthState, start_health_server
+from bifrost_market_data.worker.health import HealthState, start_health_server_thread
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ async def run_loop(
         if polygon_client is not None:
             owned_client = None  # caller owns lifecycle
 
-    health_server = await start_health_server(health, port=health_port)
+    start_health_server_thread(health, port=health_port)
     sem = asyncio.Semaphore(max_concurrency)
     in_flight: set[asyncio.Task[None]] = set()
 
@@ -343,6 +343,7 @@ async def run_loop(
         while not stop.is_set():
             try:
                 now = time.monotonic()
+                health.tick()
                 if now - last_reclaim >= reclaim_every_sec:
                     await reclaim_once()
                     last_reclaim = now
@@ -381,8 +382,6 @@ async def run_loop(
         if in_flight:
             logger.info("draining %s in-flight jobs", len(in_flight))
             await asyncio.gather(*list(in_flight), return_exceptions=True)
-        health_server.close()
-        await health_server.wait_closed()
         if owned_client is not None:
             try:
                 await owned_client.aclose()

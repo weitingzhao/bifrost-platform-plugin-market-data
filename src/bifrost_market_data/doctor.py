@@ -74,6 +74,9 @@ STALENESS: dict[str, tuple[str, float]] = {
     "fundamentals-rotate": ("financials", 48.0),
 }
 
+# Above this the worker loop is wedged behind synchronous batch writes.
+WORKER_LOOP_LAG_WARN_SEC = 60.0
+
 DEFAULT_WORKER_HEALTH_URLS = {
     "stocks": "http://market-data-health-stocks:8080/health",
     "options": "http://market-data-health-options:8080/health",
@@ -490,9 +493,18 @@ def run_doctor(
             )
             continue
         last_claim = health.get("last_claim_at")
+        lag = health.get("loop_lag_sec")
+        # The handlers write synchronously, so a heavy batch holds the loop.
+        # Say so rather than calling a busy pool healthy or dead.
+        busy = isinstance(lag, (int, float)) and lag > WORKER_LOOP_LAG_WARN_SEC
         findings.append(
-            Finding(f"worker:{pool}", "workers", "ok", f"{pool} workers", "reachable", "reachable",
-                    f"done={health.get('jobs_done')} failed={health.get('jobs_failed')} last_claim={last_claim or '—'} uptime={health.get('uptime_sec')}s")
+            Finding(
+                f"worker:{pool}", "workers", "warn" if busy else "ok", f"{pool} workers",
+                f"loop lag < {WORKER_LOOP_LAG_WARN_SEC:g}s", "reachable" if not busy else f"lag {lag}s",
+                f"done={health.get('jobs_done')} failed={health.get('jobs_failed')} "
+                f"last_claim={last_claim or '—'} uptime={health.get('uptime_sec')}s lag={lag}s"
+                + (" — the pool is saturated, not down." if busy else ""),
+            )
         )
     if vendor is not None:
         reach = vendor.get("reachable")
@@ -548,7 +560,7 @@ def run_doctor(
 
 
 def probe_worker_health(
-    urls: Mapping[str, str] | None = None, *, timeout: float = 2.0
+    urls: Mapping[str, str] | None = None, *, timeout: float = 5.0
 ) -> dict[str, Mapping[str, Any] | None]:
     out: dict[str, Mapping[str, Any] | None] = {}
     for pool, url in (urls or DEFAULT_WORKER_HEALTH_URLS).items():
