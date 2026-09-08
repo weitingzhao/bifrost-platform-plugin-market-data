@@ -63,11 +63,6 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "kinds": ["ratios_market", "short_volume_market", "short_interest_market"],
         "freshness": "ratios",
     },
-    "oi-gap-heal": {
-        "kinds": ["oi_gap_heal"],
-        "freshness": "option_open_interest",
-        "maintenance": True,
-    },
     "max-pain": {
         "kinds": [],
         "freshness": None,
@@ -119,7 +114,6 @@ SLOT_NOTES: dict[str, str] = {
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
     "fundamentals-market": "Ratios + short data, whole market by date",
-    "oi-gap-heal": "OI extract from snapshots (worker jobs)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",

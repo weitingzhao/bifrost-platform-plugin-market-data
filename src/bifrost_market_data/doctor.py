@@ -31,7 +31,7 @@ from bifrost_market_data.scheduler.daily import (
 )
 from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
-from bifrost_market_data.trading_calendar import is_trading_day
+from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,22 @@ _NY = ZoneInfo("America/New_York")
 EOD_EXPECTED_BY_NY = time(19, 30)
 
 # Whole-market floors: below these the pull did not happen, whatever the count.
-STOCK_DAILY_MIN_ROWS = 4000
-STOCK_SNAPSHOT_MIN_ROWS = 4000
+# A normal session lands ~12.5k stock_daily and ~13k stock_snapshot rows.
+STOCK_DAILY_MIN_ROWS = 12000
+STOCK_SNAPSHOT_MIN_ROWS = 12000
+
+# A session's chain must cover this share of the underlying's live contracts.
+SNAPSHOT_COVERAGE_MIN = 0.95
+
+# The checks whose failure means the session's EOD data is not fit for dbt.
+# Everything else (rotates, reference refreshes, maintenance) can lag a day
+# without making the warehouse wrong, so it must not block the Research batch.
+EOD_CRITICAL_CHECKS = (
+    "option_snapshot",
+    "option_open_interest",
+    "stock_daily",
+    "stock_daily_watchlist",
+)
 RATIOS_MIN_ROWS = 2000
 SHORT_VOLUME_MIN_ROWS = 4000
 
@@ -106,6 +120,85 @@ def _count(conn: Any, sql: str, params: tuple[Any, ...]) -> int:
         except Exception:
             pass
         return -1
+
+
+def _counts(conn: Any, sql: str, params: tuple[Any, ...]) -> dict[str, int] | None:
+    """``SELECT key, count`` → mapping, or None when the query failed."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("doctor count query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    out: dict[str, int] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            values = list(row.values())
+            key, value = values[0], values[1]
+        else:
+            key, value = row[0], row[1]
+        if key:
+            out[str(key).strip().upper()] = int(value or 0)
+    return out
+
+
+def _coverage_finding(
+    check_id: str,
+    title: str,
+    live: Mapping[str, int],
+    got: Mapping[str, int],
+    *,
+    session: date,
+    fixable: bool,
+) -> Finding:
+    """One finding for how much of each underlying's live chain the session holds."""
+    session_s = session.isoformat()
+    short: list[tuple[str, int, int, float]] = []
+    for und, want in sorted(live.items()):
+        have = int(got.get(und, 0))
+        pct = have / want if want else 1.0
+        if pct < SNAPSHOT_COVERAGE_MIN:
+            short.append((und, have, want, pct))
+    total_want = sum(live.values())
+    total_have = sum(int(got.get(u, 0)) for u in live)
+    overall = total_have / total_want if total_want else 1.0
+    worst = sorted(short, key=lambda t: t[3])[:8]
+    if not short:
+        severity = "ok"
+    elif overall < 0.5 or len(short) > max(1, len(live) // 2):
+        severity = "crit"
+    else:
+        severity = "warn"
+    detail = (
+        f"{total_have}/{total_want} live contracts covered for {session_s} "
+        f"({overall:.0%}); {len(short)} of {len(live)} underlyings below "
+        f"{SNAPSHOT_COVERAGE_MIN:.0%}."
+    )
+    if worst:
+        detail += " Worst: " + ", ".join(f"{u} {p:.0%}" for u, _h, _w, p in worst) + "."
+    if short and not fixable:
+        detail += (
+            " The chain now reflects a later session, so this one can no longer"
+            " be observed — it is lost, not pending."
+        )
+    return Finding(
+        f"{check_id}:{session_s}",
+        "eod-pipeline",
+        severity,
+        title,
+        f">= {SNAPSHOT_COVERAGE_MIN:.0%} of {total_want}",
+        f"{overall:.0%} ({total_have})",
+        detail,
+        session=session_s,
+        fix=_slot_fix("eod-pipeline", session) if (short and fixable) else None,
+        auto_fixable=bool(short) and fixable,
+        missing_sample=[u for u, _h, _w, _p in worst],
+    )
 
 
 def _distinct(conn: Any, sql: str, params: tuple[Any, ...], key: str) -> list[str] | None:
@@ -188,56 +281,60 @@ def run_doctor(
     universe = sorted({storage_underlying(s) for s in union_iv_radar_benchmarks(symbols, cfg)})
     optionable = filter_optionable_underlyings(conn, universe)
 
-    # ── EOD option chain: snapshot + OI per underlying for the session ──
+    # ── EOD option chain: how much of each live chain the session actually holds ──
     if optionable:
         # Half-open UTC range for the NY session so (underlying, snapshot_ts) is used.
         day_start = datetime.combine(session, time(0), tzinfo=_NY).astimezone(timezone.utc)
-        snap = _distinct(
+        day_end = day_start + timedelta(days=1)
+        # Only a session the vendor chain still reflects can be re-observed.
+        try:
+            fixable = chain_session(conn) == session
+        except Exception:  # noqa: BLE001 — calendar probe must not sink the report
+            fixable = session_is_today
+        live = _counts(
             conn,
             """
-            SELECT DISTINCT underlying FROM raw_market.option_snapshot
-            WHERE underlying = ANY(%s) AND snapshot_ts >= %s AND snapshot_ts < %s
-            """,
-            (optionable, day_start, day_start + timedelta(days=1)),
-            "underlying",
-        )
-        oi = _distinct(
-            conn,
-            """
-            SELECT DISTINCT underlying FROM raw_market.option_open_interest
-            WHERE underlying = ANY(%s) AND trade_date = %s
+            SELECT underlying, count(*)::bigint FROM raw_market.option_contract
+            WHERE underlying = ANY(%s) AND expiry >= %s GROUP BY 1
             """,
             (optionable, session),
-            "underlying",
         )
-        for name, present, title in (
-            ("option_snapshot", snap, "Option chain snapshot"),
-            ("option_open_interest", oi, "Open interest"),
-        ):
-            if present is None:
-                findings.append(
-                    Finding(f"{name}:{session_s}", "eod-pipeline", "warn", title, len(optionable), None,
-                            "check query failed — see API log", session=session_s)
-                )
-                continue
-            missing = [u for u in optionable if u not in set(present)]
-            sev = "ok" if not missing else ("crit" if len(missing) > len(optionable) // 2 else "warn")
-            # A catch-up chain download lands under today's date; it fills OI for
-            # the session but cannot rewrite the session's snapshot rows.
-            note = (
-                "" if not missing else
-                (" A catch-up fetch fills OI for this session; the snapshot rows land under today's date."
-                 if name == "option_snapshot" else "")
-            )
+        snap = _counts(
+            conn,
+            """
+            SELECT underlying, count(DISTINCT option_ticker)::bigint
+            FROM raw_market.option_snapshot
+            WHERE underlying = ANY(%s) AND snapshot_ts >= %s AND snapshot_ts < %s
+            GROUP BY 1
+            """,
+            (optionable, day_start, day_end),
+        )
+        oi = _counts(
+            conn,
+            """
+            SELECT underlying, count(*)::bigint FROM raw_market.option_open_interest
+            WHERE underlying = ANY(%s) AND trade_date = %s GROUP BY 1
+            """,
+            (optionable, session),
+        )
+        if live is None or snap is None or oi is None:
             findings.append(
                 Finding(
-                    f"{name}:{session_s}", "eod-pipeline", sev, title,
-                    len(optionable), len(present),
-                    f"{len(present)}/{len(optionable)} underlyings have {title.lower()} rows for {session_s}.{note}",
-                    session=session_s,
-                    fix=_slot_fix("eod-pipeline", session) if missing else None,
-                    auto_fixable=bool(missing),
-                    missing_sample=missing[:20],
+                    f"option_chain:{session_s}", "eod-pipeline", "warn", "Option chain coverage",
+                    len(optionable), None, "coverage query failed — see API log", session=session_s
+                )
+            )
+        else:
+            findings.append(
+                _coverage_finding(
+                    "option_snapshot", "Option chain snapshot", live, snap,
+                    session=session, fixable=fixable,
+                )
+            )
+            findings.append(
+                _coverage_finding(
+                    "option_open_interest", "Open interest", live, oi,
+                    session=session, fixable=fixable,
                 )
             )
 
@@ -417,6 +514,11 @@ def run_doctor(
     crit = [f for f in findings if f.severity == "crit"]
     warn = [f for f in findings if f.severity == "warn"]
     verdict = "critical" if crit else ("degraded" if warn else "healthy")
+
+    eod = [f for f in findings if f.id.split(":", 1)[0] in EOD_CRITICAL_CHECKS]
+    eod_crit = [f for f in eod if f.severity == "crit"]
+    eod_warn = [f for f in eod if f.severity == "warn"]
+    eod_verdict = "critical" if eod_crit else ("degraded" if eod_warn else "healthy")
     return {
         "ok": True,
         "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -425,6 +527,15 @@ def run_doctor(
         "universe": {"watchlist": len(symbols), "underlyings": len(universe), "optionable": len(optionable)},
         "verdict": verdict,
         "summary": f"{len(crit)} critical · {len(warn)} warning · {sum(1 for f in findings if f.severity == 'ok')} ok",
+        "eod_critical": {
+            "verdict": eod_verdict,
+            "checks": list(EOD_CRITICAL_CHECKS),
+            "findings": [f.id for f in eod_crit + eod_warn],
+            "detail": (
+                "; ".join(f"{f.title}: {f.actual}" for f in eod_crit + eod_warn)
+                or f"{len(eod)} EOD checks complete for {session_s}"
+            ),
+        },
         "findings": [asdict(f) for f in findings],
         "prescriptions": prescriptions,
         "retired_slots": sorted(SLOT_REQUIREMENTS),

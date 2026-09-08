@@ -56,6 +56,13 @@ spec:
                   name: market-data-secrets
                   key: postgres-password
                   optional: true
+          # Endpoint removal is asynchronous: sleep first so the pod stops
+          # being routed and stops claiming new jobs, then SIGTERM lets the
+          # loop drain what it already holds inside the 180s grace period.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
           ports:
             - name: health
               containerPort: 8080

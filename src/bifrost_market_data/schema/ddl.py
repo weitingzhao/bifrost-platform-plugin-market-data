@@ -21,6 +21,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
 )
+from bifrost_market_data.schema.wave9_migrations import migrate_option_snapshot_observed_time
 
 
 class _Cursor(Protocol):
@@ -48,6 +49,20 @@ def apply_wave8_migrations(conn: _Connection) -> None:
     conn.commit()
 
 
+def apply_wave9_migrations(conn: _Connection) -> dict[str, Any]:
+    """Wave 9 only: re-key option_snapshot by observation time and rebuild its views.
+
+    Requires ownership of ``raw_market.option_snapshot`` (it swaps the table),
+    so this runs as the superuser path, not as the plugin's DB role.
+    """
+    with conn.cursor() as cur:
+        result = migrate_option_snapshot_observed_time(cur)
+        for stmt in OPTION_SNAPSHOT_VIEW_SQL:
+            cur.execute(stmt)
+    conn.commit()
+    return result
+
+
 def apply_ddl(conn: _Connection) -> None:
     """Create schemas, tables, indexes, views, and partition helper (idempotent)."""
     with conn.cursor() as cur:
@@ -59,6 +74,7 @@ def apply_ddl(conn: _Connection) -> None:
         migrate_stock_financials_split(cur)
         add_financials_filing_date(cur)
         retire_data_ops_compat_schema(cur)
+        migrate_option_snapshot_observed_time(cur)
         _create_views(cur)
         _ensure_partitions(cur)
     conn.commit()
@@ -300,7 +316,10 @@ def _create_market_tables(cur: _Cursor) -> None:
         CREATE TABLE IF NOT EXISTS raw_market.option_snapshot (
             option_ticker       text        NOT NULL,
             underlying          text        NOT NULL,
+            -- Observation time: 16:00 NY of the session for EOD chains, the
+            -- actual observation instant for intraday. NOT the last trade.
             snapshot_ts         timestamptz NOT NULL,
+            last_trade_ts       timestamptz,
             iv                  double precision,
             delta               double precision,
             gamma               double precision,
@@ -588,6 +607,67 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
 
 
+# View statements that depend on raw_market.option_snapshot. Kept as constants
+# so the Wave 9 migration, which must drop them to swap the table, rebuilds
+# exactly what apply_ddl would create — one definition, two callers.
+OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
+    "DROP VIEW IF EXISTS raw_market.v_option_snapshot_with_stock",
+    "DROP VIEW IF EXISTS raw_market.v_option_chain_latest",
+    """
+        CREATE OR REPLACE VIEW raw_market.v_option_chain_latest AS
+        SELECT DISTINCT ON (s.option_ticker)
+            s.option_ticker,
+            s.underlying,
+            s.snapshot_ts,
+            s.iv,
+            s.delta,
+            s.gamma,
+            s.theta,
+            s.vega,
+            s.open_interest,
+            s.day_open,
+            s.day_high,
+            s.day_low,
+            s.day_close,
+            s.day_previous_close,
+            s.day_change_percent,
+            s.day_volume,
+            s.day_vwap,
+            s.fetched_at
+        FROM raw_market.option_snapshot s
+        ORDER BY s.option_ticker, s.snapshot_ts DESC
+        """,
+    """
+        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS
+        SELECT
+            os.option_ticker,
+            os.underlying,
+            os.snapshot_ts,
+            os.iv,
+            os.delta,
+            os.gamma,
+            os.theta,
+            os.vega,
+            os.open_interest,
+            os.day_open,
+            os.day_high,
+            os.day_low,
+            os.day_close,
+            os.day_previous_close,
+            os.day_change_percent,
+            os.day_volume,
+            os.day_vwap,
+            os.fetched_at,
+            sd.close AS underlying_price,
+            sd.bar_date AS underlying_bar_date
+        FROM raw_market.option_snapshot os
+        LEFT JOIN raw_market.stock_daily sd
+            ON sd.symbol = os.underlying
+           AND sd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
+        """,
+)
+
+
 def _create_views(cur: _Cursor) -> None:
     # CREATE OR REPLACE cannot rename/reorder columns; drop first for idempotent apply.
     cur.execute("DROP VIEW IF EXISTS raw_market.v_option_snapshot_with_stock")
@@ -616,63 +696,9 @@ def _create_views(cur: _Cursor) -> None:
         """
     )
     # Convenience view: latest snapshot row per option_ticker (may be heavy; optional for consumers)
-    cur.execute(
-        """
-        CREATE OR REPLACE VIEW raw_market.v_option_chain_latest AS
-        SELECT DISTINCT ON (s.option_ticker)
-            s.option_ticker,
-            s.underlying,
-            s.snapshot_ts,
-            s.iv,
-            s.delta,
-            s.gamma,
-            s.theta,
-            s.vega,
-            s.open_interest,
-            s.day_open,
-            s.day_high,
-            s.day_low,
-            s.day_close,
-            s.day_previous_close,
-            s.day_change_percent,
-            s.day_volume,
-            s.day_vwap,
-            s.fetched_at
-        FROM raw_market.option_snapshot s
-        ORDER BY s.option_ticker, s.snapshot_ts DESC
-        """
-    )
+    cur.execute(OPTION_SNAPSHOT_VIEW_SQL[2])
     # Bridge for Trade consumers replacing public.option_snapshots_with_underlying_day
-    cur.execute(
-        """
-        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS
-        SELECT
-            os.option_ticker,
-            os.underlying,
-            os.snapshot_ts,
-            os.iv,
-            os.delta,
-            os.gamma,
-            os.theta,
-            os.vega,
-            os.open_interest,
-            os.day_open,
-            os.day_high,
-            os.day_low,
-            os.day_close,
-            os.day_previous_close,
-            os.day_change_percent,
-            os.day_volume,
-            os.day_vwap,
-            os.fetched_at,
-            sd.close AS underlying_price,
-            sd.bar_date AS underlying_bar_date
-        FROM raw_market.option_snapshot os
-        LEFT JOIN raw_market.stock_daily sd
-            ON sd.symbol = os.underlying
-           AND sd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
-        """
-    )
+    cur.execute(OPTION_SNAPSHOT_VIEW_SQL[3])
 
 
 def _create_partition_helper(cur: _Cursor) -> None:

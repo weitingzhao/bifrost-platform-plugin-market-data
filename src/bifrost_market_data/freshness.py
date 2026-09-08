@@ -13,7 +13,6 @@ _DIMENSION_ALIASES: dict[str, str] = {
     "ratios_market": "ratios",
     "short_volume_market": "short_volume",
     "short_interest_market": "short_interest",
-    "oi_gap_heal": "option_open_interest",
 }
 
 

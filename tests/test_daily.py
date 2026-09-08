@@ -217,8 +217,9 @@ class _DailyCursor:
             if q.lstrip().startswith("select"):
                 self.parent._fetchall = [(sym,) for sym in self.parent.watchlist_cache]
             self.parent._fetchone = None
-        elif "from ops_jobs.job_ingest" in q and "created_at >=" in q:
-            # session-once evidence probe
+        elif "from ops_jobs.job_ingest" in q and "payload ->>" in q:
+            # session-once evidence probe: keyed by the session, not a time window
+            self.parent.evidence_probes.append(params)
             self.parent._fetchone = (1,) if self.parent.session_evidence else None
             self.parent._fetchall = []
         elif "delete from" in q:
@@ -271,6 +272,7 @@ class _DailyConn:
         watchlist_cache: list[str] | None = None,
     ) -> None:
         self.session_evidence = session_evidence
+        self.evidence_probes: list[Any] = []
         self.spots = spots or {}
         self.voided = voided or []
         self.watchlist_cache = watchlist_cache or []
@@ -407,6 +409,8 @@ def test_eod_pipeline_session_once_dedup() -> None:
     )
     assert result["skipped"] is True
     assert result["reason"] == "evidence_exists"
+    # The probe asks about this session's date, not "anything in the last 12h".
+    assert conn.evidence_probes == [(["option_snapshot"], "trade_date", "2024-06-20")]
     forced = enqueue_slot(
         _DailyConn(["AAPL"], session_evidence=True),
         "eod-pipeline",
@@ -870,7 +874,7 @@ def test_all_slot_names_covered() -> None:
     assert "trim" in SLOT_NAMES
     assert "stock-snapshot" in SLOT_NAMES
     assert "stock-movers" in SLOT_NAMES
-    assert "oi-gap-heal" in SLOT_NAMES
+    assert "oi-gap-heal" not in SLOT_NAMES  # retired: OI comes from the chain snapshot
     assert "max-pain" not in SLOT_NAMES
     assert "atm-iv-pcr" not in SLOT_NAMES
     assert "iv-percentile" in MIGRATED_ANALYTICS_SLOTS
@@ -1057,58 +1061,6 @@ def test_reference_and_universe_skip_watchlist_lookup() -> None:
     uni = enqueue_slot(conn, "universe-daily", target_date=date(2024, 6, 20), scheduler_cfg={})
     assert uni["enqueued"] == 1
     assert uni["jobs"][0]["kind"] == "stock_daily_grouped"
-
-
-def test_enqueue_oi_gap_heal() -> None:
-    """The weekly extract is worker jobs in bounded chunks, not an inline API query."""
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 6, 18): True,
-            date(2024, 6, 19): True,
-            date(2024, 6, 20): True,
-        },
-    )
-    result = enqueue_slot(
-        conn,
-        "oi-gap-heal",
-        target_date=date(2024, 6, 20),
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3, "chunk_size": 3}}},
-    )
-    assert result["slot"] == "oi-gap-heal"
-    assert result["from_date"] == "2024-06-18"
-    assert result["to_date"] == "2024-06-20"
-    # AAPL ∪ SPY/QQQ/IWM = 4 underlyings in chunks of 3 → 2 jobs, no vendor kind.
-    assert result["enqueued"] == 2
-    assert all(j["kind"] == "oi_gap_heal" for j in result["jobs"])
-    assert result["jobs"][0]["payload"] == {"from": "2024-06-18", "to": "2024-06-20", "underlyings": ["AAPL", "IWM", "QQQ"]}
-    assert result["jobs"][1]["payload"]["underlyings"] == ["SPY"]
-    assert not any("option_snapshot" in st[0].lower() for st in conn.statements)
-
-
-def test_oi_gap_heal_runs_on_weekend() -> None:
-    """oi-gap-heal is not holiday-skipped (Saturday CronJob)."""
-    saturday = date(2024, 6, 22)
-    conn = _DailyConn(
-        watchlist=["AAPL"],
-        calendar={
-            date(2024, 6, 18): True,
-            date(2024, 6, 19): True,
-            date(2024, 6, 20): True,
-            saturday: False,
-        },
-        extract_rows=[],
-    )
-    result = enqueue_slot(
-        conn,
-        "oi-gap-heal",
-        target_date=saturday,
-        watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"oi-gap-heal": {"lookback_days": 3}}},
-    )
-    assert result.get("skipped") is not True
-    assert result["enqueued"] >= 1
 
 
 def test_migrated_analytics_slots_rejected() -> None:

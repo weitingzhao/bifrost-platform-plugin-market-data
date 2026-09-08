@@ -22,10 +22,12 @@ class _Cur:
         q = " ".join(query.lower().split())
         self.parent.statements.append((q, params))
         d = self.parent.data
-        if "from raw_market.option_snapshot" in q:
-            self._rows = [{"underlying": u} for u in d.get("snapshot", [])]
+        if "from raw_market.option_contract" in q:
+            self._rows = [(u, n) for u, n in d.get("live", {}).items()]
+        elif "from raw_market.option_snapshot" in q:
+            self._rows = [(u, n) for u, n in d.get("snapshot", {}).items()]
         elif "from raw_market.option_open_interest" in q:
-            self._rows = [{"underlying": u} for u in d.get("oi", [])]
+            self._rows = [(u, n) for u, n in d.get("oi", {}).items()]
         elif "from raw_market.stock_daily" in q and "distinct symbol" in q:
             self._rows = [{"symbol": s} for s in d.get("daily_watch", [])]
         elif "from raw_market.stock_daily" in q:
@@ -78,6 +80,7 @@ UNIVERSE = ["AAPL", "MSFT", "NVDA", "SPY"]
 @pytest.fixture(autouse=True)
 def _pin_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doc, "is_trading_day", lambda conn, d: d.weekday() < 5)
+    monkeypatch.setattr(doc, "chain_session", lambda conn, now=None: SESSION)
     monkeypatch.setattr(doc, "fetch_completed_trading_days", lambda conn, n, as_of=None: [SESSION])
     monkeypatch.setattr(doc, "union_iv_radar_benchmarks", lambda syms, cfg=None: list(syms))
     monkeypatch.setattr(doc, "filter_optionable_underlyings", lambda conn, syms: list(syms))
@@ -89,11 +92,12 @@ def _fresh(hours: float) -> datetime:
 
 def _healthy_data() -> dict[str, Any]:
     return {
-        "snapshot": UNIVERSE,
-        "oi": UNIVERSE,
-        "daily": 9000,
+        "live": {u: 1000 for u in UNIVERSE},
+        "snapshot": {u: 1000 for u in UNIVERSE},
+        "oi": {u: 1000 for u in UNIVERSE},
+        "daily": 12496,
         "daily_watch": UNIVERSE,
-        "snap_rows": 9000,
+        "snap_rows": 13157,
         "ratios": 5000,
         "short_volume": 15000,
         "freshness": [
@@ -115,21 +119,29 @@ def test_healthy_session_has_no_prescriptions() -> None:
     assert rep["prescriptions"] == []
     assert {f["severity"] for f in rep["findings"]} == {"ok"}
     assert "option-trades" in rep["retired_slots"]
+    # The Research gate reads this: EOD data fit for dbt, regardless of rotates.
+    assert rep["eod_critical"]["verdict"] == "healthy"
+    assert rep["eod_critical"]["findings"] == []
 
 
-def test_missing_chain_and_market_bars_prescribe_once_per_slot() -> None:
+def test_partial_chain_coverage_is_a_finding_not_a_pass() -> None:
+    """A session holding 40% of the live chain is broken, even though rows exist."""
     data = _healthy_data()
-    data["snapshot"] = ["AAPL"]  # 3 of 4 missing → crit
-    data["oi"] = ["AAPL", "MSFT", "NVDA"]  # 1 missing → warn
+    data["snapshot"] = {"AAPL": 1000, "MSFT": 400, "NVDA": 300, "SPY": 350}
+    data["oi"] = {"AAPL": 1000, "MSFT": 1000, "NVDA": 1000, "SPY": 700}
     data["daily"] = 12
     conn = _Conn(data)
     rep = doc.run_doctor(conn, now=NOW, watchlist=UNIVERSE)
     by_id = {f["id"]: f for f in rep["findings"]}
     snap = by_id[f"option_snapshot:{SESSION.isoformat()}"]
-    assert snap["severity"] == "crit"
-    assert snap["missing_sample"] == ["MSFT", "NVDA", "SPY"]
+    assert snap["severity"] == "crit"  # 3 of 4 underlyings below 95%
+    assert snap["actual"] == "51% (2050)"
+    assert snap["missing_sample"] == ["NVDA", "SPY", "MSFT"]
+    assert "Worst: NVDA 30%" in snap["detail"]
     assert snap["fix"] == {"action": "enqueue-slot", "slot": "eod-pipeline", "force": True, "date": "2026-09-04"}
-    assert by_id[f"option_open_interest:{SESSION.isoformat()}"]["severity"] == "warn"
+    assert by_id[f"option_open_interest:{SESSION.isoformat()}"]["severity"] == "warn"  # 1 of 4
+    assert rep["eod_critical"]["verdict"] == "critical"
+    assert "Option chain snapshot" in rep["eod_critical"]["detail"]
     assert by_id[f"stock_daily:{SESSION.isoformat()}"]["severity"] == "crit"
     assert rep["verdict"] == "critical"
     slots = [(p["action"], p["slot"]) for p in rep["prescriptions"]]
@@ -150,6 +162,8 @@ def test_stale_reference_slots_get_dateless_enqueue() -> None:
     assert stale["option-refresh"]["actual"] is None
     assert stale["calendar"]["fix"] == {"action": "enqueue-slot", "slot": "calendar", "force": True}
     assert rep["verdict"] == "degraded"
+    # Stale rotates must not block the Research batch — the session's EOD is fine.
+    assert rep["eod_critical"]["verdict"] == "healthy"
 
 
 def test_failed_jobs_prescribe_retry_unless_unentitled() -> None:
@@ -183,6 +197,8 @@ def test_workers_and_vendor_findings_are_informational() -> None:
     assert by_id["vendor"]["severity"] == "warn"
     assert rep["prescriptions"] == []  # nothing the plugin can execute itself
     assert rep["verdict"] == "critical"
+    # An unreachable worker pool is an ops problem, not a reason to fail dbt.
+    assert rep["eod_critical"]["verdict"] == "healthy"
 
 
 def test_session_is_today_after_eod_window_on_trading_day() -> None:
@@ -200,6 +216,8 @@ def test_today_session_missing_fundamentals_is_only_a_warning() -> None:
     data["ratios"] = 0
     data["short_volume"] = 0
     late = datetime(2026, 9, 5, 0, 0, tzinfo=timezone.utc)  # Fri 20:00 NY
+    monkeypatch_session = date(2026, 9, 4)
+    assert monkeypatch_session == SESSION
     rep = doc.run_doctor(_Conn(data), now=late, watchlist=UNIVERSE)
     f = next(x for x in rep["findings"] if x["id"].startswith("fundamentals_market:"))
     assert rep["session_is_today"] is True
@@ -286,3 +304,17 @@ def test_doctor_routes_are_registered() -> None:
     paths = {r.path for r in create_app().routes}
     assert "/market/doctor" in paths
     assert "/market/doctor/heal" in paths
+
+
+def test_lost_session_is_reported_as_lost_not_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the chain moved on, a gap is not something Fix can repair."""
+    monkeypatch.setattr(doc, "chain_session", lambda conn, now=None: date(2026, 9, 8))
+    data = _healthy_data()
+    data["snapshot"] = {"AAPL": 1000, "MSFT": 10, "NVDA": 10, "SPY": 10}
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    snap = next(f for f in rep["findings"] if f["id"].startswith("option_snapshot:"))
+    assert snap["severity"] == "crit"
+    assert snap["auto_fixable"] is False
+    assert snap["fix"] is None
+    assert "lost, not pending" in snap["detail"]
+    assert not [p for p in rep["prescriptions"] if p.get("slot") == "eod-pipeline"]

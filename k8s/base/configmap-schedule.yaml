@@ -88,9 +88,6 @@ data:
           cron: "30 4 * * 2-6"
           priority: 2
           short_interest_lookback_days: 45
-        oi-gap-heal:
-          cron: "0 4 * * 6"
-          lookback_days: 30
         # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
         # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
         # Wave 14G-A: readiness-refresh slot + CronJob retired (stock_readiness_daily gone).

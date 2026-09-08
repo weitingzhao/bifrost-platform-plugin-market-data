@@ -59,7 +59,6 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
         "option_contract",
         "option_expiration",
         "option_open_interest",
-        "oi_gap_heal",
     ),
 }
 

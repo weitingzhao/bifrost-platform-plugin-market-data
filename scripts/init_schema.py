@@ -73,11 +73,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Only apply create_roles.sql (no DDL)",
     )
     parser.add_argument(
+        "--wave9-sql",
+        action="store_true",
+        help="Print the Wave 9 option_snapshot migration as SQL (run it as the DB superuser)",
+    )
+    parser.add_argument(
         "--wave8-only",
         action="store_true",
         help="Only apply Wave 8 migrations (OI partition, financials split, drop data_ops shim)",
     )
     args = parser.parse_args(argv)
+
+    if args.wave9_sql:
+        from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_VIEW_SQL
+        from bifrost_market_data.schema.wave9_migrations import observed_time_statements
+
+        print("BEGIN;")
+        for stmt in (*observed_time_statements(), *OPTION_SNAPSHOT_VIEW_SQL):
+            print(f"{stmt.strip().rstrip(';')};")
+        print("COMMIT;")
+        return 0
 
     cfg = load_config(args.config)
     kw = postgres_connect_kwargs(cfg)

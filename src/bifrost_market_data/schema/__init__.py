@@ -6,6 +6,7 @@ from bifrost_market_data.schema.ddl import (
     MARKET_TABLES,
     MARKET_VIEWS,
     apply_ddl,
+    apply_wave9_migrations,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "MARKET_TABLES",
     "MARKET_VIEWS",
     "apply_ddl",
+    "apply_wave9_migrations",
 ]

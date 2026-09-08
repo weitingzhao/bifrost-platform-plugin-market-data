@@ -68,17 +68,36 @@ HandlerFn = Callable[[JobRow, Any, Any], Awaitable[Mapping[str, Any] | None]]
 Handler = Callable[[JobRow], Awaitable[Mapping[str, Any] | None]]
 
 
-def daily_snapshot_anchor(now: datetime | None = None) -> datetime:
-    """Stable NY-session daily timestamp (16:00 America/New_York) for idempotent snapshots.
+def parse_datetime(value: Any) -> datetime | None:
+    """ISO-8601 string or datetime → aware UTC datetime; anything else → None."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
-    Re-running the same job on the same NY calendar day yields the same ``snapshot_ts``.
+
+def session_anchor(session: date) -> datetime:
+    """16:00 America/New_York on ``session`` — the observation time an EOD chain gets.
+
+    Every row of one session's chain carries this exact value, so the session a
+    row belongs to is a property of the data, not of when the fetch happened.
+    A catch-up run on Saturday for Friday's session writes Friday's anchor and
+    upserts onto the same rows instead of creating a phantom Saturday session.
     """
+    return datetime(session.year, session.month, session.day, 16, 0, tzinfo=_NY)
+
+
+def daily_snapshot_anchor(now: datetime | None = None) -> datetime:
+    """``session_anchor`` for the NY calendar day of ``now`` (default: today)."""
     base = now if now is not None else datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
-    ny = base.astimezone(_NY)
-    d = ny.date()
-    return datetime(d.year, d.month, d.day, 16, 0, tzinfo=_NY)
+    return session_anchor(base.astimezone(_NY).date())
 
 
 def epoch_ms_to_datetime(t: int | float) -> datetime:

@@ -10,8 +10,9 @@ Plugin scheduler / quality / coverage derive trading days as:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 
 def _as_date(value: Any) -> date | None:
@@ -138,3 +139,26 @@ def expected_trading_days(
             out.append(d)
         d += timedelta(days=1)
     return out
+
+
+_NY = ZoneInfo("America/New_York")
+MARKET_OPEN_NY = time(9, 30)
+
+
+def chain_session(conn: Any, now: datetime | None = None) -> date:
+    """The session the vendor's live option chain currently reflects.
+
+    A snapshot download is the chain *as it stands*. Before the next open it
+    still shows the last session's close, which is what makes a Saturday
+    catch-up for Friday truthful; once Monday opens, the same download shows
+    Monday and can no longer be labelled Friday.
+    """
+    now_ny = (now or datetime.now(timezone.utc)).astimezone(_NY)
+    today = now_ny.date()
+    if now_ny.time() >= MARKET_OPEN_NY and is_trading_day(conn, today):
+        return today
+    days = fetch_recent_trading_days(conn, 2, as_of=today)
+    prior = [d for d in days if d < today]
+    if prior:
+        return prior[-1]
+    return days[-1] if days else today

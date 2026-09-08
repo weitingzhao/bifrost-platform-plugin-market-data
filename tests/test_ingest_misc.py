@@ -146,22 +146,3 @@ async def test_full_market_fundamentals_and_corporate_handlers() -> None:
     client.fetch_dividends_market.assert_awaited_once_with("2026-09-01", "2026-10-30")
     r = await handle_splits_market(make_job("splits_market", {"from": "2026-09-01", "to": "2026-10-30"}), client, FakeConn())
     assert r["rows_written"] == 1
-
-
-@pytest.mark.asyncio
-async def test_oi_gap_heal_job_extracts_per_underlying() -> None:
-    from bifrost_market_data.ingest.option_oi_extract import handle_oi_gap_heal
-
-    conn = FakeConn()
-    result = await handle_oi_gap_heal(
-        make_job("oi_gap_heal", {"from": "2026-08-25", "to": "2026-09-05", "underlyings": ["NVDA", "SPX"]}),
-        None,
-        conn,
-    )
-    assert result["underlyings"] == 2
-    assert result["from_date"] == "2026-08-25"
-    selects = [st for st in conn.statements if "distinct on" in st[0].lower()]
-    assert len(selects) == 2  # one bounded SELECT per underlying
-    assert selects[0][1][2] == ["NVDA"] and selects[1][1][2] == ["SPX"]
-    with pytest.raises(ValueError, match="underlyings"):
-        await handle_oi_gap_heal(make_job("oi_gap_heal", {"from": "2026-08-25", "to": "2026-09-05"}), None, conn)

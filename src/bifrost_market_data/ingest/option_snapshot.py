@@ -3,11 +3,18 @@
 One chain download serves all three tables: the snapshot rows, the contract
 catalogue, and the session's open interest. A separate ``option_open_interest``
 job used to re-download the whole chain for the OI field alone.
+
+``snapshot_ts`` is the time we observed the chain — 16:00 New York of the
+session for an EOD run, the actual instant for an intraday one. It used to be
+the contract's last trade time, which filed a quiet contract under the day it
+last traded, so a session's chain was never complete and a later fetch
+overwrote older rows in place. The last trade time now lives in
+``last_trade_ts``, where it describes the contract instead of keying the row.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import (
@@ -18,19 +25,23 @@ from bifrost_market_data.ingest._upsert import (
     epoch_ms_to_datetime,
     epoch_ns_to_datetime,
     parse_date,
+    parse_datetime,
     parse_option_right,
     parse_option_ticker,
+    session_anchor,
 )
 from bifrost_market_data.ingest.index_options import (
     snapshot_api_underlying,
     storage_underlying,
 )
+from bifrost_market_data.trading_calendar import chain_session
 from bifrost_market_data.worker.claim import JobRow
 
 _SNAPSHOT_COLS = (
     "option_ticker",
     "underlying",
     "snapshot_ts",
+    "last_trade_ts",
     "iv",
     "delta",
     "gamma",
@@ -68,7 +79,7 @@ _OI_COLS = (
 )
 
 
-def _snapshot_ts(item: Mapping[str, Any]) -> datetime:
+def _last_trade_ts(item: Mapping[str, Any]) -> datetime | None:
     last_trade = item.get("last_trade") if isinstance(item.get("last_trade"), dict) else {}
     day = item.get("day") if isinstance(item.get("day"), dict) else {}
     for key in ("sip_timestamp", "participant_timestamp", "timestamp"):
@@ -91,8 +102,8 @@ def _snapshot_ts(item: Mapping[str, Any]) -> datetime:
             return epoch_ms_to_datetime(v)
         except (TypeError, ValueError):
             pass
-    # Stable NY-session daily anchor so re-runs upsert the same PK row (idempotent).
-    return daily_snapshot_anchor()
+    # A contract that has never traded simply has no last trade time.
+    return None
 
 
 def _contract_parts(item: Mapping[str, Any], storage: str) -> dict[str, Any] | None:
@@ -148,6 +159,34 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     trade_date = parse_date(payload.get("trade_date"))
     if trade_date is None:
         trade_date = daily_snapshot_anchor().date()
+    # EOD runs key every row to the session anchor, so a catch-up upserts onto
+    # the session it is healing instead of inventing one dated today. Intraday
+    # runs (several observations per session) carry their own instant.
+    intraday = bool(payload.get("intraday"))
+    observed_at = parse_datetime(payload.get("observed_at"))
+    if observed_at is None:
+        observed_at = datetime.now(timezone.utc) if intraday else session_anchor(trade_date)
+
+    # The vendor snapshot is the chain as it stands right now. Labelling it with
+    # an older session is only truthful while no session has closed since — the
+    # Saturday catch-up for Friday, not a Tuesday backfill of Friday. Refuse the
+    # rest rather than write today's greeks under a past session's key.
+    if not intraday:
+        current = chain_session(conn)
+        if trade_date != current:
+            return {
+                "rows_written": 0,
+                "contracts_written": 0,
+                "oi_rows_written": 0,
+                "trade_date": trade_date.isoformat(),
+                "skipped": True,
+                "reason": "stale_session",
+                "detail": (
+                    f"the chain now reflects {current.isoformat()}; "
+                    f"{trade_date.isoformat()} can no longer be observed"
+                ),
+                "underlying": storage,
+            }
 
     data = await client.fetch_options_snapshot(
         api_underlying,
@@ -175,7 +214,8 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
             (
                 parts["option_ticker"],
                 parts["underlying"],
-                _snapshot_ts(item),
+                observed_at,
+                _last_trade_ts(item),
                 iv,
                 as_float(greeks.get("delta")),
                 as_float(greeks.get("gamma")),
@@ -267,6 +307,7 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
         "contracts_written": n_contracts,
         "oi_rows_written": n_oi,
         "trade_date": trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
+        "observed_at": observed_at.isoformat(),
         # The worker touches these freshness dimensions on top of the job's own.
         "freshness_extra": {"option_open_interest": n_oi},
         "underlying": storage,

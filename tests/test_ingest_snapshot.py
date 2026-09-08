@@ -7,15 +7,27 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from bifrost_market_data.ingest._upsert import daily_snapshot_anchor
-from bifrost_market_data.ingest.option_snapshot import _snapshot_ts, handle_option_snapshot
+from bifrost_market_data.ingest._upsert import daily_snapshot_anchor, session_anchor
+from bifrost_market_data.ingest import option_snapshot as mod
+from bifrost_market_data.ingest.option_snapshot import _last_trade_ts, handle_option_snapshot
 from ingest_testutil import FakeConn, make_job, mock_client
 
 _NY = ZoneInfo("America/New_York")
 
 
+@pytest.fixture
+def chain_on(monkeypatch: pytest.MonkeyPatch):
+    """Pin the session the vendor chain is pretending to reflect."""
+
+    def _set(session: date) -> None:
+        monkeypatch.setattr(mod, "chain_session", lambda conn, now=None: session)
+
+    return _set
+
+
 @pytest.mark.asyncio
-async def test_option_snapshot_upsert() -> None:
+async def test_option_snapshot_upsert(chain_on) -> None:
+    chain_on(date(2024, 6, 20))
     client = mock_client(
         fetch_options_snapshot={
             "results": [
@@ -74,14 +86,20 @@ async def test_option_snapshot_upsert() -> None:
     snap_stmt = next(s for s in conn.statements if "option_snapshot" in s[0])
     row = snap_stmt[1][0]
     assert row[0] == "O:AAPL250620C00150000"
-    assert row[3] == 0.25  # iv
-    assert row[4] == 0.5  # delta
-    assert row[8] == 1234  # oi
+    # Every row of the session's chain carries the session anchor, not the
+    # contract's own last trade time — that moved to last_trade_ts.
+    assert row[2] == session_anchor(date(2024, 6, 20))
+    assert result["observed_at"] == session_anchor(date(2024, 6, 20)).isoformat()
+    assert row[3] == datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)  # day.last_updated (ns)
+    assert row[4] == 0.25  # iv
+    assert row[5] == 0.5  # delta
+    assert row[9] == 1234  # oi
     assert conn.committed == 1  # single transaction for multi-table write
 
 
 @pytest.mark.asyncio
-async def test_option_snapshot_oi_defaults_to_session_anchor() -> None:
+async def test_option_snapshot_oi_defaults_to_session_anchor(chain_on) -> None:
+    chain_on(daily_snapshot_anchor().date())
     client = mock_client(
         fetch_options_snapshot={
             "results": [
@@ -117,16 +135,91 @@ async def test_option_snapshot_oi_defaults_to_session_anchor() -> None:
     assert conn.committed == 1
 
 
-def test_snapshot_fallback_ts_is_stable_ny_session() -> None:
-    """Missing trade/day timestamps use NY 16:00 daily anchor (not wall-clock now())."""
-    ts1 = _snapshot_ts({"details": {"ticker": "O:AAPL250620C00150000"}})
-    ts2 = _snapshot_ts({})
-    expected = daily_snapshot_anchor()
-    assert ts1 == expected
-    assert ts2 == expected
-    assert ts1.tzinfo is not None
-    assert ts1.astimezone(_NY).hour == 16
-    assert ts1.astimezone(_NY).minute == 0
+def test_last_trade_ts_is_none_when_the_contract_never_traded() -> None:
+    """A quiet contract has no last trade time — it must not key the row."""
+    assert _last_trade_ts({"details": {"ticker": "O:AAPL250620C00150000"}}) is None
+    assert _last_trade_ts({}) is None
+
+
+def test_last_trade_ts_prefers_the_sip_timestamp() -> None:
+    item = {
+        "last_trade": {"sip_timestamp": 1_704_153_600_000_000_000},
+        "day": {"last_updated": 1_704_240_000_000_000_000},
+    }
+    assert _last_trade_ts(item) == datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+    assert _last_trade_ts({"day": {"last_updated": 1_704_240_000_000_000_000}}) == datetime(
+        2024, 1, 3, 0, 0, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_catch_up_run_writes_the_session_it_heals(chain_on) -> None:
+    chain_on(date(2026, 9, 4))
+    """A run today for an older session keys rows to that session, not to today."""
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:AAPL250620C00150000",
+                        "expiration_date": "2025-06-20",
+                        "strike_price": 150,
+                        "contract_type": "call",
+                    },
+                    "last_trade": {"sip_timestamp": 1_704_153_600_000_000_000},
+                    "open_interest": 5,
+                    "day": {"close": 1.0},
+                }
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "AAPL", "trade_date": "2026-09-04"}),
+        client,
+        conn,
+    )
+    snap_row = next(s for s in conn.statements if "option_snapshot" in s[0])[1][0]
+    oi_row = next(s for s in conn.statements if "option_open_interest" in s[0])[1][0]
+    assert snap_row[2] == session_anchor(date(2026, 9, 4))
+    assert oi_row[5] == date(2026, 9, 4)
+    assert result["observed_at"] == session_anchor(date(2026, 9, 4)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_intraday_run_keys_rows_to_the_observation_instant() -> None:
+    """Several observations a session must not collapse onto one anchor."""
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:AAPL250620C00150000",
+                        "expiration_date": "2025-06-20",
+                        "strike_price": 150,
+                        "contract_type": "call",
+                    },
+                    "day": {"close": 1.0},
+                }
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    observed = "2026-09-04T14:30:00+00:00"
+    result = await handle_option_snapshot(
+        make_job(
+            "option_snapshot",
+            {"underlying": "AAPL", "trade_date": "2026-09-04", "intraday": True, "observed_at": observed},
+        ),
+        client,
+        conn,
+    )
+    snap_row = next(s for s in conn.statements if "option_snapshot" in s[0])[1][0]
+    assert snap_row[2] == datetime(2026, 9, 4, 14, 30, tzinfo=timezone.utc)
+    assert snap_row[2] != session_anchor(date(2026, 9, 4))
+    assert result["observed_at"] == observed
 
 
 def test_daily_snapshot_anchor_uses_ny_calendar_date() -> None:
@@ -135,3 +228,22 @@ def test_daily_snapshot_anchor_uses_ny_calendar_date() -> None:
     anchor = daily_snapshot_anchor(utc_early)
     assert anchor.astimezone(_NY).date().isoformat() == "2024-06-19"
     assert anchor.astimezone(_NY).hour == 16
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refuses_a_session_the_chain_no_longer_shows(chain_on) -> None:
+    """Once Monday opens, Friday's chain is gone — do not label Monday's as Friday."""
+    chain_on(date(2026, 9, 8))
+    client = mock_client(fetch_options_snapshot={"results": [], "pages": 1})
+    conn = FakeConn()
+    result = await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "AAPL", "trade_date": "2026-09-04"}),
+        client,
+        conn,
+    )
+    assert result["skipped"] is True
+    assert result["reason"] == "stale_session"
+    assert "2026-09-08" in result["detail"]
+    assert result["rows_written"] == 0
+    assert conn.statements == []
+    client.fetch_options_snapshot.assert_not_awaited()

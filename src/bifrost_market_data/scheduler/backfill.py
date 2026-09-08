@@ -24,7 +24,6 @@ _DATE_RANGE_KINDS = frozenset(
 # Kinds that enqueue one job per symbol (no date range).
 # option_open_interest: Polygon has no historical OI API — this path only fetches
 # the *current* options snapshot OI for listed underlyings. True history is
-# DB-to-DB extract via ingest.option_oi_extract / scripts/backfill_oi.py.
 _PER_SYMBOL_KINDS = frozenset(
     {"financials", "option_snapshot", "option_contract", "option_open_interest"}
 )

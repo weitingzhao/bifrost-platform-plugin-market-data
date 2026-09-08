@@ -202,13 +202,26 @@ Replaces `public.option_snapshots`.
 |--------|------|-------|
 | option_ticker | text | PK part |
 | underlying | text | |
-| snapshot_ts | timestamptz | PK part; monthly partitions |
+| snapshot_ts | timestamptz | PK part; monthly partitions. **Observation time**: 16:00 NY of the session for an EOD chain, the actual instant for an intraday one |
+| last_trade_ts | timestamptz | The contract's last trade, from the vendor payload. Describes the contract; never keys the row |
 | iv / delta / gamma / theta / vega | double precision | |
 | open_interest | integer | |
 | day_* | | session day stats from snapshot payload |
-| fetched_at | timestamptz | |
+| fetched_at | timestamptz | Wall-clock write time |
 
 **PK:** `(option_ticker, snapshot_ts)`
+
+Wave 9 (plugin 0.13.0) re-keyed this table. `snapshot_ts` used to hold the
+contract's *last trade* time, so a contract that had not traded for a week was
+filed under last week's partition: a session's chain was only 33–72% complete
+and a later fetch overwrote the older row's greeks and day bars in place (rows
+dated 2026-08-13 were last written 2026-09-05). Consumers keep the same query —
+`date(snapshot_ts AT TIME ZONE 'America/New_York')` — and it is now correct.
+
+A chain download is the chain *as it stands*, so a session can only be observed
+until the next open: `handle_option_snapshot` refuses a `trade_date` that is not
+the session the live chain reflects (`trading_calendar.chain_session`) rather
+than writing today's greeks under a past session's key.
 
 ### `market.option_expiration`
 
@@ -227,7 +240,7 @@ Replaces `public.option_open_interest_daily`.
 | Path | When | Behavior |
 |------|------|----------|
 | Live ingest (`kind=option_open_interest`) | Daily `eod-pipeline` CronJob + API backfill enqueue | Fetches current Polygon options snapshot OI → upsert (updates existing rows). Polygon has **no historical OI API**. |
-| Snapshot extract (`extract_oi_from_snapshots`) | `scripts/backfill_oi.py`, weekly `oi-gap-heal` slot (Sat 04:00 UTC) | DB-to-DB: for each `(option_ticker, NY calendar day)` take `MAX(snapshot_ts)` where `open_interest IS NOT NULL`. **`ON CONFLICT DO NOTHING`** — never overwrites live ingest rows; only fills gaps (D4=B, D5=A, D6=B). |
+| Snapshot extract (retired 0.13.0 — OI is written by the chain snapshot handler) | `scripts/backfill_oi.py`, weekly `oi-gap-heal` slot (Sat 04:00 UTC) | DB-to-DB: for each `(option_ticker, NY calendar day)` take `MAX(snapshot_ts)` where `open_interest IS NOT NULL`. **`ON CONFLICT DO NOTHING`** — never overwrites live ingest rows; only fills gaps (D4=B, D5=A, D6=B). |
 
 Coverage check: `quality.check_option_oi_coverage` requires ≥1 OI row per watchlist underlying × recent trading day.
 

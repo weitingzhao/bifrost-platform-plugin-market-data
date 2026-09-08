@@ -45,7 +45,6 @@ SLOT_NAMES = (
     "trim",
     "stock-snapshot",
     "stock-movers",
-    "oi-gap-heal",
     "fundamentals-market",
 )
 
@@ -57,11 +56,14 @@ MIGRATED_ANALYTICS_SLOTS = frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"}
 # slots ~4.5h after the 22:00 UTC primary; a second enqueue inside the window
 # is skipped unless forced, so the catch-up only lands when the primary left
 # no jobs behind.
-SESSION_ONCE_SLOTS: dict[str, tuple[str, ...]] = {
-    "stock-eod": ("stock_daily",),
-    "eod-pipeline": ("option_snapshot",),
+# (kinds, payload field naming the session). The dedup key is the session
+# itself, not a time window: a catch-up fires ~4.5h after the 22:00 UTC
+# primary, and a Monday morning run must not be skipped because Friday's run
+# was "recent". Only a non-failed job for the *same session* blocks a re-enqueue.
+SESSION_ONCE_SLOTS: dict[str, tuple[tuple[str, ...], str]] = {
+    "stock-eod": (("stock_daily",), "to"),
+    "eod-pipeline": (("option_snapshot",), "trade_date"),
 }
-SESSION_ONCE_WINDOW_HOURS = 12
 
 # Retired slots — the current Massive subscriptions do not cover the data.
 # Kept in SLOT_NAMES so Dagster / CLI callers get a skip instead of a 400
@@ -184,18 +186,21 @@ def today_ny() -> date:
     return datetime.now(timezone.utc).astimezone(_NY).date()
 
 
-def _session_evidence_exists(conn: Any, kinds: Sequence[str], *, hours: int) -> bool:
-    """True when jobs of ``kinds`` were created within the last ``hours``."""
+def _session_evidence_exists(
+    conn: Any, kinds: Sequence[str], *, session_field: str, session: str
+) -> bool:
+    """True when a non-failed job of ``kinds`` already covers ``session``."""
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 1 FROM ops_jobs.job_ingest
                 WHERE kind = ANY(%s)
-                  AND created_at >= now() - make_interval(hours => %s)
+                  AND payload ->> %s = %s
+                  AND status <> 'failed'
                 LIMIT 1
                 """,
-                (list(kinds), int(hours)),
+                (list(kinds), str(session_field), str(session)),
             )
             row = cur.fetchone() if hasattr(cur, "fetchone") else None
     except Exception as exc:  # noqa: BLE001 — evidence probe must not block enqueue
@@ -721,55 +726,6 @@ def enqueue_slot(
             "deduped": 0,
         }
 
-    if slot_key == "oi-gap-heal":
-        # DB-to-DB extract over recent trading days, run by the options workers
-        # a few underlyings at a time. It used to run inline in the API request
-        # and pull two weeks of snapshots into a 256Mi pod.
-        from bifrost_market_data.quality import fetch_recent_trading_days
-
-        lookback = int(scfg.get("lookback_days") or 14)
-        chunk = max(1, int(scfg.get("chunk_size") or 5))
-        base_symbols = (
-            list(watchlist_symbols)
-            if watchlist_symbols is not None
-            else load_watchlist_symbols(conn, cfg)
-        )
-        symbols = [storage_underlying(s) for s in union_iv_radar_benchmarks(base_symbols, cfg)]
-        trading_days = fetch_recent_trading_days(conn, lookback, as_of=day)
-        if not trading_days or not symbols:
-            return {
-                "slot": slot_key,
-                "lookback_days": lookback,
-                "symbols": len(symbols),
-                "skipped": True,
-                "reason": "no trading days" if not trading_days else "no symbols",
-                "enqueued": 0,
-                "deduped": 0,
-                "jobs": [],
-            }
-        from_s = trading_days[0].isoformat()
-        to_s = trading_days[-1].isoformat()
-        specs: list[tuple[str, dict[str, Any], int, int]] = []
-        jobs_out: list[dict[str, Any]] = []
-        for i in range(0, len(symbols), chunk):
-            payload = {"from": from_s, "to": to_s, "underlyings": symbols[i : i + chunk]}
-            specs.append(("oi_gap_heal", payload, priority, 3))
-            jobs_out.append({"kind": "oi_gap_heal", "payload": payload})
-        ids = insert_jobs_bulk(conn, specs)
-        for job_entry, job_id in zip(jobs_out, ids):
-            job_entry["id"] = job_id
-            job_entry["deduped"] = job_id is None
-        return {
-            "slot": slot_key,
-            "lookback_days": lookback,
-            "symbols": len(symbols),
-            "from_date": from_s,
-            "to_date": to_s,
-            "enqueued": sum(1 for j in jobs_out if not j["deduped"]),
-            "deduped": sum(1 for j in jobs_out if j["deduped"]),
-            "jobs": jobs_out,
-        }
-
     if slot_key in UNENTITLED_SLOTS:
         logger.info("slot=%s retired: %s", slot_key, UNENTITLED_SLOTS[slot_key])
         return {
@@ -803,12 +759,14 @@ def enqueue_slot(
         }
 
     if slot_key in SESSION_ONCE_SLOTS and not force:
-        kinds_seen = SESSION_ONCE_SLOTS[slot_key]
-        if _session_evidence_exists(conn, kinds_seen, hours=SESSION_ONCE_WINDOW_HOURS):
+        kinds_seen, session_field = SESSION_ONCE_SLOTS[slot_key]
+        if _session_evidence_exists(
+            conn, kinds_seen, session_field=session_field, session=day_s
+        ):
             logger.info(
-                "slot=%s already enqueued within %sh (kinds=%s), skipping",
+                "slot=%s already enqueued for session %s (kinds=%s), skipping",
                 slot_key,
-                SESSION_ONCE_WINDOW_HOURS,
+                day_s,
                 ",".join(kinds_seen),
             )
             return {
