@@ -402,6 +402,65 @@ def load_research_universe(conn: Any) -> list[dict[str, Any]]:
     return out
 
 
+def enumerated_underlyings(conn: Any) -> set[str] | None:
+    """Every underlying already tried: contracts on file, or a finished contract job this week.
+
+    Returns None when the lookup fails. The caller must treat None as "do not
+    ramp", never as "nothing is enumerated yet": on 2026-09-08 the previous
+    lookup timed out once the table had grown, its fallback returned [], and
+    every six-hourly run re-enumerated the same first 150 names from "A" while
+    the tail of the universe was never reached.
+
+    Two sources, unioned. Contracts on file is what the rest of the pipeline
+    cares about; finished jobs cover the names the vendor lists no options for,
+    which would otherwise be "new" forever. Both queries are index-shaped —
+    no UPPER(TRIM()) over the contract table.
+    """
+    have: set[str] = set()
+    for sql in (
+        # A loose index scan: one probe per distinct underlying on the
+        # (underlying, expiry) index, milliseconds regardless of row count.
+        # Plain DISTINCT is a sequential scan — 1.7s at 660k rows against the
+        # role's 2s statement_timeout, and growing with the backfill.
+        """
+        /* enumerated_underlyings: contracts */
+        WITH RECURSIVE u AS (
+            SELECT min(underlying) AS s FROM raw_market.option_contract
+            UNION ALL
+            SELECT (SELECT min(underlying) FROM raw_market.option_contract WHERE underlying > u.s)
+            FROM u WHERE u.s IS NOT NULL
+        )
+        SELECT s FROM u WHERE s IS NOT NULL
+        """,
+        """
+        /* enumerated_underlyings: finished jobs */
+        SELECT DISTINCT payload->>'underlying'
+        FROM ops_jobs.job_ingest
+        WHERE kind = 'option_contract' AND status = 'done'
+          AND created_at >= now() - interval '7 days'
+        """,
+    ):
+        try:
+            with conn.cursor() as cur:
+                # The role caps statements at 2s; this pair is index-shaped but
+                # the jobs table is large, so give the lookup room of its own.
+                cur.execute("SET LOCAL statement_timeout = '20s'")
+                cur.execute(sql)
+                rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        except Exception as exc:  # noqa: BLE001 — the caller fails closed
+            logger.warning("enumerated_underlyings lookup failed; not ramping this run: %s", exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return None
+        for row in rows or []:
+            sym = row.get("underlying") if isinstance(row, Mapping) else (row[0] if row else None)
+            if sym:
+                have.add(str(sym).strip().upper())
+    return have
+
+
 def _option_contract_underlyings(conn: Any, *, limit: int = 200) -> list[str]:
     """Fallback symbol set when Trade watchlist is not on Golden Source."""
     try:
@@ -1013,8 +1072,11 @@ def enqueue_slot(
         max_new = int(scfg.get("max_new_per_run") or 0)
         fresh: list[str] = []
         if symbols and max_new > 0 and tier_of:
-            have = set(_option_contract_underlyings(conn, limit=10000))
-            fresh = [s for s in symbols if s not in have and s not in bench_set][:max_new]
+            have = enumerated_underlyings(conn)
+            # None means the lookup failed. Ramping on an unknown state is how
+            # the same 150 names got re-enumerated all afternoon; skip instead.
+            if have is not None:
+                fresh = [s for s in symbols if s not in have and s not in bench_set][:max_new]
         fresh_set = set(fresh)
         if symbols:
             # Deterministic rotation so the whole list is covered over days.

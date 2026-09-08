@@ -161,6 +161,15 @@ class _DailyCursor:
             seen = sorted({und for _t, und, *_r in self.parent.option_contracts})
             self.parent._fetchall = [(u,) for u in seen]
             self.parent._fetchone = None
+        elif "enumerated_underlyings: contracts" in q:
+            if self.parent.raise_on_enumerated:
+                raise RuntimeError("canceling statement due to statement timeout")
+            seen = sorted({und for _t, und, *_r in self.parent.option_contracts})
+            self.parent._fetchall = [(u,) for u in seen]
+            self.parent._fetchone = None
+        elif "enumerated_underlyings: finished jobs" in q:
+            self.parent._fetchall = [(u,) for u in self.parent.done_contract_jobs]
+            self.parent._fetchone = None
         elif "from market.option_contract" in q or "from raw_market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
             as_of = params[1] if params and len(params) > 1 else None
@@ -279,6 +288,8 @@ class _DailyConn:
         voided: list[str] | None = None,
         watchlist_cache: list[str] | None = None,
         research_universe: list[tuple[str, str, int]] | None = None,
+        done_contract_jobs: list[str] | None = None,
+        raise_on_enumerated: bool = False,
     ) -> None:
         self.session_evidence = session_evidence
         self.evidence_probes: list[Any] = []
@@ -286,6 +297,8 @@ class _DailyConn:
         self.voided = voided or []
         self.watchlist_cache = watchlist_cache or []
         self.research_universe = research_universe or []
+        self.done_contract_jobs = done_contract_jobs or []
+        self.raise_on_enumerated = raise_on_enumerated
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
@@ -1304,3 +1317,34 @@ def test_option_refresh_ignores_the_universe_unless_configured() -> None:
     )
     unds = {j["payload"]["underlying"] for j in r["jobs"]}
     assert "HALO" not in unds and "TSLA" in unds
+
+
+def test_option_refresh_does_not_ramp_when_the_enumerated_lookup_fails() -> None:
+    # 2026-09-08: the lookup timed out, its fallback said "nothing enumerated",
+    # and every run re-listed the same first 150 names. Fail closed instead.
+    rows = [(f"N{i:03d}", "core", 24) for i in range(30)]
+    conn = _DailyConn(research_universe=rows, raise_on_enumerated=True)
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}}},
+    )
+    unds = [j["payload"]["underlying"] for j in r["jobs"]]
+    assert len(unds) == 3 + 1, "benchmarks and the rotation only — no ramp on an unknown state"
+
+
+def test_option_refresh_treats_a_finished_empty_enumeration_as_done() -> None:
+    # A name the vendor lists no options for has a done job and no contracts;
+    # it must not be "new" every six hours.
+    rows = [("NOOPT", "core", 24), ("N001", "core", 24)]
+    conn = _DailyConn(research_universe=rows, option_contracts=[], done_contract_jobs=["NOOPT"])
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 0}}},
+    )
+    unds = [j["payload"]["underlying"] for j in r["jobs"]]
+    assert "N001" in unds[3:4], "the never-tried name ramps"
+    assert unds.count("NOOPT") <= 1 and "NOOPT" not in unds[3:4], "the tried-and-empty name is not a newcomer"
