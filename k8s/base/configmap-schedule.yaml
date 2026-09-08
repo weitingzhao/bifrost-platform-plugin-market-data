@@ -97,7 +97,8 @@ data:
         option-backfill:
           # Manual / one-off: 24 expiry months per underlying, strike within +-30%
           # of spot, at most 90 days of life priced per contract.
-          cron: "0 5 * * 0"
+          # No cron: this is an Owner-run one-off, so the dashboard must not
+          # score it for adherence. Fire it with POST /market/ingest/enqueue-slot.
           priority: 1
           months: 24
           strike_pct: 0.30
