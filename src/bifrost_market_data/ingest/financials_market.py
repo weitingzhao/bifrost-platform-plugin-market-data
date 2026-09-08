@@ -15,6 +15,21 @@ from bifrost_market_data.ingest.financials_tables import upsert_financials_rows
 from bifrost_market_data.worker.claim import JobRow
 
 
+def _reject_truncation(kind: str, data: Mapping[str, Any]) -> None:
+    """A whole-market pull that stopped at the page cap is a failure, not a result.
+
+    short-interest's 45-day lookback returns several settlements at ~15,000
+    rows each; at a 30-page cap it stopped mid-alphabet at PARAW, and the job
+    still reported success. Two thirds of the market silently absent is worse
+    than a red job: the doctor can act on a failure.
+    """
+    if data.get("truncated"):
+        raise RuntimeError(
+            f"{kind}: whole-market pull hit the page cap after {data.get('pages')} pages "
+            "and covers only part of the market — raise max_pages"
+        )
+
+
 def _rows_from(results: list[Any], *, report_type: str, period_type: str, date_keys: tuple[str, ...]) -> list[tuple[Any, ...]]:
     rows: list[tuple[Any, ...]] = []
     for item in results:
@@ -40,6 +55,7 @@ async def handle_ratios_market(job: JobRow, client: Any, conn: Any) -> Mapping[s
     if not day:
         raise ValueError("ratios_market payload requires date")
     data = await client.fetch_ratios_market(day)
+    _reject_truncation("ratios_market", data)
     rows = _rows_from(list(data.get("results") or []), report_type="ratios", period_type="daily", date_keys=("date",))
     n = upsert_financials_rows(conn, rows)
     return {"rows_written": n, "date": day, "pages": data.get("pages"), "truncated": bool(data.get("truncated"))}
@@ -51,6 +67,7 @@ async def handle_short_volume_market(job: JobRow, client: Any, conn: Any) -> Map
     if not day:
         raise ValueError("short_volume_market payload requires date")
     data = await client.fetch_short_volume_market(day)
+    _reject_truncation("short_volume_market", data)
     rows = _rows_from(list(data.get("results") or []), report_type="short_volume", period_type="daily", date_keys=("date",))
     n = upsert_financials_rows(conn, rows)
     return {"rows_written": n, "date": day, "pages": data.get("pages"), "truncated": bool(data.get("truncated"))}
@@ -62,6 +79,7 @@ async def handle_short_interest_market(job: JobRow, client: Any, conn: Any) -> M
     if not since:
         raise ValueError("short_interest_market payload requires settlement_date_gte")
     data = await client.fetch_short_interest_market(since)
+    _reject_truncation("short_interest_market", data)
     rows = _rows_from(
         list(data.get("results") or []),
         report_type="short_interest",

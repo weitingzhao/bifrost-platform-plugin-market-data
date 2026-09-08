@@ -650,7 +650,7 @@ class PolygonClient:
         return await self._paginate(path, ep.short_volume_params(date=date, limit=1000), max_pages=max_pages)
 
     async def fetch_short_interest_market(
-        self, settlement_date_gte: str, *, max_pages: int = 30
+        self, settlement_date_gte: str, *, max_pages: int = 120
     ) -> dict[str, Any]:
         path = ep.short_interest_path()
         return await self._paginate(

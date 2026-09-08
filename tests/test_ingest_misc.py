@@ -146,3 +146,21 @@ async def test_full_market_fundamentals_and_corporate_handlers() -> None:
     client.fetch_dividends_market.assert_awaited_once_with("2026-09-01", "2026-10-30")
     r = await handle_splits_market(make_job("splits_market", {"from": "2026-09-01", "to": "2026-10-30"}), client, FakeConn())
     assert r["rows_written"] == 1
+
+
+@pytest.mark.asyncio
+async def test_whole_market_pull_fails_when_it_hits_the_page_cap() -> None:
+    """A partial market is a failure the doctor can act on, not a quiet success."""
+    from bifrost_market_data.ingest.financials_market import handle_short_interest_market
+
+    client = mock_client(
+        fetch_short_interest_market={
+            "results": [{"ticker": "AAPL", "settlement_date": "2026-08-14", "short_interest": 1}],
+            "pages": 30,
+            "truncated": True,
+        }
+    )
+    with pytest.raises(RuntimeError, match="page cap"):
+        await handle_short_interest_market(
+            make_job("short_interest_market", {"settlement_date_gte": "2026-07-01"}), client, FakeConn()
+        )
