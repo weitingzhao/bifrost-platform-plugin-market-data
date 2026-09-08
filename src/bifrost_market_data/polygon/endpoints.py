@@ -229,6 +229,22 @@ def grouped_daily_params(*, adjusted: bool = True) -> dict[str, Any]:
     return {"adjusted": "true" if adjusted else "false"}
 
 
+def treasury_yields_path() -> str:
+    """``/fed/v1/treasury-yields`` — daily constant-maturity yields."""
+    return "/fed/v1/treasury-yields"
+
+
+def treasury_yields_params(
+    *, date_gte: str | None = None, date_lte: str | None = None, limit: int = 1000
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": int(limit), "sort": "date.asc"}
+    if date_gte:
+        params["date.gte"] = date_gte
+    if date_lte:
+        params["date.lte"] = date_lte
+    return params
+
+
 def stock_snapshot_all_path() -> str:
     """``/v2/snapshot/locale/us/markets/stocks/tickers`` (full-market)."""
     return "/v2/snapshot/locale/us/markets/stocks/tickers"

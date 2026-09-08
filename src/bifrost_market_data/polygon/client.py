@@ -363,6 +363,20 @@ class PolygonClient:
         )
         return await self._paginate(path, params, max_pages=max_pages, start_cursor=cursor)
 
+    async def fetch_treasury_yields(
+        self,
+        *,
+        date_gte: str | None = None,
+        date_lte: str | None = None,
+        max_pages: int = 20,
+    ) -> dict[str, Any]:
+        """GET ``/fed/v1/treasury-yields`` with pagination."""
+        return await self._paginate(
+            ep.treasury_yields_path(),
+            ep.treasury_yields_params(date_gte=date_gte, date_lte=date_lte),
+            max_pages=max_pages,
+        )
+
     async def fetch_reference_tickers(
         self,
         *,

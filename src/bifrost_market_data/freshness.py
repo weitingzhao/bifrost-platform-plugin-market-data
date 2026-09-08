@@ -13,6 +13,8 @@ _DIMENSION_ALIASES: dict[str, str] = {
     "ratios_market": "ratios",
     "short_volume_market": "short_volume",
     "short_interest_market": "short_interest",
+    # The planner writes no rows itself; its jobs fill option_daily.
+    "option_backfill_plan": "option_daily",
 }
 
 

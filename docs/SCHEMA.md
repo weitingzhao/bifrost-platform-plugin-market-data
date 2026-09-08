@@ -223,6 +223,18 @@ until the next open: `handle_option_snapshot` refuses a `trade_date` that is not
 the session the live chain reflects (`trading_calendar.chain_session`) rather
 than writing today's greeks under a past session's key.
 
+### `market.treasury_yield`
+
+Constant-maturity Treasury yields from `/fed/v1/treasury-yields` (free on every
+Massive plan). One row per publication date; the risk-free leg Research option
+models need instead of a hard-coded rate.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| yield_date | date | PK |
+| yield_1_month / 3_month / 1_year / 2_year / 5_year / 10_year / 30_year | double precision | percent |
+| fetched_at | timestamptz | |
+
 ### `market.option_expiration`
 
 Replaces `public.option_expiration_cache`.

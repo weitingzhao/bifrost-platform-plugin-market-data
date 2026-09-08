@@ -346,6 +346,23 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
+    # --- treasury_yield (Massive /fed/v1/treasury-yields; free with any plan) ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_market.treasury_yield (
+            yield_date     date NOT NULL PRIMARY KEY,
+            yield_1_month  double precision,
+            yield_3_month  double precision,
+            yield_1_year   double precision,
+            yield_2_year   double precision,
+            yield_5_year   double precision,
+            yield_10_year  double precision,
+            yield_30_year  double precision,
+            fetched_at     timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+
     # --- option_expiration ---
     cur.execute(
         """
@@ -936,7 +953,7 @@ def _create_partition_helper(cur: _Cursor) -> None:
 def _ensure_partitions(cur: _Cursor) -> None:
     # Rolling window: keep recent history + at most ~12 months forward.
     # Schema names must match physical schemas (raw_market only; features.* = Research).
-    cur.execute("SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily', 1, 1)")
+    cur.execute("SELECT ops_jobs.ensure_year_partitions('raw_market', 'stock_daily', 5, 1)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'stock_minute', 12, 3)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_daily', 12, 3)")
     cur.execute("SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_minute', 12, 3)")
@@ -965,6 +982,7 @@ MARKET_TABLES: tuple[str, ...] = (
     *FINANCIALS_ENTITY_TABLES,
     "corporate_action",
     "us_market_holiday",
+    "treasury_yield",
     "ticker_related",
     "ticker_type",
 )

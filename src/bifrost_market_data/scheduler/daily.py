@@ -46,6 +46,9 @@ SLOT_NAMES = (
     "stock-snapshot",
     "stock-movers",
     "fundamentals-market",
+    "intraday-chain",
+    "treasury",
+    "option-backfill",
 )
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
@@ -184,6 +187,17 @@ def load_watchlist_from_platform(platform_url: str, *, timeout: float = 15.0) ->
 def today_ny() -> date:
     """The NY calendar date right now — the date a cron fire happens on."""
     return datetime.now(timezone.utc).astimezone(_NY).date()
+
+
+def _month_start(day: date, months_back: int) -> date:
+    """First day of the month ``months_back`` before ``day``'s month."""
+    total = day.year * 12 + (day.month - 1) - months_back
+    return date(total // 12, total % 12 + 1, 1)
+
+
+def _month_end(first: date) -> date:
+    """Last day of ``first``'s month."""
+    return _month_start(first, -1) - timedelta(days=1)
 
 
 def _session_evidence_exists(
@@ -667,6 +681,7 @@ def enqueue_slot(
             logger.warning("session-based snapshot retention unavailable: %s", exc)
         partitions_dropped = 0
         snapshot_partitions_dropped = 0
+        intraday_deleted = 0
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -690,6 +705,22 @@ def enqueue_slot(
             if hasattr(conn, "rollback"):
                 conn.rollback()
         try:
+            # Intraday rows are the current regime's shape, not history: they
+            # are ~3x the EOD volume, so they leave on their own shorter clock.
+            # EOD rows sit exactly at 16:00 NY, which is what tells them apart.
+            intraday_keep = int(scfg.get("option_snapshot_intraday_keep_days") or 30)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM raw_market.option_snapshot
+                    WHERE snapshot_ts < now() - make_interval(days => %s)
+                      AND (snapshot_ts AT TIME ZONE 'America/New_York')::time <> time '16:00'
+                    """,
+                    (intraday_keep,),
+                )
+                intraday_deleted = int(getattr(cur, "rowcount", 0) or 0)
+            if hasattr(conn, "commit"):
+                conn.commit()
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ops_jobs.drop_month_partitions_older_than"
@@ -721,6 +752,7 @@ def enqueue_slot(
             "option_snapshot_partitions_dropped": snapshot_partitions_dropped,
             "option_snapshot_keep_days": snapshot_keep,
             "option_snapshot_keep_sessions": snapshot_keep_sessions,
+            "option_snapshot_intraday_deleted": intraday_deleted,
             "enqueued": 0,
             "deduped": 0,
         }
@@ -832,6 +864,48 @@ def enqueue_slot(
         for sym in pipeline_syms:
             storage = storage_underlying(sym)
             _add("option_snapshot", {"underlying": storage, "trade_date": day_s})
+
+    elif slot_key == "intraday-chain":
+        # Several observations a session: the model keys each row to the instant
+        # it was taken, so these sit alongside the 16:00 EOD row instead of
+        # fighting it for the same primary key.
+        observed = datetime.now(timezone.utc)
+        for sym in union_iv_radar_benchmarks(symbols, cfg):
+            _add(
+                "option_snapshot",
+                {
+                    "underlying": storage_underlying(sym),
+                    "trade_date": day_s,
+                    "intraday": True,
+                    "observed_at": observed.isoformat(),
+                },
+            )
+
+    elif slot_key == "treasury":
+        _add("treasury_yields", {"lookback_days": int(scfg.get("lookback_days") or 30)})
+
+    elif slot_key == "option-backfill":
+        # One planner job per underlying per expiry month. Each enumerates that
+        # month's contracts and queues the aggregate jobs, so no single request
+        # has to walk 50,000 contracts.
+        months = int(scfg.get("months") or 24)
+        strike_pct = float(scfg.get("strike_pct") or 0.30)
+        dte = int(scfg.get("dte") or 90)
+        for sym in union_iv_radar_benchmarks(symbols, cfg):
+            storage = storage_underlying(sym)
+            for back in range(months):
+                first = _month_start(day, back)
+                last = _month_end(first)
+                _add(
+                    "option_backfill_plan",
+                    {
+                        "underlying": storage,
+                        "expiry_gte": first.isoformat(),
+                        "expiry_lte": last.isoformat(),
+                        "strike_pct": strike_pct,
+                        "dte": dte,
+                    },
+                )
 
     elif slot_key == "universe-daily":
         _add(

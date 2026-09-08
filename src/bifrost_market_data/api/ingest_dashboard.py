@@ -63,6 +63,19 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "kinds": ["ratios_market", "short_volume_market", "short_interest_market"],
         "freshness": "ratios",
     },
+    "intraday-chain": {
+        "kinds": ["option_snapshot"],
+        "freshness": "option_snapshot",
+    },
+    "treasury": {
+        "kinds": ["treasury_yields"],
+        "freshness": "treasury_yields",
+    },
+    "option-backfill": {
+        "kinds": ["option_backfill_plan"],
+        "freshness": "option_daily",
+        "maintenance": True,
+    },
     "max-pain": {
         "kinds": [],
         "freshness": None,
@@ -114,6 +127,9 @@ SLOT_NOTES: dict[str, str] = {
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
     "fundamentals-market": "Ratios + short data, whole market by date",
+    "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
+    "treasury": "Treasury constant-maturity yields",
+    "option-backfill": "Option history planner (one job per underlying-month)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",

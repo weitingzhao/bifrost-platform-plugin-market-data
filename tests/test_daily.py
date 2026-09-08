@@ -1160,3 +1160,52 @@ def test_trim_counts_snapshot_retention_in_sessions() -> None:
     assert result["option_snapshot_keep_days"] == 6
     drops = [st for st in conn.statements if "drop_month_partitions_older_than" in st[0]]
     assert any("option_snapshot" in st[0] and st[1] == (6,) for st in drops)
+
+
+def test_enqueue_intraday_chain_marks_rows_as_intraday() -> None:
+    """Intraday jobs carry their own instant so they sit beside the EOD row."""
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "intraday-chain",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"intraday-chain": {"priority": 3}}, "iv_radar_benchmarks": []},
+    )
+    assert result["enqueued"] >= 1
+    payloads = [j["payload"] for j in result["jobs"]]
+    assert all(p["intraday"] is True for p in payloads)
+    assert all(p["trade_date"] == "2024-06-20" for p in payloads)
+    assert all(p["observed_at"] for p in payloads)
+
+
+def test_enqueue_treasury() -> None:
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "treasury",
+        target_date=date(2024, 6, 20),
+        scheduler_cfg={"slots": {"treasury": {"lookback_days": 45}}},
+    )
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["kind"] == "treasury_yields"
+    assert result["jobs"][0]["payload"] == {"lookback_days": 45}
+
+
+def test_enqueue_option_backfill_plans_one_job_per_underlying_month() -> None:
+    """The planner is split by expiry month so no job walks 50,000 contracts."""
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "option-backfill",
+        target_date=date(2026, 9, 8),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {"option-backfill": {"months": 3, "strike_pct": 0.25, "dte": 60}},
+            "iv_radar_benchmarks": [],
+        },
+    )
+    assert result["enqueued"] == 3
+    windows = sorted((j["payload"]["expiry_gte"], j["payload"]["expiry_lte"]) for j in result["jobs"])
+    assert windows == [("2026-07-01", "2026-07-31"), ("2026-08-01", "2026-08-31"), ("2026-09-01", "2026-09-30")]
+    assert all(j["payload"]["strike_pct"] == 0.25 and j["payload"]["dte"] == 60 for j in result["jobs"])

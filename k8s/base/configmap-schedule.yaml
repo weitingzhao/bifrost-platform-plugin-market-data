@@ -78,12 +78,30 @@ data:
           option_trades_keep_days: 30
           # One observation per session, so retention is counted in sessions.
           option_snapshot_keep_sessions: 90
+          option_snapshot_intraday_keep_days: 30
         stock-snapshot:
           cron: "5 21 * * *"
           priority: 4
         stock-movers:
           cron: "10 21 * * *"
           priority: 4
+        intraday-chain:
+          # Dagster fires this three times a NY session (10:30 / 13:00 / 15:30 ET);
+          # the cron here is the first fire, for dashboard display only.
+          cron: "30 14 * * 1-5"
+          priority: 3
+        treasury:
+          cron: "0 12 * * 1-5"
+          priority: 2
+          lookback_days: 30
+        option-backfill:
+          # Manual / one-off: 24 expiry months per underlying, strike within +-30%
+          # of spot, at most 90 days of life priced per contract.
+          cron: "0 5 * * 0"
+          priority: 1
+          months: 24
+          strike_pct: 0.30
+          dte: 90
         fundamentals-market:
           # Ratios + short volume for the last completed session, short interest
           # for the latest settlement; whole market at 1,000 rows a page.

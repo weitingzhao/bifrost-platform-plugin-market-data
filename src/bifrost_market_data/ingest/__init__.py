@@ -29,6 +29,7 @@ from bifrost_market_data.ingest.option_daily import handle_option_daily
 from bifrost_market_data.ingest.option_expiration import handle_option_expiration
 from bifrost_market_data.ingest.option_minute import handle_option_minute
 from bifrost_market_data.ingest.option_oi import handle_option_open_interest
+from bifrost_market_data.ingest.option_backfill import handle_option_backfill_plan
 from bifrost_market_data.ingest.option_snapshot import handle_option_snapshot
 from bifrost_market_data.ingest.option_trades import handle_option_trades
 from bifrost_market_data.ingest.stock_daily import handle_stock_daily
@@ -37,6 +38,7 @@ from bifrost_market_data.ingest.stock_minute import handle_stock_minute
 from bifrost_market_data.ingest.stock_movers import handle_stock_movers
 from bifrost_market_data.ingest.stock_snapshot import handle_stock_snapshot
 from bifrost_market_data.ingest.ticker_related import handle_ticker_related
+from bifrost_market_data.ingest.treasury import handle_treasury_yields
 from bifrost_market_data.ingest.ticker_sync import handle_ticker_sync
 from bifrost_market_data.ingest.ticker_type import handle_ticker_type
 from bifrost_market_data.worker.claim import JobRow
@@ -53,6 +55,8 @@ _RAW_HANDLERS: dict[str, Any] = {
     "option_minute": handle_option_minute,
     "option_trades": handle_option_trades,
     "option_snapshot": handle_option_snapshot,
+    "option_backfill_plan": handle_option_backfill_plan,
+    "treasury_yields": handle_treasury_yields,
     "option_contract": handle_option_contract,
     "option_expiration": handle_option_expiration,
     "option_open_interest": handle_option_open_interest,
@@ -101,6 +105,8 @@ __all__ = [
     "handle_option_daily",
     "handle_option_minute",
     "handle_option_trades",
+    "handle_option_backfill_plan",
+    "handle_treasury_yields",
     "handle_option_snapshot",
     "handle_option_contract",
     "handle_option_expiration",
