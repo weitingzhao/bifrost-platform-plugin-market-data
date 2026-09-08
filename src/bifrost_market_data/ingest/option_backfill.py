@@ -17,7 +17,11 @@ from datetime import date, timedelta
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import as_float, parse_date
-from bifrost_market_data.ingest.index_options import contracts_api_underlying, storage_underlying
+from bifrost_market_data.ingest.index_options import (
+    contracts_api_underlying,
+    spot_proxy_for,
+    storage_underlying,
+)
 from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.worker.claim import JobRow
 
@@ -88,7 +92,19 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         max_pages=MAX_CONTRACT_PAGES,
     )
     results = list(data.get("results") or [])
-    dates, values = _closes(conn, storage, expiry_gte - timedelta(days=dte), expiry_lte)
+    window_start = expiry_gte - timedelta(days=dte)
+    dates, values = _closes(conn, storage, window_start, expiry_lte)
+    spot_source = storage
+    if not dates:
+        # An index level is not in stock_daily (that needs an Indices plan), so
+        # fall back to its tracking ETF. Without this SPX keeps every strike:
+        # 274,414 contracts across 24 months instead of the ±30% band.
+        proxy = spot_proxy_for(storage)
+        if proxy is not None:
+            symbol, multiplier = proxy
+            dates, raw = _closes(conn, symbol, window_start, expiry_lte)
+            values = [v * multiplier for v in raw]
+            spot_source = f"{symbol}x{multiplier:g}"
 
     today = date.today()
     specs: list[tuple[str, dict[str, Any], int, int]] = []
@@ -135,6 +151,7 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         "contracts_kept": len(specs),
         "out_of_strike_band": out_of_band,
         "no_spot_reference": no_spot,
+        "spot_source": spot_source,
         "enqueued": enqueued,
         "deduped": len(ids) - enqueued,
         "truncated": bool(data.get("truncated")),

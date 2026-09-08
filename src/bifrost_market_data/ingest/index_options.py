@@ -32,6 +32,15 @@ class IndexOptionSpec:
     spot_api: str
     """Polygon aggregates ticker for the index spot (e.g. I:SPX)."""
 
+    spot_proxy: tuple[str, float] | None = None
+    """(symbol, multiplier) standing in for the index level in ``stock_daily``.
+
+    ``spot_api`` needs an Indices plan we do not hold, so nothing writes the
+    index level to ``stock_daily``. The tracking ETF does: SPY is one tenth of
+    SPX to well under a percent, which is far inside the strike bands this is
+    used for. ``None`` means no strike filter is possible for that root.
+    """
+
     aliases: tuple[str, ...] = ()
     """Extra tickers that should normalize to ``storage`` (e.g. SPXW, I:SPX)."""
 
@@ -43,6 +52,7 @@ _INDEX_OPTION_SPECS: dict[str, IndexOptionSpec] = {
         snapshot_api="I:SPX",
         contracts_api="SPX",
         spot_api="I:SPX",
+        spot_proxy=("SPY", 10.0),
         aliases=("I:SPX", "SPXW"),
     ),
 }
@@ -71,6 +81,12 @@ def storage_underlying(underlying: str) -> str:
     if not key:
         return key
     return _ALIAS_TO_STORAGE.get(key, key)
+
+
+def spot_proxy_for(underlying: str) -> tuple[str, float] | None:
+    """Symbol and multiplier standing in for an index level in ``stock_daily``."""
+    spec = get_index_option_spec(underlying)
+    return spec.spot_proxy if spec is not None else None
 
 
 def snapshot_api_underlying(underlying: str) -> str:

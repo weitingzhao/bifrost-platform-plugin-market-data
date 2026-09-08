@@ -47,9 +47,10 @@ async def test_treasury_yields_upsert() -> None:
 class _CloseConn(FakeConn):
     """Serves the underlying's daily closes to the strike filter."""
 
-    def __init__(self, closes: list[tuple[date, float]]) -> None:
+    def __init__(self, closes: list[tuple[date, float]], *, only_symbol: str | None = None) -> None:
         super().__init__()
         self.closes = closes
+        self.only_symbol = only_symbol
 
     def cursor(self) -> Any:
         return _CloseCursor(self)
@@ -62,7 +63,11 @@ class _CloseCursor:
 
     def execute(self, query: str, params: Any = None) -> None:
         self.parent.statements.append((query, params))
-        self._rows = list(self.parent.closes) if "stock_daily" in query else []
+        wanted = self.parent.only_symbol
+        if "stock_daily" in query and (wanted is None or (params and params[0] == wanted)):
+            self._rows = list(self.parent.closes)
+        else:
+            self._rows = []
 
     def executemany(self, query: str, params_seq: Any) -> None:
         self.parent.statements.append((query, list(params_seq)))
@@ -162,3 +167,32 @@ async def test_backfill_plan_asks_the_contracts_endpoint_for_the_plain_index_tic
         _CloseConn([]),
     )
     assert client.fetch_options_contracts.await_args.kwargs["underlying_ticker"] == "SPX"
+
+
+@pytest.mark.asyncio
+async def test_index_strikes_are_filtered_against_the_tracking_etf() -> None:
+    """SPX has no row in stock_daily, so the band comes from SPY x 10."""
+    expiry = date.today() + timedelta(days=10)
+    window_start = expiry - timedelta(days=90)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [
+                _contract("O:SPXW_A", expiry.isoformat(), 6000.0),   # at the money
+                _contract("O:SPXW_B", expiry.isoformat(), 12000.0),  # far outside the band
+            ],
+            "pages": 1,
+        }
+    )
+    conn = _CloseConn([(window_start, 600.0)], only_symbol="SPY")
+    result = await handle_option_backfill_plan(
+        make_job(
+            "option_backfill_plan",
+            {"underlying": "SPX", "expiry_gte": expiry.isoformat(), "expiry_lte": expiry.isoformat()},
+        ),
+        client,
+        conn,
+    )
+    assert result["spot_source"] == "SPYx10"
+    assert result["contracts_kept"] == 1
+    assert result["out_of_strike_band"] == 1
+    assert result["no_spot_reference"] == 0
