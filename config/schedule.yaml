@@ -80,6 +80,8 @@ scheduler:
       keep_days: 7
       keep_max: 40000  # ~7 days at 5000 financials/day; adherence evidence must outlive the trim
       option_trades_keep_days: 30
+      # One observation per session, so retention is counted in sessions.
+      option_snapshot_keep_sessions: 90
     # Wave 14G-A: readiness-refresh retired (stock_readiness_daily dropped).
     stock-snapshot:
       cron: "5 21 * * *"

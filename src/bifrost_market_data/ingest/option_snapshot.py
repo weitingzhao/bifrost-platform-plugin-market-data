@@ -14,8 +14,10 @@ overwrote older rows in place. The last trade time now lives in
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import logging
+from datetime import date, datetime, time, timezone
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from bifrost_market_data.ingest._upsert import (
     as_float,
@@ -34,6 +36,7 @@ from bifrost_market_data.ingest.index_options import (
     snapshot_api_underlying,
     storage_underlying,
 )
+from bifrost_market_data.scheduler.enqueue import insert_job
 from bifrost_market_data.trading_calendar import chain_session
 from bifrost_market_data.worker.claim import JobRow
 
@@ -67,6 +70,26 @@ _CONTRACT_COLS = (
     "exercise_style",
     "shares_per_contract",
 )
+
+logger = logging.getLogger(__name__)
+
+_NY = ZoneInfo("America/New_York")
+_MARKET_CLOSE_NY = time(16, 0)
+
+# One continuation covers another 500 pages, far past any listed chain
+# (SPX, the largest, is 29 pages); the cap stops a bad cursor chaining forever.
+MAX_CHAIN_DEPTH = 20
+
+
+def _today_ny() -> date:
+    return datetime.now(timezone.utc).astimezone(_NY).date()
+
+
+def session_closed(now: datetime | None = None) -> bool:
+    """True once the NY session has closed (16:00 New York)."""
+    ny = (now or datetime.now(timezone.utc)).astimezone(_NY)
+    return ny.time() >= _MARKET_CLOSE_NY
+
 
 _OI_COLS = (
     "option_ticker",
@@ -172,6 +195,20 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     # Saturday catch-up for Friday, not a Tuesday backfill of Friday. Refuse the
     # rest rather than write today's greeks under a past session's key.
     if not intraday:
+        # An EOD row claims to be the session's close, so it must be observed
+        # after that close. Mid-session data stamped 16:00 would be the same
+        # class of lie the observation-time model exists to remove.
+        if trade_date == _today_ny() and not session_closed():
+            return {
+                "rows_written": 0,
+                "contracts_written": 0,
+                "oi_rows_written": 0,
+                "trade_date": trade_date.isoformat(),
+                "skipped": True,
+                "reason": "session_open",
+                "detail": f"{trade_date.isoformat()} has not closed yet; an EOD chain must be observed after 16:00 NY",
+                "underlying": storage,
+            }
         current = chain_session(conn)
         if trade_date != current:
             return {
@@ -192,6 +229,7 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
         api_underlying,
         expiration_date=expiration_date,
         contract_type=contract_type,
+        cursor=payload.get("cursor") or None,
     )
     results = list(data.get("results") or [])
     snap_rows: list[tuple[Any, ...]] = []
@@ -302,10 +340,36 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
     except Exception:
         conn.rollback()
         raise
+    # A chain that outran max_pages resumes from the vendor's cursor instead of
+    # starting over: the remainder is queued as its own job, bounded so a
+    # misbehaving cursor cannot chain forever.
+    continuation: int | None = None
+    next_cursor = data.get("next_cursor")
+    depth = int(payload.get("chain_depth") or 0)
+    if next_cursor and depth < MAX_CHAIN_DEPTH:
+        continuation = insert_job(
+            conn,
+            kind="option_snapshot",
+            payload={
+                **{k: v for k, v in payload.items() if k not in ("cursor", "chain_depth")},
+                "cursor": str(next_cursor),
+                "chain_depth": depth + 1,
+            },
+            priority=int(job.priority or 0),
+        )
+    elif next_cursor:
+        logger.warning(
+            "option_snapshot %s stopped at chain_depth=%s with a cursor left over",
+            storage,
+            depth,
+        )
+
     return {
         "rows_written": n,
         "contracts_written": n_contracts,
         "oi_rows_written": n_oi,
+        "chain_depth": depth,
+        "continuation_job_id": continuation,
         "trade_date": trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
         "observed_at": observed_at.isoformat(),
         # The worker touches these freshness dimensions on top of the job's own.

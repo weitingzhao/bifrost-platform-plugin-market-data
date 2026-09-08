@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+import json
+
 import pytest
 
 from bifrost_market_data.ingest._upsert import daily_snapshot_anchor, session_anchor
@@ -21,6 +23,7 @@ def chain_on(monkeypatch: pytest.MonkeyPatch):
 
     def _set(session: date) -> None:
         monkeypatch.setattr(mod, "chain_session", lambda conn, now=None: session)
+        monkeypatch.setattr(mod, "session_closed", lambda now=None: True)
 
     return _set
 
@@ -247,3 +250,75 @@ async def test_snapshot_refuses_a_session_the_chain_no_longer_shows(chain_on) ->
     assert result["rows_written"] == 0
     assert conn.statements == []
     client.fetch_options_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_eod_run_refuses_a_session_that_has_not_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mid-session data must not be stamped with the session's closing anchor."""
+    today = daily_snapshot_anchor().date()
+    monkeypatch.setattr(mod, "chain_session", lambda conn, now=None: today)
+    monkeypatch.setattr(mod, "session_closed", lambda now=None: False)
+    client = mock_client(fetch_options_snapshot={"results": [], "pages": 1})
+    conn = FakeConn()
+    result = await handle_option_snapshot(make_job("option_snapshot", {"underlying": "AAPL"}), client, conn)
+    assert result["skipped"] is True
+    assert result["reason"] == "session_open"
+    client.fetch_options_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_truncated_chain_queues_its_remainder_from_the_cursor(chain_on) -> None:
+    """A chain past max_pages resumes from the vendor cursor, not from page one."""
+    chain_on(date(2026, 9, 4))
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:AAPL250620C00150000",
+                        "expiration_date": "2025-06-20",
+                        "strike_price": 150,
+                        "contract_type": "call",
+                    },
+                    "day": {"close": 1.0},
+                }
+            ],
+            "pages": 500,
+            "truncated": True,
+            "next_cursor": "OPAQUE",
+        }
+    )
+    conn = FakeConn()
+    result = await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "AAPL", "trade_date": "2026-09-04"}),
+        client,
+        conn,
+    )
+    assert result["chain_depth"] == 0
+    inserts = [st for st in conn.statements if "job_ingest" in st[0]]
+    assert inserts, "the remainder must be queued"
+    queued = json.loads(inserts[0][1][1]) if isinstance(inserts[0][1][1], str) else inserts[0][1][1]
+    assert queued["cursor"] == "OPAQUE"
+    assert queued["chain_depth"] == 1
+    assert queued["trade_date"] == "2026-09-04"
+
+
+@pytest.mark.asyncio
+async def test_continuation_stops_at_the_depth_cap(chain_on) -> None:
+    chain_on(date(2026, 9, 4))
+    client = mock_client(
+        fetch_options_snapshot={"results": [], "pages": 500, "truncated": True, "next_cursor": "OPAQUE"}
+    )
+    conn = FakeConn()
+    result = await handle_option_snapshot(
+        make_job(
+            "option_snapshot",
+            {"underlying": "AAPL", "trade_date": "2026-09-04", "cursor": "PREV", "chain_depth": mod.MAX_CHAIN_DEPTH},
+        ),
+        client,
+        conn,
+    )
+    assert result["continuation_job_id"] is None
+    assert not [st for st in conn.statements if "job_ingest" in st[0]]
+    client.fetch_options_snapshot.assert_awaited_once()
+    assert client.fetch_options_snapshot.await_args.kwargs["cursor"] == "PREV"

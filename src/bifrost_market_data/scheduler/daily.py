@@ -651,7 +651,20 @@ def enqueue_slot(
         except Exception as exc:  # noqa: BLE001 — freshness must not fail trim
             logger.warning("job_trim freshness update failed: %s", exc)
         trades_keep = int(scfg.get("option_trades_keep_days") or 30)
+        # Retention is counted in trading sessions, not calendar days: the table
+        # now holds exactly one observation per session, so "keep 90 sessions"
+        # is the promise Research depends on. Holidays and a long weekend used
+        # to quietly shorten a 90-day window by several sessions.
+        snapshot_keep_sessions = int(scfg.get("option_snapshot_keep_sessions") or 90)
         snapshot_keep = int(scfg.get("option_snapshot_keep_days") or 90)
+        try:
+            from bifrost_market_data.trading_calendar import fetch_recent_trading_days
+
+            sessions = fetch_recent_trading_days(conn, snapshot_keep_sessions, as_of=day)
+            if len(sessions) >= snapshot_keep_sessions:
+                snapshot_keep = max(1, (day - sessions[0]).days)
+        except Exception as exc:  # noqa: BLE001 — calendar gap falls back to days
+            logger.warning("session-based snapshot retention unavailable: %s", exc)
         partitions_dropped = 0
         snapshot_partitions_dropped = 0
         try:
@@ -707,6 +720,7 @@ def enqueue_slot(
             "option_trades_keep_days": trades_keep,
             "option_snapshot_partitions_dropped": snapshot_partitions_dropped,
             "option_snapshot_keep_days": snapshot_keep,
+            "option_snapshot_keep_sessions": snapshot_keep_sessions,
             "enqueued": 0,
             "deduped": 0,
         }

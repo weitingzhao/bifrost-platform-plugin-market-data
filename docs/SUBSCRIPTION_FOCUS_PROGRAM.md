@@ -120,6 +120,8 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 
 **退役**：`oi-gap-heal` slot / `oi_gap_heal` handler / `option_oi_extract.py` / `scripts/backfill_oi.py` / CronJob / Dagster 资产与调度全部删除——OI 现在随链快照按 session 写入，没有 gap 可补。**`vendor_gap_fix` 保留**：P3 原文列了它，但它是 `stock_daily_grouped` 的别名、与 OI 模型无关，且 `bifrost-trade-api` 的数据就绪页在调用，删它只会弄坏 Trade 的页面。
 
+**P3 收尾（0.14.0）**：三项补齐。① 分页可续跑——`_paginate` 支持从 vendor cursor 起跑，超过 `max_pages` 时把剩余部分作为带 cursor 的续跑 job 入队（深度上限 20）；payload 只存 cursor token，不存 vendor URL。② 保留期按交易会话计（`option_snapshot_keep_sessions: 90`），假期与长周末不再悄悄缩短窗口。③ 新增收盘护栏：EOD job 若目标是今天且尚未收盘（16:00 NY），返回 `skipped: session_open`——盘中数据不得盖上收盘锚点，那和 P3 修掉的是同一类谎。
+
 **存储影响**：修好后每会话存全部约 115,618 个活跃合约（原来只有约 40% 落对位置），约 35MB/会话、90 天保留约 2.1GB。vendor 调用量不变——这些合约本来每次就全量下载了，只是存错了地方。
 
 ---

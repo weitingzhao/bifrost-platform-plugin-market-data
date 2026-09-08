@@ -1144,3 +1144,19 @@ def test_watchlist_falls_back_to_cache_not_to_empty(monkeypatch: pytest.MonkeyPa
     # Unreachable and no cache: the old DB fallback still applies.
     conn = _DailyConn(watchlist=["AAPL"])
     assert mod.load_watchlist_symbols(conn, cfg) == ["AAPL"]
+
+
+def test_trim_counts_snapshot_retention_in_sessions() -> None:
+    """90 sessions is a longer window than 90 days; holidays must not shorten it."""
+    conn = _DailyConn(["AAPL"])
+    result = enqueue_slot(
+        conn,
+        "trim",
+        target_date=date(2024, 6, 20),
+        scheduler_cfg={"slots": {"trim": {"option_snapshot_keep_sessions": 5}}},
+    )
+    assert result["option_snapshot_keep_sessions"] == 5
+    # 5 sessions back from Thursday 2024-06-20 is Friday 2024-06-14 → 6 days.
+    assert result["option_snapshot_keep_days"] == 6
+    drops = [st for st in conn.statements if "drop_month_partitions_older_than" in st[0]]
+    assert any("option_snapshot" in st[0] and st[1] == (6,) for st in drops)

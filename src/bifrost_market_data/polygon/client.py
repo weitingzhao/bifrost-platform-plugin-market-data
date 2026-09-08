@@ -221,6 +221,21 @@ class PolygonClient:
             url=redact_url(absolute_url or path),
         ) from last_error
 
+    @staticmethod
+    def _cursor_of(next_url: str | None) -> str | None:
+        """The vendor's opaque cursor token, without its URL.
+
+        Only the token is ever persisted: a job payload must not carry a
+        vendor host or anything credential-shaped, and the cursor alone is
+        enough to resume against our own base URL.
+        """
+        if not next_url:
+            return None
+        for key, value in parse_qsl(urlparse(str(next_url)).query, keep_blank_values=True):
+            if key == "cursor" and value:
+                return value
+        return None
+
     async def _paginate(
         self,
         path: str,
@@ -228,12 +243,20 @@ class PolygonClient:
         *,
         max_pages: int = 20,
         results_key: str = "results",
+        start_cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Follow ``next_url`` and merge ``results`` lists. Returns a single aggregate payload."""
+        """Follow ``next_url`` and merge ``results`` lists. Returns a single aggregate payload.
+
+        ``start_cursor`` resumes a run that stopped at ``max_pages``; the
+        payload hands back ``next_cursor`` so the caller can queue the rest.
+        """
         if max_pages < 1:
             raise ValueError("max_pages must be >= 1")
 
-        first = await self._request(path, params)
+        first_params = dict(params or {})
+        if start_cursor:
+            first_params["cursor"] = start_cursor
+        first = await self._request(path, first_params or None)
         if not isinstance(first, dict):
             # marketstatus/upcoming returns a bare list
             if isinstance(first, list):
@@ -264,6 +287,7 @@ class PolygonClient:
 
         out = dict(first)
         out[results_key] = all_results
+        out["next_cursor"] = self._cursor_of(next_url) if truncated else None
         out["next_url"] = None
         out["pages"] = pages
         out["truncated"] = truncated
@@ -329,6 +353,7 @@ class PolygonClient:
         expiration_date: str | None = None,
         contract_type: str | None = None,
         max_pages: int = 500,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """GET ``/v3/snapshot/options/{underlying}`` with pagination."""
         path = ep.options_snapshot_path(underlying)
@@ -336,7 +361,7 @@ class PolygonClient:
             expiration_date=expiration_date,
             contract_type=contract_type,
         )
-        return await self._paginate(path, params, max_pages=max_pages)
+        return await self._paginate(path, params, max_pages=max_pages, start_cursor=cursor)
 
     async def fetch_reference_tickers(
         self,

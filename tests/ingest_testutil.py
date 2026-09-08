@@ -18,6 +18,10 @@ class FakeCursor:
     def executemany(self, query: str, params_seq: Any) -> None:
         self.parent.statements.append((query, list(params_seq)))
 
+    def fetchone(self) -> Any:
+        """INSERT ... RETURNING id — the continuation job's id."""
+        return (self.parent.next_job_id,)
+
     def __enter__(self) -> FakeCursor:
         return self
 
@@ -28,6 +32,7 @@ class FakeCursor:
 class FakeConn:
     def __init__(self) -> None:
         self.statements: list[tuple[str, Any]] = []
+        self.next_job_id = 4242
         self.committed = 0
         self.rolled_back = 0
         self.closed = False

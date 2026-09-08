@@ -65,7 +65,11 @@ async def test_stock_daily_rerun_same_conflict_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_option_snapshot_rerun_same_snapshot_ts() -> None:
+async def test_option_snapshot_rerun_same_snapshot_ts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bifrost_market_data.ingest import option_snapshot as mod
+
+    monkeypatch.setattr(mod, "session_closed", lambda now=None: True)
+    monkeypatch.setattr(mod, "chain_session", lambda conn, now=None: mod._today_ny())
     client = mock_client(fetch_options_snapshot=_snapshot_payload_no_ts())
     job = make_job("option_snapshot", {"underlying": "AAPL"})
     conn1, conn2 = FakeConn(), FakeConn()
