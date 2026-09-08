@@ -32,6 +32,12 @@ DEFAULT_DTE = 90
 MAX_CONTRACT_PAGES = 200
 INSERT_CHUNK = 500
 
+# History must never outrank the day's own data. The planner is sometimes
+# raised above the queue to get its enumeration done, and it used to pass that
+# priority down: 486,000 backfill jobs sat above the EOD chain, which would
+# have starved the evening's snapshot behind a night of history.
+BACKFILL_MAX_PRIORITY = 2
+
 
 def _closes(conn: Any, underlying: str, start: date, end: date) -> tuple[list[date], list[float]]:
     """The underlying's daily closes over the window, for the strike filter."""
@@ -79,7 +85,7 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         raise ValueError("option_backfill_plan payload requires expiry_gte and expiry_lte")
     strike_pct = float(payload.get("strike_pct") or DEFAULT_STRIKE_PCT)
     dte = int(payload.get("dte") or DEFAULT_DTE)
-    priority = int(job.priority or 0)
+    priority = min(int(job.priority or 0), BACKFILL_MAX_PRIORITY)
 
     storage = storage_underlying(underlying)
     data = await client.fetch_options_contracts(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from datetime import date, timedelta
 from typing import Any
 
@@ -196,3 +198,28 @@ async def test_index_strikes_are_filtered_against_the_tracking_etf() -> None:
     assert result["contracts_kept"] == 1
     assert result["out_of_strike_band"] == 1
     assert result["no_spot_reference"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_jobs_never_outrank_the_daily_chain() -> None:
+    """Raising the planner must not lift its history jobs above the EOD slots."""
+    expiry = date.today() + timedelta(days=10)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [_contract("O:AAPL_A", expiry.isoformat(), 100.0)],
+            "pages": 1,
+        }
+    )
+    conn = _CloseConn([(expiry - timedelta(days=90), 100.0)])
+    job = dataclasses.replace(
+        make_job(
+            "option_backfill_plan",
+            {"underlying": "AAPL", "expiry_gte": expiry.isoformat(), "expiry_lte": expiry.isoformat()},
+        ),
+        priority=7,
+    )
+    await handle_option_backfill_plan(job, client, conn)
+    # insert_jobs_bulk passes column arrays; the priority array is the clamp.
+    columns = next(st for st in conn.statements if "job_ingest" in st[0])[1]
+    priorities = next(c for c in columns if c and all(isinstance(v, int) for v in c) and set(c) <= {0, 1, 2, 7})
+    assert priorities == [2], "the planner's own priority must not reach its jobs"
