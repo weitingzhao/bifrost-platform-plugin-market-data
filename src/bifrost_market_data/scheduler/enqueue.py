@@ -66,6 +66,11 @@ def insert_job(
     return int(row[0])
 
 
+#: Rows per INSERT statement. Sized so a statement stays well inside a few
+#: hundred milliseconds on the job table at its current size.
+INSERT_CHUNK_ROWS = 2000
+
+
 def insert_jobs_bulk(
     conn: _Connection,
     specs: Sequence[tuple[str, Mapping[str, Any] | None, int, int]],
@@ -102,23 +107,33 @@ def insert_jobs_bulk(
         hashes.append(ph)
         priorities.append(int(priority))
         max_attempts.append(int(attempts))
+    # One transaction, one commit — but not one statement. The whole option
+    # universe backfill is 575 underlyings × 24 months of planner rows, and a
+    # single 14,000-row INSERT with ON CONFLICT over an 860,000-row table ran
+    # past the role's 2s statement_timeout and was cancelled with nothing
+    # written (2026-09-08). Chunks keep each statement short; SET LOCAL gives
+    # the transaction room the role's default does not.
+    rows: list[Any] = []
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO ops_jobs.job_ingest
-                    (kind, payload, payload_hash, priority, status, max_attempts)
-                SELECT r.kind, r.payload::jsonb, r.payload_hash, r.priority, 'pending', r.max_attempts
-                FROM unnest(%s::text[], %s::text[], %s::text[], %s::smallint[], %s::smallint[])
-                     AS r(kind, payload, payload_hash, priority, max_attempts)
-                ON CONFLICT (kind, payload_hash)
-                    WHERE status IN ('pending', 'running') AND payload_hash IS NOT NULL
-                DO NOTHING
-                RETURNING id, kind, payload_hash
-                """,
-                (kinds, payloads, hashes, priorities, max_attempts),
-            )
-            rows = cur.fetchall() or []
+            cur.execute("SET LOCAL statement_timeout = '60s'")
+            for start in range(0, len(kinds), INSERT_CHUNK_ROWS):
+                end = start + INSERT_CHUNK_ROWS
+                cur.execute(
+                    """
+                    INSERT INTO ops_jobs.job_ingest
+                        (kind, payload, payload_hash, priority, status, max_attempts)
+                    SELECT r.kind, r.payload::jsonb, r.payload_hash, r.priority, 'pending', r.max_attempts
+                    FROM unnest(%s::text[], %s::text[], %s::text[], %s::smallint[], %s::smallint[])
+                         AS r(kind, payload, payload_hash, priority, max_attempts)
+                    ON CONFLICT (kind, payload_hash)
+                        WHERE status IN ('pending', 'running') AND payload_hash IS NOT NULL
+                    DO NOTHING
+                    RETURNING id, kind, payload_hash
+                    """,
+                    (kinds[start:end], payloads[start:end], hashes[start:end], priorities[start:end], max_attempts[start:end]),
+                )
+                rows.extend(cur.fetchall() or [])
         conn.commit()
     except Exception:
         conn.rollback()

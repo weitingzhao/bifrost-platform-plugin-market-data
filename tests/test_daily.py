@@ -1348,3 +1348,26 @@ def test_option_refresh_treats_a_finished_empty_enumeration_as_done() -> None:
     unds = [j["payload"]["underlying"] for j in r["jobs"]]
     assert "N001" in unds[3:4], "the never-tried name ramps"
     assert unds.count("NOOPT") <= 1 and "NOOPT" not in unds[3:4], "the tried-and-empty name is not a newcomer"
+
+
+def test_bulk_insert_is_chunked_so_no_statement_outgrows_the_role_timeout() -> None:
+    # 575 underlyings × 24 months of planner rows is ~14,000 specs; one
+    # statement for all of them was cancelled at the role's 2s limit.
+    from bifrost_market_data.scheduler import enqueue as enq
+
+    conn = _DailyConn()
+    specs = [("option_backfill_plan", {"underlying": f"S{i:05d}", "m": i}, 1, 3) for i in range(5000)]
+    ids = enq.insert_jobs_bulk(conn, specs)
+    assert len(ids) == 5000 and all(i is not None for i in ids)
+    inserts = [q for q, _p in conn.statements if "insert into ops_jobs.job_ingest" in q.lower()]
+    assert len(inserts) == 3, "5000 rows at 2000 per statement"
+    assert any("statement_timeout" in q.lower() for q, _p in conn.statements), "the transaction gets its own room"
+
+
+def test_bulk_insert_dedups_across_chunks_within_a_batch() -> None:
+    from bifrost_market_data.scheduler import enqueue as enq
+
+    conn = _DailyConn()
+    specs = [("k", {"n": i % 10}, 1, 3) for i in range(4500)]  # ten distinct payloads, repeated
+    ids = enq.insert_jobs_bulk(conn, specs)
+    assert sum(1 for i in ids if i is not None) == 10
