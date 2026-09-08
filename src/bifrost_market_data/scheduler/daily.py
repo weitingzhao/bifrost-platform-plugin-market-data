@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from bifrost_market_data.logging_setup import configure_logging
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.freshness import update_freshness
@@ -63,17 +64,18 @@ MIGRATED_ANALYTICS_SLOTS = frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"}
 # itself, not a time window: a catch-up fires ~4.5h after the 22:00 UTC
 # primary, and a Monday morning run must not be skipped because Friday's run
 # was "recent". Only a non-failed job for the *same session* blocks a re-enqueue.
-SESSION_ONCE_SLOTS: dict[str, tuple[tuple[str, ...], str]] = {
-    "stock-eod": (("stock_daily",), "to"),
-    "eod-pipeline": (("option_snapshot",), "trade_date"),
+# slot -> (kinds that evidence the slot, payload field holding the session,
+# payload field naming the symbol). The symbol field makes the guard ask
+# "is this session *covered*" instead of "did anything at all run".
+SESSION_ONCE_SLOTS: dict[str, tuple[tuple[str, ...], str, str]] = {
+    "stock-eod": (("stock_daily",), "to", "symbol"),
+    "eod-pipeline": (("option_snapshot",), "trade_date", "underlying"),
 }
 
 # Retired slots — the current Massive subscriptions do not cover the data.
 # Kept in SLOT_NAMES so Dagster / CLI callers get a skip instead of a 400
 # until the plan changes; the wording lives in subscription.py.
-UNENTITLED_SLOTS: dict[str, str] = {
-    slot: req["reason"] for slot, req in SLOT_REQUIREMENTS.items()
-}
+UNENTITLED_SLOTS: dict[str, str] = {slot: req["reason"] for slot, req in SLOT_REQUIREMENTS.items()}
 
 # Slots that skip enqueue on NYSE closed / weekend (must match adherence logic).
 SKIP_ON_HOLIDAY_SLOTS = frozenset(
@@ -200,31 +202,45 @@ def _month_end(first: date) -> date:
     return _month_start(first, -1) - timedelta(days=1)
 
 
-def _session_evidence_exists(
-    conn: Any, kinds: Sequence[str], *, session_field: str, session: str
-) -> bool:
-    """True when a non-failed job of ``kinds`` already covers ``session``."""
+def _session_symbols_enqueued(
+    conn: Any,
+    kinds: Sequence[str],
+    *,
+    session_field: str,
+    session: str,
+    symbol_field: str,
+) -> set[str]:
+    """The symbols a non-failed job of ``kinds`` already covers for ``session``.
+
+    Intraday rows do not count. The intraday chain writes ``option_snapshot``
+    for the same ``trade_date`` as the EOD slot, so a probe that only asked
+    "does any such job exist" answered yes from 15:30 ET onwards and the EOD
+    snapshot skipped itself every trading day — invisibly, because skipping is
+    a success. It only became load-bearing when the universe grew past the
+    handful of names the intraday chain covers.
+    """
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT 1 FROM ops_jobs.job_ingest
+                SELECT DISTINCT payload ->> %s
+                FROM ops_jobs.job_ingest
                 WHERE kind = ANY(%s)
                   AND payload ->> %s = %s
                   AND status <> 'failed'
-                LIMIT 1
+                  AND NOT coalesce((payload ->> 'intraday')::boolean, false)
                 """,
-                (list(kinds), str(session_field), str(session)),
+                (str(symbol_field), list(kinds), str(session_field), str(session)),
             )
-            row = cur.fetchone() if hasattr(cur, "fetchone") else None
+            rows = cur.fetchall() or []
     except Exception as exc:  # noqa: BLE001 — evidence probe must not block enqueue
         logger.warning("session evidence probe failed: %s", exc)
         try:
             conn.rollback()
         except Exception:
             pass
-        return False
-    return row is not None
+        return set()
+    return {str(r[0]) for r in rows if r and r[0] is not None}
 
 
 def _store_watchlist_cache(conn: Any, symbols: Sequence[str], *, source: str) -> None:
@@ -378,7 +394,9 @@ def load_research_universe(conn: Any) -> list[dict[str, Any]]:
             cur.execute(RESEARCH_UNIVERSE_QUERY)
             rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     except Exception as exc:  # noqa: BLE001 — the watchlist path remains
-        logger.warning("research.option_universe unreadable; option slots use the watchlist: %s", exc)
+        logger.warning(
+            "research.option_universe unreadable; option slots use the watchlist: %s", exc
+        )
         try:
             conn.rollback()
         except Exception:
@@ -502,9 +520,7 @@ def resolve_watchlist_symbols_for_coverage(
     scheduler_cfg: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Resolve coverage/quality watchlist; see ``resolve_watchlist_with_source``."""
-    symbols, _source = resolve_watchlist_with_source(
-        conn, limit=limit, scheduler_cfg=scheduler_cfg
-    )
+    symbols, _source = resolve_watchlist_with_source(conn, limit=limit, scheduler_cfg=scheduler_cfg)
     return symbols
 
 
@@ -707,7 +723,11 @@ def load_snapshot_windows(
                 (syms, as_of - timedelta(days=7)),
             )
             for row in cur.fetchall() or []:
-                sym, close = (row.get("symbol"), row.get("close")) if isinstance(row, Mapping) else (row[0], row[1])
+                sym, close = (
+                    (row.get("symbol"), row.get("close"))
+                    if isinstance(row, Mapping)
+                    else (row[0], row[1])
+                )
                 if sym and close is not None:
                     spots[str(sym).upper()] = float(close)
         conn.commit()
@@ -734,10 +754,15 @@ def load_snapshot_windows(
                     """,
                     (sym, as_of, n_exp),
                 )
-                exps = [(r.get("expiry") if isinstance(r, Mapping) else r[0]) for r in (cur.fetchall() or [])]
+                exps = [
+                    (r.get("expiry") if isinstance(r, Mapping) else r[0])
+                    for r in (cur.fetchall() or [])
+                ]
             conn.commit()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("snapshot window expiry lookup failed for %s; snapshotting it whole: %s", sym, exc)
+            logger.warning(
+                "snapshot window expiry lookup failed for %s; snapshotting it whole: %s", sym, exc
+            )
             try:
                 conn.rollback()
             except Exception:
@@ -745,7 +770,11 @@ def load_snapshot_windows(
             continue
         if len(exps) < n_exp:
             continue
-        out[sym] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), exps[n_exp - 1].isoformat())
+        out[sym] = (
+            round(spot * (1 - pct), 2),
+            round(spot * (1 + pct), 2),
+            exps[n_exp - 1].isoformat(),
+        )
     return out
 
 
@@ -887,7 +916,9 @@ def enqueue_slot(
                 )
                 row = cur.fetchone() if hasattr(cur, "fetchone") else None
             if row is not None:
-                partitions_dropped = int(row[0] if not isinstance(row, Mapping) else next(iter(row.values())))
+                partitions_dropped = int(
+                    row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+                )
             if hasattr(conn, "commit"):
                 conn.commit()
             # Re-create near-term day partitions after drops.
@@ -1001,27 +1032,6 @@ def enqueue_slot(
             "jobs": [],
         }
 
-    if slot_key in SESSION_ONCE_SLOTS and not force:
-        kinds_seen, session_field = SESSION_ONCE_SLOTS[slot_key]
-        if _session_evidence_exists(
-            conn, kinds_seen, session_field=session_field, session=day_s
-        ):
-            logger.info(
-                "slot=%s already enqueued for session %s (kinds=%s), skipping",
-                slot_key,
-                day_s,
-                ",".join(kinds_seen),
-            )
-            return {
-                "slot": slot_key,
-                "target_date": day_s,
-                "skipped": True,
-                "reason": "evidence_exists",
-                "enqueued": 0,
-                "deduped": 0,
-                "jobs": [],
-            }
-
     # Full-market / calendar-like slots do not need the watchlist; skip the
     # platform-api + DB lookup so a union 404 cannot fail ticker_sync / grouped EOD.
     _slots_need_watchlist = {
@@ -1048,18 +1058,67 @@ def enqueue_slot(
     # is empty or absent, so the slot never stalls.
     tier_of: dict[str, str] = {}
     months_of: dict[str, int] = {}
-    if slot_key in ("option-refresh", "option-backfill", "eod-pipeline") and str(scfg.get("universe") or "").lower() == "research":
+    if (
+        slot_key in ("option-refresh", "option-backfill", "eod-pipeline")
+        and str(scfg.get("universe") or "").lower() == "research"
+    ):
         universe = load_research_universe(conn)
         if universe:
             symbols = [u["symbol"] for u in universe]
             tier_of = {u["symbol"]: u["tier"] for u in universe}
             months_of = {u["symbol"]: u["history_months"] for u in universe}
         else:
-            logger.warning("universe=research but research.option_universe is empty; using the watchlist")
+            logger.warning(
+                "universe=research but research.option_universe is empty; using the watchlist"
+            )
+
+    # Session-once: skip only when this session is already *covered*. The probe
+    # runs here rather than earlier because "covered" needs the symbol list.
+    if slot_key in SESSION_ONCE_SLOTS and not force:
+        kinds_seen, session_field, symbol_field = SESSION_ONCE_SLOTS[slot_key]
+        if slot_key == "eod-pipeline":
+            expected = {storage_underlying(x) for x in union_iv_radar_benchmarks(symbols, cfg)}
+        else:
+            expected = set(symbols)
+        seen = _session_symbols_enqueued(
+            conn,
+            kinds_seen,
+            session_field=session_field,
+            session=day_s,
+            symbol_field=symbol_field,
+        )
+        missing = expected - seen
+        if expected and not missing:
+            logger.info(
+                "slot=%s already covers session %s (%d symbols, kinds=%s), skipping",
+                slot_key,
+                day_s,
+                len(expected),
+                ",".join(kinds_seen),
+            )
+            return {
+                "slot": slot_key,
+                "target_date": day_s,
+                "skipped": True,
+                "reason": "evidence_exists",
+                "covered": len(seen),
+                "enqueued": 0,
+                "deduped": 0,
+                "jobs": [],
+            }
+        if seen:
+            logger.info(
+                "slot=%s session %s partially covered: %d of %d symbols seen, enqueueing the rest",
+                slot_key,
+                day_s,
+                len(expected) - len(missing),
+                len(expected),
+            )
 
     def _tier_pri(sym: str) -> int | None:
         bump = TIER_PRIORITY_BUMP.get(tier_of.get(sym, ""))
         return None if bump is None else priority + bump
+
     jobs: list[dict[str, Any]] = []
     specs: list[tuple[str, dict[str, Any], int, int]] = []
 
@@ -1067,7 +1126,9 @@ def enqueue_slot(
         # Collected here, written in one statement below.
         effective = pri if pri is not None else priority
         specs.append((kind, payload, effective, 3))
-        jobs.append({"kind": kind, "payload": payload, "id": None, "deduped": True, "priority": effective})
+        jobs.append(
+            {"kind": kind, "payload": payload, "id": None, "deduped": True, "priority": effective}
+        )
 
     if slot_key == "stock-eod":
         for sym in symbols:
@@ -1347,14 +1408,18 @@ def enqueue_slot(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Enqueue market-data ingest jobs for a schedule slot")
+    parser = argparse.ArgumentParser(
+        description="Enqueue market-data ingest jobs for a schedule slot"
+    )
     parser.add_argument(
         "--slot",
         required=True,
         choices=SLOT_NAMES,
         help="Schedule slot to enqueue",
     )
-    parser.add_argument("--date", default=None, help="Target date YYYY-MM-DD (default: latest NY weekday)")
+    parser.add_argument(
+        "--date", default=None, help="Target date YYYY-MM-DD (default: latest NY weekday)"
+    )
     parser.add_argument("--config", default=None, help="Path to market-data.yaml")
     parser.add_argument("--schedule", default=None, help="Path to schedule.yaml")
     parser.add_argument(
@@ -1369,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    configure_logging(logging.INFO)
 
     cfg = load_config(args.config)
     schedule = load_schedule(args.schedule)
@@ -1399,9 +1464,7 @@ def main(argv: list[str] | None = None) -> int:
             break
         except psycopg.OperationalError as exc:
             last_err = exc
-            logger.warning(
-                "postgres connect attempt %s/5 failed: %s", attempt, exc
-            )
+            logger.warning("postgres connect attempt %s/5 failed: %s", attempt, exc)
             time.sleep(min(2 * attempt, 8))
     if conn is None:
         raise last_err if last_err is not None else RuntimeError("postgres connect failed")

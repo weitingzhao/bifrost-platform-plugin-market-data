@@ -9,6 +9,7 @@ import pytest
 
 from bifrost_market_data.scheduler.daily import (
     DEFAULT_IV_RADAR_BENCHMARKS,
+    storage_underlying,
     MIGRATED_ANALYTICS_SLOTS,
     SLOT_NAMES,
     enqueue_slot,
@@ -135,11 +136,15 @@ class _DailyCursor:
             self.parent._fetchone = None
         elif "/* snapshot-window: spot */" in q:
             syms = set(params[0])  # params[1] is the date floor
-            self.parent._fetchall = [(u, self.parent.spots[u]) for u in sorted(syms) if u in self.parent.spots]
+            self.parent._fetchall = [
+                (u, self.parent.spots[u]) for u in sorted(syms) if u in self.parent.spots
+            ]
             self.parent._fetchone = None
         elif "/* snapshot-window: expiry */" in q:
             und, as_of, n = params[0], params[1], int(params[2])
-            exps = sorted({c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of})[:n]
+            exps = sorted(
+                {c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of}
+            )[:n]
             self.parent._fetchall = [(e,) for e in exps]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
@@ -158,7 +163,12 @@ class _DailyCursor:
                 for exp in expiries:
                     for right in ("C", "P"):
                         cands = [c for c in mine if c[2] == exp and c[0][-9] == right]
-                        cands.sort(key=lambda c: (abs((c[3] if len(c) > 3 else 0) - spot), c[3] if len(c) > 3 else 0))
+                        cands.sort(
+                            key=lambda c: (
+                                abs((c[3] if len(c) > 3 else 0) - spot),
+                                c[3] if len(c) > 3 else 0,
+                            )
+                        )
                         picked.extend((c[0],) for c in cands[:per_right])
             self.parent._fetchall = sorted(picked)
             self.parent._fetchone = None
@@ -200,7 +210,9 @@ class _DailyCursor:
                 rows.append((ticker,))
             self.parent._fetchall = rows
             self.parent._fetchone = None
-        elif ("from market.ticker" in q or "from raw_market.ticker" in q) and "instrument_type" in q:
+        elif (
+            "from market.ticker" in q or "from raw_market.ticker" in q
+        ) and "instrument_type" in q:
             self.parent._fetchall = [(s,) for s in self.parent.cs_universe]
             self.parent._fetchone = None
         elif "raw_market.income_statement" in q or (
@@ -246,8 +258,11 @@ class _DailyCursor:
         elif "from ops_jobs.job_ingest" in q and "payload ->>" in q:
             # session-once evidence probe: keyed by the session, not a time window
             self.parent.evidence_probes.append(params)
-            self.parent._fetchone = (1,) if self.parent.session_evidence else None
-            self.parent._fetchall = []
+            covered = list(self.parent.session_symbols)
+            if self.parent.session_evidence and not covered:
+                covered = list(self.parent.watchlist)
+            self.parent._fetchall = [(sym,) for sym in covered]
+            self.parent._fetchone = None
         elif "delete from" in q:
             self.rowcount = 2
             self.parent._fetchone = None
@@ -293,6 +308,7 @@ class _DailyConn:
         cs_universe: list[str] | None = None,
         income_covered: list[str] | None = None,
         session_evidence: bool = False,
+        session_symbols: list[str] | None = None,
         spots: dict[str, float] | None = None,
         voided: list[str] | None = None,
         watchlist_cache: list[str] | None = None,
@@ -301,6 +317,7 @@ class _DailyConn:
         raise_on_enumerated: bool = False,
     ) -> None:
         self.session_evidence = session_evidence
+        self.session_symbols = session_symbols or []
         self.evidence_probes: list[Any] = []
         self.spots = spots or {}
         self.voided = voided or []
@@ -338,6 +355,7 @@ class _DailyConn:
 
     def rollback(self) -> None:
         return None
+
 
 def test_resolve_target_date_explicit() -> None:
     assert resolve_target_date("2024-06-20") == date(2024, 6, 20)
@@ -429,9 +447,14 @@ def test_eod_pipeline_skipped_when_fire_date_is_weekend() -> None:
     assert result2["enqueued"] == 4
 
 
+def _eod_covered(symbols: list[str]) -> list[str]:
+    """The underlyings an eod-pipeline fire would enqueue for this watchlist."""
+    return [storage_underlying(s) for s in union_iv_radar_benchmarks(symbols, {})]
+
+
 def test_eod_pipeline_session_once_dedup() -> None:
     """The 22:30 ET catch-up must not re-fetch what the 22:00 UTC fire already enqueued."""
-    conn = _DailyConn(["AAPL"], session_evidence=True)
+    conn = _DailyConn(["AAPL"], session_symbols=_eod_covered(["AAPL"]))
     result = enqueue_slot(
         conn,
         "eod-pipeline",
@@ -442,9 +465,9 @@ def test_eod_pipeline_session_once_dedup() -> None:
     assert result["skipped"] is True
     assert result["reason"] == "evidence_exists"
     # The probe asks about this session's date, not "anything in the last 12h".
-    assert conn.evidence_probes == [(["option_snapshot"], "trade_date", "2024-06-20")]
+    assert conn.evidence_probes == [("underlying", ["option_snapshot"], "trade_date", "2024-06-20")]
     forced = enqueue_slot(
-        _DailyConn(["AAPL"], session_evidence=True),
+        _DailyConn(["AAPL"], session_symbols=_eod_covered(["AAPL"])),
         "eod-pipeline",
         target_date=date(2024, 6, 20),
         watchlist_symbols=["AAPL"],
@@ -540,7 +563,12 @@ def test_enqueue_option_refresh_rotates_by_date() -> None:
 
 def test_enqueue_option_bars_targets_the_money() -> None:
     """Next expiries, strikes nearest the close — not the lowest strikes of the nearest expiry."""
-    exp1, exp2, exp3, exp4 = date(2024, 6, 21), date(2024, 6, 28), date(2024, 7, 5), date(2024, 7, 12)
+    exp1, exp2, exp3, exp4 = (
+        date(2024, 6, 21),
+        date(2024, 6, 28),
+        date(2024, 7, 5),
+        date(2024, 7, 12),
+    )
     contracts = []
     for exp in (exp1, exp2, exp3, exp4):
         for strike in (50, 100, 150, 190, 200, 210, 250, 300):
@@ -563,7 +591,9 @@ def test_enqueue_option_bars_targets_the_money() -> None:
     assert len(tickers) == 12
     assert all(t[6:12] in ("240621", "240628") for t in tickers)
     assert {t[-8:] for t in tickers} == {"00190000", "00200000", "00210000"}
-    assert all(j["kind"] == "option_daily" and j["payload"]["from"] == "2024-06-20" for j in result["jobs"])
+    assert all(
+        j["kind"] == "option_daily" and j["payload"]["from"] == "2024-06-20" for j in result["jobs"]
+    )
 
 
 def test_enqueue_option_bars_skips_underlyings_without_a_close() -> None:
@@ -603,6 +633,7 @@ def test_option_trades_slot_retired() -> None:
     assert result["reason"] == "unentitled"
     assert result["enqueued"] == 0
     assert not any("returning id" in st[0].lower() for st in conn.statements)
+
 
 def test_enqueue_minute_bars() -> None:
     contracts = [
@@ -910,9 +941,7 @@ def test_all_slot_names_covered() -> None:
     assert "max-pain" not in SLOT_NAMES
     assert "atm-iv-pcr" not in SLOT_NAMES
     assert "iv-percentile" in MIGRATED_ANALYTICS_SLOTS
-    assert MIGRATED_ANALYTICS_SLOTS == frozenset(
-        {"max-pain", "atm-iv-pcr", "iv-percentile"}
-    )
+    assert MIGRATED_ANALYTICS_SLOTS == frozenset({"max-pain", "atm-iv-pcr", "iv-percentile"})
     # payload_hash stable for slot payloads
     assert payload_hash({"symbol": "AAPL"}) == payload_hash({"symbol": "AAPL"})
 
@@ -970,6 +999,7 @@ def test_stock_snapshot_skipped_on_holiday() -> None:
     )
     assert result.get("skipped") is True
     assert result["enqueued"] == 0
+
 
 def test_enqueue_readiness_refresh() -> None:
     conn = _DailyConn([])
@@ -1111,7 +1141,9 @@ def test_enqueue_fundamentals_market() -> None:
         "fundamentals-market",
         target_date=date(2024, 6, 21),  # Friday
         watchlist_symbols=["AAPL"],
-        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2, "short_interest_lookback_days": 45}}},
+        scheduler_cfg={
+            "slots": {"fundamentals-market": {"priority": 2, "short_interest_lookback_days": 45}}
+        },
     )
     by_kind = {j["kind"]: j["payload"] for j in result["jobs"]}
     assert set(by_kind) == {"ratios_market", "short_volume_market", "short_interest_market"}
@@ -1168,7 +1200,9 @@ def test_watchlist_falls_back_to_cache_not_to_empty(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: ["NVDA", "TSLA"])
     conn = _DailyConn(watchlist=["AAPL"])
     assert mod.load_watchlist_symbols(conn, cfg) == ["NVDA", "TSLA"]
-    assert any("watchlist_cache" in st[0].lower() and "insert" in st[0].lower() for st in conn.statements)
+    assert any(
+        "watchlist_cache" in st[0].lower() and "insert" in st[0].lower() for st in conn.statements
+    )
     # Unreachable: the cached union wins over the (Trade-owned, usually absent) DB query.
     monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: None)
     conn = _DailyConn(watchlist=["AAPL"], watchlist_cache=["NVDA", "TSLA"])
@@ -1238,16 +1272,29 @@ def test_enqueue_option_backfill_plans_one_job_per_underlying_month() -> None:
         },
     )
     assert result["enqueued"] == 3
-    windows = sorted((j["payload"]["expiry_gte"], j["payload"]["expiry_lte"]) for j in result["jobs"])
-    assert windows == [("2026-07-01", "2026-07-31"), ("2026-08-01", "2026-08-31"), ("2026-09-01", "2026-09-30")]
-    assert all(j["payload"]["strike_pct"] == 0.25 and j["payload"]["dte"] == 60 for j in result["jobs"])
+    windows = sorted(
+        (j["payload"]["expiry_gte"], j["payload"]["expiry_lte"]) for j in result["jobs"]
+    )
+    assert windows == [
+        ("2026-07-01", "2026-07-31"),
+        ("2026-08-01", "2026-08-31"),
+        ("2026-09-01", "2026-09-30"),
+    ]
+    assert all(
+        j["payload"]["strike_pct"] == 0.25 and j["payload"]["dte"] == 60 for j in result["jobs"]
+    )
 
 
 # ── Research option universe (blueprint C-F5) ──────────────────────────────
 
 
 def _universe_rows() -> list[tuple[str, str, int]]:
-    return [("SPY", "resident", 24), ("AAPL", "core", 24), ("MSFT", "core", 24), ("HALO", "edge", 12)]
+    return [
+        ("SPY", "resident", 24),
+        ("AAPL", "core", 24),
+        ("MSFT", "core", 24),
+        ("HALO", "edge", 12),
+    ]
 
 
 def test_option_refresh_enumerates_the_research_universe_by_tier() -> None:
@@ -1257,10 +1304,16 @@ def test_option_refresh_enumerates_the_research_universe_by_tier() -> None:
         "option-refresh",
         target_date=date(2026, 9, 9),
         watchlist_symbols=["TSLA"],  # ignored: the universe is the rule
-        scheduler_cfg={"slots": {"option-refresh": {"priority": 4, "universe": "research", "max_new_per_run": 10}}},
+        scheduler_cfg={
+            "slots": {
+                "option-refresh": {"priority": 4, "universe": "research", "max_new_per_run": 10}
+            }
+        },
     )
     by = {j["payload"]["underlying"]: j for j in r["jobs"]}
-    assert set(by) == {"SPY", "QQQ", "IWM", "AAPL", "MSFT", "HALO"}, "universe plus benchmarks, not the watchlist"
+    assert set(by) == {"SPY", "QQQ", "IWM", "AAPL", "MSFT", "HALO"}, (
+        "universe plus benchmarks, not the watchlist"
+    )
     assert "TSLA" not in by
     pri = {u: j["priority"] for u, j in by.items()}
     assert pri["SPY"] == 4 + 3 and pri["AAPL"] == 4 + 2 and pri["HALO"] == 4 + 1
@@ -1270,12 +1323,19 @@ def test_option_refresh_enumerates_the_research_universe_by_tier() -> None:
 def test_option_refresh_ramps_new_names_first_within_the_daily_cap() -> None:
     rows = [(f"N{i:03d}", "core", 24) for i in range(30)] + [("AAPL", "core", 24)]
     # AAPL already has contracts; the thirty N-names do not.
-    conn = _DailyConn(research_universe=rows, option_contracts=[("O:AAPL260117C00200000", "AAPL", date(2026, 1, 17))])
+    conn = _DailyConn(
+        research_universe=rows,
+        option_contracts=[("O:AAPL260117C00200000", "AAPL", date(2026, 1, 17))],
+    )
     r = enqueue_slot(
         conn,
         "option-refresh",
         target_date=date(2026, 9, 9),
-        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}}},
+        scheduler_cfg={
+            "slots": {
+                "option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}
+            }
+        },
     )
     unds = [j["payload"]["underlying"] for j in r["jobs"]]
     # Order is the contract: benchmarks, then the capped newcomers, then the
@@ -1337,7 +1397,11 @@ def test_option_refresh_does_not_ramp_when_the_enumerated_lookup_fails() -> None
         conn,
         "option-refresh",
         target_date=date(2026, 9, 9),
-        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}}},
+        scheduler_cfg={
+            "slots": {
+                "option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}
+            }
+        },
     )
     unds = [j["payload"]["underlying"] for j in r["jobs"]]
     assert len(unds) == 3 + 1, "benchmarks and the rotation only — no ramp on an unknown state"
@@ -1352,11 +1416,17 @@ def test_option_refresh_treats_a_finished_empty_enumeration_as_done() -> None:
         conn,
         "option-refresh",
         target_date=date(2026, 9, 9),
-        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 0}}},
+        scheduler_cfg={
+            "slots": {
+                "option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 0}
+            }
+        },
     )
     unds = [j["payload"]["underlying"] for j in r["jobs"]]
     assert "N001" in unds[3:4], "the never-tried name ramps"
-    assert unds.count("NOOPT") <= 1 and "NOOPT" not in unds[3:4], "the tried-and-empty name is not a newcomer"
+    assert unds.count("NOOPT") <= 1 and "NOOPT" not in unds[3:4], (
+        "the tried-and-empty name is not a newcomer"
+    )
 
 
 def test_bulk_insert_is_chunked_so_no_statement_outgrows_the_role_timeout() -> None:
@@ -1365,12 +1435,16 @@ def test_bulk_insert_is_chunked_so_no_statement_outgrows_the_role_timeout() -> N
     from bifrost_market_data.scheduler import enqueue as enq
 
     conn = _DailyConn()
-    specs = [("option_backfill_plan", {"underlying": f"S{i:05d}", "m": i}, 1, 3) for i in range(5000)]
+    specs = [
+        ("option_backfill_plan", {"underlying": f"S{i:05d}", "m": i}, 1, 3) for i in range(5000)
+    ]
     ids = enq.insert_jobs_bulk(conn, specs)
     assert len(ids) == 5000 and all(i is not None for i in ids)
     inserts = [q for q, _p in conn.statements if "insert into ops_jobs.job_ingest" in q.lower()]
     assert len(inserts) == 3, "5000 rows at 2000 per statement"
-    assert any("statement_timeout" in q.lower() for q, _p in conn.statements), "the transaction gets its own room"
+    assert any("statement_timeout" in q.lower() for q, _p in conn.statements), (
+        "the transaction gets its own room"
+    )
 
 
 def test_bulk_insert_dedups_across_chunks_within_a_batch() -> None:
@@ -1382,7 +1456,6 @@ def test_bulk_insert_dedups_across_chunks_within_a_batch() -> None:
     assert sum(1 for i in ids if i is not None) == 10
 
 
-
 def test_snapshot_params_carry_the_near_the_money_window() -> None:
     from bifrost_market_data.polygon import endpoints as ep
 
@@ -1390,7 +1463,9 @@ def test_snapshot_params_carry_the_near_the_money_window() -> None:
     assert p["strike_price.gte"] == 170.0 and p["strike_price.lte"] == 230.0
     assert p["expiration_date.lte"] == "2026-10-16"
     assert "strike_price" not in p
-    assert ep.options_snapshot_params() == {"limit": 250}, "no window means a whole chain, as before"
+    assert ep.options_snapshot_params() == {"limit": 250}, (
+        "no window means a whole chain, as before"
+    )
 
 
 def test_eod_pipeline_snapshots_the_universe_with_windows_by_tier() -> None:
@@ -1405,31 +1480,54 @@ def test_eod_pipeline_snapshots_the_universe_with_windows_by_tier() -> None:
     conn = _DailyConn(
         research_universe=[("SPY", "resident", 24), ("AAPL", "core", 24), ("HALO", "edge", 12)],
         option_contracts=contracts,
-        spots={"AAPL": 200.0, "SPY": 500.0},  # HALO has no close: whole chain, safer than a wrong bound
+        spots={
+            "AAPL": 200.0,
+            "SPY": 500.0,
+        },  # HALO has no close: whole chain, safer than a wrong bound
     )
     r = enqueue_slot(
         conn,
         "eod-pipeline",
         target_date=d,
         watchlist_symbols=["TSLA"],
-        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5, "universe": "research", "expiries": 3, "strike_pct": 0.15}}},
+        scheduler_cfg={
+            "slots": {
+                "eod-pipeline": {
+                    "priority": 5,
+                    "universe": "research",
+                    "expiries": 3,
+                    "strike_pct": 0.15,
+                }
+            }
+        },
     )
     snaps = {j["payload"]["underlying"]: j for j in r["jobs"] if j["kind"] == "option_snapshot"}
-    assert set(snaps) == {"SPY", "QQQ", "IWM", "AAPL", "HALO"}, "the universe plus benchmarks, not the watchlist"
+    assert set(snaps) == {"SPY", "QQQ", "IWM", "AAPL", "HALO"}, (
+        "the universe plus benchmarks, not the watchlist"
+    )
     aapl = snaps["AAPL"]["payload"]
     assert aapl["strike_gte"] == 170.0 and aapl["strike_lte"] == 230.0, "±15% of spot"
     assert aapl["expiration_lte"] == "2026-12-18", "the third listed expiry"
     assert "strike_gte" not in snaps["SPY"]["payload"], "resident names are snapshotted whole"
     assert "strike_gte" not in snaps["HALO"]["payload"], "no close, no bound"
-    assert snaps["SPY"]["priority"] == 5 + 3 and snaps["AAPL"]["priority"] == 5 + 2 and snaps["HALO"]["priority"] == 5 + 1
+    assert (
+        snaps["SPY"]["priority"] == 5 + 3
+        and snaps["AAPL"]["priority"] == 5 + 2
+        and snaps["HALO"]["priority"] == 5 + 1
+    )
 
 
 def test_eod_pipeline_without_the_universe_is_unchanged() -> None:
     conn = _DailyConn(research_universe=[("HALO", "edge", 12)])
-    r = enqueue_slot(conn, "eod-pipeline", target_date=date(2026, 9, 9), watchlist_symbols=["TSLA"], scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}})
+    r = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2026, 9, 9),
+        watchlist_symbols=["TSLA"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
     snaps = {j["payload"]["underlying"] for j in r["jobs"] if j["kind"] == "option_snapshot"}
     assert "TSLA" in snaps and "HALO" not in snaps
-
 
 
 def test_snapshot_windows_use_one_spot_query_and_a_point_query_per_name() -> None:
@@ -1447,3 +1545,76 @@ def test_snapshot_windows_use_one_spot_query_and_a_point_query_per_name() -> Non
     assert len(spot_lookups) == 1, "one spot query for every name"
     assert len(expiry_lookups) == 100, "one indexed point query per name"
     assert any("statement_timeout" in q.lower() for q, _p in conn.statements)
+
+
+def test_intraday_rows_do_not_count_as_the_eod_snapshot() -> None:
+    """The intraday chain writes option_snapshot for the same trade_date.
+
+    A probe that only asked "does any such job exist" answered yes from 15:30
+    ET onwards, so the universe-wide EOD snapshot skipped itself every trading
+    day — silently, because skipping is reported as success. Measured on DEV
+    2026-09-08: eod-pipeline returned skipped/evidence_exists with 0 enqueued
+    while the session held 26 underlyings out of a 575-name universe.
+    """
+    conn = _DailyConn(["AAPL"])  # the probe answers with no covered symbols
+    result = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
+    assert result.get("skipped") is not True
+    assert result["enqueued"] == len(_eod_covered(["AAPL"]))
+    assert conn.evidence_probes == [("underlying", ["option_snapshot"], "trade_date", "2024-06-20")]
+
+
+def test_a_partly_covered_session_enqueues_only_the_rest() -> None:
+    """A fire that died halfway must be completable, not declared done."""
+    covered = _eod_covered(["AAPL"])
+    conn = _DailyConn(["AAPL"], session_symbols=covered[:2])
+    result = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+    )
+    assert result.get("skipped") is not True
+    # Dedup drops the two already queued; the slot still asks for the whole set.
+    assert result["enqueued"] + result["deduped"] == len(covered)
+
+
+def test_the_evidence_probe_excludes_intraday_in_sql() -> None:
+    """Filtering afterwards would still read every intraday row of the session."""
+    from bifrost_market_data.scheduler import daily as mod
+
+    captured: list[str] = []
+
+    class _Cur:
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: object = None) -> None:
+            captured.append(" ".join(str(sql).lower().split()))
+
+        def fetchall(self) -> list[tuple[str, ...]]:
+            return [("AAPL",), (None,)]
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+    seen = mod._session_symbols_enqueued(
+        _Conn(),
+        ["option_snapshot"],
+        session_field="trade_date",
+        session="2026-09-08",
+        symbol_field="underlying",
+    )
+    assert seen == {"AAPL"}  # a null payload key is not a covered symbol
+    assert "not coalesce((payload ->> 'intraday')::boolean, false)" in captured[0]
+    assert "status <> 'failed'" in captured[0]

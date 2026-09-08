@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+
+from bifrost_market_data.logging_setup import configure_logging
 from datetime import date, timedelta
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.scheduler.enqueue import insert_job
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+configure_logging(logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("market_data.backfill")
 
 

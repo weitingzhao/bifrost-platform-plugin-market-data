@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from bifrost_market_data.logging_setup import install_redaction
+
 from bifrost_market_data import __version__
 from bifrost_market_data.api.analytics import router as analytics_router
 from bifrost_market_data.api.capabilities import router as capabilities_router
@@ -40,6 +42,8 @@ from bifrost_market_data.api.technical import router as technical_router
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # uvicorn owns the handlers here; attach redaction to whatever it made.
+    install_redaction()
     run_startup_schema_guard()
     yield
 
