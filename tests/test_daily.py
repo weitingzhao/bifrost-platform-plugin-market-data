@@ -1616,5 +1616,8 @@ def test_the_evidence_probe_excludes_intraday_in_sql() -> None:
         symbol_field="underlying",
     )
     assert seen == {"AAPL"}  # a null payload key is not a covered symbol
-    assert "not coalesce((payload ->> 'intraday')::boolean, false)" in captured[0]
-    assert "status <> 'failed'" in captured[0]
+    # Bounded first: no index reaches a payload key, and the role's 2s would
+    # cancel it mid-backfill, leaving the guard quietly inert.
+    assert captured[0] == "set local statement_timeout = '30s'"
+    assert "not coalesce((payload ->> 'intraday')::boolean, false)" in captured[1]
+    assert "status <> 'failed'" in captured[1]

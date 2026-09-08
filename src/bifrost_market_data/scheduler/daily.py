@@ -221,6 +221,11 @@ def _session_symbols_enqueued(
     """
     try:
         with conn.cursor() as cur:
+            # No index reaches a payload key, so this reads the session's rows out
+            # of a table that is millions deep during a backfill. It runs once per
+            # slot fire; the role's 2s does not cover it and failing open would
+            # make the guard quietly inert — the exact shape of the bug above.
+            cur.execute("SET LOCAL statement_timeout = '30s'")
             cur.execute(
                 """
                 SELECT DISTINCT payload ->> %s
