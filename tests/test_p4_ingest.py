@@ -147,3 +147,18 @@ async def test_backfill_plan_keeps_contracts_when_spot_is_unknown() -> None:
     assert result["contracts_kept"] == 1
     assert result["no_spot_reference"] == 1
     assert result["out_of_strike_band"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_plan_asks_the_contracts_endpoint_for_the_plain_index_ticker() -> None:
+    """SPX enumerates as SPX; the snapshot endpoint's I: form returns nothing here."""
+    client = mock_client(fetch_options_contracts={"results": [], "pages": 1})
+    await handle_option_backfill_plan(
+        make_job(
+            "option_backfill_plan",
+            {"underlying": "SPX", "expiry_gte": "2025-01-01", "expiry_lte": "2025-01-31"},
+        ),
+        client,
+        _CloseConn([]),
+    )
+    assert client.fetch_options_contracts.await_args.kwargs["underlying_ticker"] == "SPX"

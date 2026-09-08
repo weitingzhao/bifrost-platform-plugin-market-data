@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import as_float, parse_date
-from bifrost_market_data.ingest.index_options import snapshot_api_underlying, storage_underlying
+from bifrost_market_data.ingest.index_options import contracts_api_underlying, storage_underlying
 from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.worker.claim import JobRow
 
@@ -79,7 +79,9 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
 
     storage = storage_underlying(underlying)
     data = await client.fetch_options_contracts(
-        underlying_ticker=snapshot_api_underlying(underlying),
+        # The contracts reference endpoint takes the plain ticker; the snapshot
+        # endpoint's I: form returns nothing here, which silently emptied SPX.
+        underlying_ticker=contracts_api_underlying(underlying),
         expired=True,
         expiration_date_gte=expiry_gte.isoformat(),
         expiration_date_lte=expiry_lte.isoformat(),
