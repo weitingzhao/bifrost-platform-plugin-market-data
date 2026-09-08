@@ -1435,3 +1435,19 @@ def test_eod_pipeline_without_the_universe_is_unchanged() -> None:
     r = enqueue_slot(conn, "eod-pipeline", target_date=date(2026, 9, 9), watchlist_symbols=["TSLA"], scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}})
     snaps = {j["payload"]["underlying"] for j in r["jobs"] if j["kind"] == "option_snapshot"}
     assert "TSLA" in snaps and "HALO" not in snaps
+
+
+
+def test_snapshot_windows_are_looked_up_in_chunks() -> None:
+    from bifrost_market_data.scheduler import daily as dmod
+
+    names = [f"S{i:03d}" for i in range(100)]
+    conn = _DailyConn(
+        option_contracts=[(f"O:{n}261016C00100000", n, date(2026, 10, 16), 100.0) for n in names],
+        spots={n: 100.0 for n in names},
+    )
+    w = dmod.load_snapshot_windows(conn, names, as_of=date(2026, 9, 9), expiries=1, strike_pct=0.10)
+    assert len(w) == 100 and w["S000"] == (90.0, 110.0, "2026-10-16")
+    lookups = [q for q, _p in conn.statements if "/* snapshot-window */" in q]
+    assert len(lookups) == 3, "100 names at 40 per statement"
+    assert any("statement_timeout" in q.lower() for q, _p in conn.statements)

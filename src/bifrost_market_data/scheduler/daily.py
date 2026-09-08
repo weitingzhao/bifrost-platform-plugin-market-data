@@ -662,6 +662,11 @@ def option_trades_universe(
     return sorted([*keep, must])
 
 
+#: Names per snapshot-window statement. Sized so a statement stays far inside
+#: the role's 2s statement_timeout even before the contract table is vacuumed.
+SNAPSHOT_WINDOW_CHUNK = 40
+
+
 def load_snapshot_windows(
     conn: Any,
     symbols: Sequence[str],
@@ -683,45 +688,53 @@ def load_snapshot_windows(
     n_exp = max(1, int(expiries))
     pct = max(0.0, float(strike_pct))
     out: dict[str, tuple[float, float, str]] = {}
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                /* snapshot-window */
-                WITH spot AS (
-                  SELECT DISTINCT ON (symbol) symbol, close
-                  FROM raw_market.stock_daily
-                  WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
-                  ORDER BY symbol, bar_date DESC
-                ),
-                exp AS (
-                  SELECT underlying, expiry,
-                         DENSE_RANK() OVER (PARTITION BY underlying ORDER BY expiry) AS erank
-                  FROM (SELECT DISTINCT underlying, expiry FROM raw_market.option_contract
-                        WHERE underlying = ANY(%s) AND expiry >= %s) d
-                )
-                SELECT s.symbol, s.close, e.expiry
-                FROM spot s JOIN exp e ON e.underlying = s.symbol AND e.erank = %s
-                """,
-                (syms, syms, as_of, n_exp),
-            )
-            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-    except Exception as exc:  # noqa: BLE001 — no window beats a wrong one
-        logger.warning("snapshot window lookup failed; snapshotting whole chains: %s", exc)
+    # Chunked, with the transaction's own timeout: one statement over all 548
+    # core and edge names ran past the role's 2s statement_timeout, and the
+    # safe failure — no window, whole chain — is the expensive path at scale.
+    # A chunk that still fails costs only its own names their window.
+    for start in range(0, len(syms), SNAPSHOT_WINDOW_CHUNK):
+        chunk = syms[start : start + SNAPSHOT_WINDOW_CHUNK]
         try:
-            conn.rollback()
-        except Exception:
-            pass
-        return {}
-    for row in rows or []:
-        if isinstance(row, Mapping):
-            sym, close, expiry = row.get("symbol"), row.get("close"), row.get("expiry")
-        else:
-            sym, close, expiry = (list(row) + [None, None, None])[:3]
-        if not sym or close is None or expiry is None:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = '60s'")
+                cur.execute(
+                    """
+                    /* snapshot-window */
+                    WITH spot AS (
+                      SELECT DISTINCT ON (symbol) symbol, close
+                      FROM raw_market.stock_daily
+                      WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
+                      ORDER BY symbol, bar_date DESC
+                    ),
+                    exp AS (
+                      SELECT underlying, expiry,
+                             DENSE_RANK() OVER (PARTITION BY underlying ORDER BY expiry) AS erank
+                      FROM (SELECT DISTINCT underlying, expiry FROM raw_market.option_contract
+                            WHERE underlying = ANY(%s) AND expiry >= %s) d
+                    )
+                    SELECT s.symbol, s.close, e.expiry
+                    FROM spot s JOIN exp e ON e.underlying = s.symbol AND e.erank = %s
+                    """,
+                    (chunk, chunk, as_of, n_exp),
+                )
+                rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 — no window beats a wrong one
+            logger.warning("snapshot window lookup failed for %d names; snapshotting those whole: %s", len(chunk), exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             continue
-        spot = float(close)
-        out[str(sym).upper()] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), expiry.isoformat())
+        for row in rows or []:
+            if isinstance(row, Mapping):
+                sym, close, expiry = row.get("symbol"), row.get("close"), row.get("expiry")
+            else:
+                sym, close, expiry = (list(row) + [None, None, None])[:3]
+            if not sym or close is None or expiry is None:
+                continue
+            spot = float(close)
+            out[str(sym).upper()] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), expiry.isoformat())
     return out
 
 
