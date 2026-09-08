@@ -135,7 +135,9 @@ class _DailyCursor:
             self.parent._fetchone = None
         elif "/* snapshot-window */" in q:
             # (syms, syms, as_of, n_exp) → (symbol, close, nth expiry)
-            syms = set(params[0]); as_of = params[2]; n_exp = int(params[3])
+            syms = set(params[0])
+            as_of = params[2]
+            n_exp = int(params[3])
             rows = []
             for und in sorted(syms):
                 spot = self.parent.spots.get(und)
