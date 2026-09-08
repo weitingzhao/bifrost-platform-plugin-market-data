@@ -91,20 +91,15 @@ def connect_db(*, timeout: int = 10, statement_timeout: str = "60s") -> Any:
 
     The ``bifrost`` role defaults to ``statement_timeout=2s`` (writer safety).
     Coverage / inventory / quality reads regularly exceed that on large
-    ``raw_market.*`` tables, so API connections raise the session limit.
-    Workers that connect via ``postgres_connect_kwargs`` keep the role default.
+    ``raw_market.*`` tables, so API connections raise the session limit — as do
+    the workers, whose handlers write batches the role's 2s cannot finish.
 
-    Note: ``SET … TO %s`` is rejected by Postgres (no bind params for SET);
-    pass ``-c statement_timeout=…`` via libpq ``options`` instead.
+    The session limit is applied by ``postgres_connect_kwargs`` — one
+    implementation, shared with the workers.
     """
     import psycopg
 
-    # Normalize "60s" / "1min" → milliseconds for -c (libpq accepts unit suffix).
-    sto = str(statement_timeout).strip() or "60s"
-    kw = dict(postgres_connect_kwargs(load_config()))
-    existing = str(kw.get("options") or "").strip()
-    flag = f"-c statement_timeout={sto}"
-    kw["options"] = f"{existing} {flag}".strip() if existing else flag
+    kw = postgres_connect_kwargs(load_config(), statement_timeout=statement_timeout or "60s")
     return psycopg.connect(**kw, connect_timeout=timeout)
 
 
@@ -207,7 +202,15 @@ def row_dict(row: Any, columns: Sequence[str]) -> dict[str, Any]:
         out = {k: row[k] for k in columns if k in row}
     else:
         out = {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
-    for key in ("bar_date", "trade_date", "expiry", "ex_date", "record_date", "payment_date", "session_date"):
+    for key in (
+        "bar_date",
+        "trade_date",
+        "expiry",
+        "ex_date",
+        "record_date",
+        "payment_date",
+        "session_date",
+    ):
         if key in out and out[key] is not None:
             d = as_date(out[key])
             if d is not None:

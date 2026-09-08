@@ -62,14 +62,31 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return cfg
 
 
-def postgres_connect_kwargs(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build psycopg connect kwargs from config / env."""
+def postgres_connect_kwargs(
+    cfg: dict[str, Any] | None = None,
+    *,
+    statement_timeout: str | None = None,
+) -> dict[str, Any]:
+    """Build psycopg connect kwargs from config / env.
+
+    The ``bifrost`` role carries ``statement_timeout=2s`` — writer safety for
+    ad-hoc sessions, and far too tight for anything that reads a table which
+    grows with the universe. Pass ``statement_timeout`` to raise the session
+    limit; it goes through libpq ``options`` because Postgres rejects bind
+    parameters on ``SET``.
+    """
     data = cfg if cfg is not None else load_config()
     pg = dict(data.get("postgres") or {})
-    return {
+    kwargs: dict[str, Any] = {
         "host": pg.get("host") or os.environ.get("POSTGRES_HOST") or "localhost",
         "port": int(pg.get("port") or os.environ.get("POSTGRES_PORT") or 5432),
         "dbname": pg.get("dbname") or os.environ.get("POSTGRES_DB") or "bifrost_golden_source",
         "user": pg.get("user") or os.environ.get("POSTGRES_USER") or "data_writer",
         "password": pg.get("password") or os.environ.get("POSTGRES_PASSWORD") or "",
     }
+    sto = str(statement_timeout or "").strip()
+    if sto:
+        existing = str(pg.get("options") or "").strip()
+        flag = f"-c statement_timeout={sto}"
+        kwargs["options"] = f"{existing} {flag}".strip() if existing else flag
+    return kwargs

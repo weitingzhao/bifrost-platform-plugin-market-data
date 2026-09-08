@@ -78,6 +78,19 @@ def _polygon_api_key(config: Mapping[str, Any]) -> str:
     return key
 
 
+# The role's 2s is writer safety for ad-hoc sessions. A worker's whole job is to
+# write a batch, and its handlers read tables that grow with the universe, so 2s
+# fails them as data arrives — 21 jobs died that way on 2026-09-08 and exhausted
+# their attempts. The asyncio budget (job_timeout_sec) still bounds a hung job.
+DEFAULT_STATEMENT_TIMEOUT = "60s"
+
+
+def _statement_timeout(config: Mapping[str, Any]) -> str:
+    return str(
+        dict(config.get("worker") or {}).get("statement_timeout") or DEFAULT_STATEMENT_TIMEOUT
+    )
+
+
 def build_default_handlers(
     config: Mapping[str, Any],
     *,
@@ -92,16 +105,16 @@ def build_default_handlers(
     def _default_connect() -> Any:
         import psycopg
 
-        return psycopg.connect(**postgres_connect_kwargs(dict(config)))
+        return psycopg.connect(
+            **postgres_connect_kwargs(dict(config), statement_timeout=_statement_timeout(config))
+        )
 
     open_conn = connect or _default_connect
     if client is None:
         poly = dict(config.get("polygon") or {})
         api_key = _polygon_api_key(config)
         if not api_key:
-            raise ValueError(
-                "polygon.api_key (or POLYGON_API_KEY) is required for ingest handlers"
-            )
+            raise ValueError("polygon.api_key (or POLYGON_API_KEY) is required for ingest handlers")
         client = PolygonClient(
             api_key,
             tier=str(poly.get("tier") or "starter"),
@@ -234,7 +247,9 @@ async def run_loop(
     def _default_connect() -> Any:
         import psycopg
 
-        return psycopg.connect(**postgres_connect_kwargs(config))
+        return psycopg.connect(
+            **postgres_connect_kwargs(config, statement_timeout=_statement_timeout(config))
+        )
 
     open_conn = connect or _default_connect
     owned_client: Any | None = None

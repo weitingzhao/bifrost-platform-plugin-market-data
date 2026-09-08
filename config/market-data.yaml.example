@@ -50,3 +50,4 @@ worker:
   poll_interval_sec: 5
   job_timeout_sec: 900     # fail a live handler that hangs
   stale_running_sec: 1200  # reclaim running rows after worker crash / Recreate
+  statement_timeout: 60s   # per-session SQL budget; the bifrost role's 2s cannot finish a batch write

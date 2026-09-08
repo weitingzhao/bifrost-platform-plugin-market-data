@@ -552,6 +552,19 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         ON ops_jobs.job_ingest (status, priority DESC, created_at)
         """
     )
+    # The claim filters by kind, and the index above does not carry it. Once the
+    # pending set is millions of option rows, a pool whose kinds have nothing
+    # waiting walks the whole set to prove it — measured >30s for the stocks
+    # pool against 3.3M pending, so those workers could never claim at all.
+    # Partial on `pending`: the claim only ever reads that status, and the index
+    # stays small as finished rows accumulate.
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS job_ingest_pending_kind_priority
+        ON ops_jobs.job_ingest (kind, priority DESC, created_at)
+        WHERE status = 'pending'
+        """
+    )
 
     cur.execute(
         """
