@@ -101,29 +101,66 @@ def job_row_from_record(row: Sequence[Any] | Mapping[str, Any]) -> JobRow:
     )
 
 
-def claim_job(conn: _Connection, pool_kinds: Sequence[str]) -> JobRow | None:
+# How many candidates the claim considers. SKIP LOCKED needs more rows than
+# there are workers, or every worker races for the same head of the queue.
+CLAIM_FAN = 64
+
+
+def claim_job(
+    conn: _Connection,
+    pool_kinds: Sequence[str],
+    *,
+    fan: int = CLAIM_FAN,
+) -> JobRow | None:
     """Atomically claim one pending job whose kind is in ``pool_kinds``.
 
     Uses ``SELECT … FOR UPDATE SKIP LOCKED`` then marks the row ``running``
     and increments ``attempts`` in the same transaction.
+
+    The candidates are gathered **per kind**, then ordered together. The
+    obvious form — ``WHERE kind = ANY(%s) ORDER BY priority DESC, created_at``
+    — cannot use an index that leads with ``kind``, because such an index only
+    orders rows within one kind and the planner needs the order across all of
+    them; it therefore falls back to walking the whole pending set in priority
+    order until a row of the right kind turns up. That is free while the queue
+    is small and fatal once it is not: measured at 78s for the stocks pool
+    against 3.3M pending option rows, which the role's 2s cancels, so those
+    workers claimed nothing at all. One ``LIMIT``-ed scan per kind is a seek
+    into ``job_ingest_pending_kind_priority`` — the same 78s claim in 253ms —
+    and ordering the handful of candidates afterwards restores the exact
+    priority semantics.
     """
     kinds = [str(k) for k in pool_kinds if str(k).strip()]
     if not kinds:
         return None
+    fan = max(1, int(fan))
 
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
+                WITH candidate AS (
+                    SELECT j.id, j.priority, j.created_at
+                    FROM unnest(%s::text[]) AS k(kind)
+                    CROSS JOIN LATERAL (
+                        SELECT id, priority, created_at
+                        FROM ops_jobs.job_ingest
+                        WHERE status = 'pending' AND kind = k.kind
+                        ORDER BY priority DESC, created_at ASC
+                        LIMIT %s
+                    ) j
+                    ORDER BY j.priority DESC, j.created_at ASC
+                    LIMIT %s
+                )
                 SELECT {_JOB_COLUMNS}
                 FROM ops_jobs.job_ingest
-                WHERE status = 'pending'
-                  AND kind = ANY(%s)
+                WHERE id IN (SELECT id FROM candidate)
+                  AND status = 'pending'
                 ORDER BY priority DESC, created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
                 """,
-                (list(kinds),),
+                (list(kinds), fan, fan),
             )
             row = cur.fetchone()
             if row is None:

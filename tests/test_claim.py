@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from bifrost_market_data.worker import claim as claim_mod
 from bifrost_market_data.worker.claim import (
     JobRow,
     claim_job,
@@ -96,8 +97,13 @@ def test_claim_job_returns_none_when_empty() -> None:
     conn = _FakeConn(fetch_results=[None])
     assert claim_job(conn, ["stock_daily"]) is None
     assert conn.committed
-    assert "FOR UPDATE SKIP LOCKED" in conn.cur.statements[0][0]
-    assert conn.cur.statements[0][1] == (["stock_daily"],)
+    sql, params = conn.cur.statements[0]
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    # Candidates come from one bounded scan per kind, so the index that leads
+    # with `kind` is usable; ordering them afterwards keeps priority semantics.
+    assert "CROSS JOIN LATERAL" in sql and "unnest(%s::text[])" in sql
+    assert "ORDER BY priority DESC, created_at ASC" in sql
+    assert params == (["stock_daily"], claim_mod.CLAIM_FAN, claim_mod.CLAIM_FAN)
 
 
 def test_claim_job_selects_and_updates() -> None:
@@ -111,7 +117,11 @@ def test_claim_job_selects_and_updates() -> None:
     assert conn.committed
     assert len(conn.cur.statements) == 2
     assert "UPDATE" in conn.cur.statements[1][0]
-    assert conn.cur.statements[0][1] == (["stock_daily", "ticker_sync"],)
+    assert conn.cur.statements[0][1] == (
+        ["stock_daily", "ticker_sync"],
+        claim_mod.CLAIM_FAN,
+        claim_mod.CLAIM_FAN,
+    )
 
 
 def test_claim_job_empty_kinds() -> None:
@@ -174,3 +184,17 @@ def test_claim_rolls_back_on_error() -> None:
     with pytest.raises(RuntimeError):
         claim_job(conn, ["stock_daily"])
     assert conn.rolled_back
+
+
+def test_claim_fan_is_wide_enough_for_the_worker_pool() -> None:
+    """SKIP LOCKED needs more candidates than there are workers, or every one
+    of them races for the same head of the queue."""
+    assert claim_mod.CLAIM_FAN >= 32
+
+    conn = _FakeConn(fetch_results=[None])
+    claim_job(conn, ["option_daily"], fan=8)
+    assert conn.cur.statements[0][1] == (["option_daily"], 8, 8)
+
+    conn = _FakeConn(fetch_results=[None])
+    claim_job(conn, ["option_daily"], fan=0)  # never a zero-row candidate set
+    assert conn.cur.statements[0][1] == (["option_daily"], 1, 1)
