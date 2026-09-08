@@ -42,7 +42,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 | P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | ✅ Plugin 0.11.1 + Dagster 0.67.0 已部署（验收观察中） | 2026-09-06 |
 | P2.5 Doctor | 手动自检 + 一键修复 + 可执行的 Agent 报告 + 每晚自愈：`GET /market/doctor` / `POST /market/doctor/heal`；Console Doctor 面板；MCP `market_data_doctor` / `market_data_heal`；Dagster `market_self_heal`（00:45 UTC 周二–六） | ✅ Plugin 0.12.0 + Dagster 0.68.1 | 2026-09-06 |
 | P3 模型 | `snapshot_ts` 重定义为观测时间（保留列名与主键形状）；OI 从快照派生、退役 gap-heal；job 幂等键按 session；健康判定按会话覆盖率 | ✅ Plugin 0.13.1 + Research 0.92.0（Owner 2026-09-08 批准方案 A） | 2026-09-08 |
-| P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；Financials & Ratios 全量；国债收益率；Research staging 契约修正 | ⏳ | — |
+| P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；国债收益率；Research staging 契约修正 | 🔄 Plugin 0.15.0 + Research 0.93.0 已发布，回填运行中（Owner 2026-09-08 批准 A/A） | 2026-09-08 |
 
 ### P1 改动摘要（0.10.3）
 
@@ -123,6 +123,17 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 **P3 收尾（0.14.0）**：三项补齐。① 分页可续跑——`_paginate` 支持从 vendor cursor 起跑，超过 `max_pages` 时把剩余部分作为带 cursor 的续跑 job 入队（深度上限 20）；payload 只存 cursor token，不存 vendor URL。② 保留期按交易会话计（`option_snapshot_keep_sessions: 90`），假期与长周末不再悄悄缩短窗口。③ 新增收盘护栏：EOD job 若目标是今天且尚未收盘（16:00 NY），返回 `skipped: session_open`——盘中数据不得盖上收盘锚点，那和 P3 修掉的是同一类谎。
 
 **存储影响**：修好后每会话存全部约 115,618 个活跃合约（原来只有约 40% 落对位置），约 35MB/会话、90 天保留约 2.1GB。vendor 调用量不变——这些合约本来每次就全量下载了，只是存错了地方。
+
+### P4 挖掘（0.15.0 / Research 0.93.0，Owner 批准回填 A + 日内 A）
+
+**Owner 决策**：期权回填 = watchlist ∪ SPY/QQQ/IWM/SPX ∪ M7，2 年，行权价 ±30%、每合约最多定价最后 90 天；日内链快照 10:30 / 13:00 / 15:30 ET，日内行保留 30 天（EOD 仍 90 个会话）。
+
+- **股票日线回填**：`stock_daily_grouped` 按交易日各一个 job，2021-09-01 → 2025-05-31 共 978 个。分区扩到 5 年（y2021–y2027）。**最早 6 天（2021-09-01～09-08）返回「past historical entitlements」**——Stocks Starter 是 5 年滚动窗口，今天的边界正好是 2021-09-09，这不是缺陷；doctor 认得这类错误，不会去重试。滚动窗口意味着最老的一天每天都在过期。
+- **期权历史回填**：新 kind `option_backfill_plan`，按「标的 × 到期月」切分（26 标的 × 24 月 = 624 个计划 job）。实测 SPY / SPX 两年内各有 5 万+ 合约，单个请求走不完，所以计划器只负责枚举一个月、套用 ±30% / DTE≤90 过滤、批量入队 `option_daily`。行权价基准取合约定价窗口起点当天的标的收盘价——**因此必须等股票回填完成再跑**，否则拿不到 2025-06 之前的现价，过滤会失效。取不到现价时保留合约而不是丢弃。
+- **日内链快照**：复用 P3 的观测时间模型（payload 带 `intraday` + `observed_at`），所以日内行与 16:00 的 EOD 行共存而不抢主键。trim 按「不等于 16:00 NY」识别日内行，给它们单独的 30 天时钟。Dagster 三个调度走 **America/New_York** 时区，固定 UTC cron 会随夏令时漂一小时。
+- **国债收益率**：新表 `raw_market.treasury_yield`（7 个期限，`/fed/v1/treasury-yields`，任何套餐免费）。已回填 2021-09-01 起 1,251 行。Research 的期权模型此前把无风险利率写死。
+- **回填执行状态（2026-09-08）**：股票日线 978 个 job 在跑；期权计划器 624 个已排。**其中 99 个旧月份（到期在 2025-09 之前）在股票回填补到那段之前就跑掉了**，它们拿不到现价因而保留了全部行权价而不是 ±30% —— 多拉数据不是少拉，代价是额外的 vendor 调用。剩余 187 个旧月份计划器已撤下，待股票回填完成后重新触发。
+- **Research staging 契约修正**：`stg_ratios` 原来是硬编码的空表（注释说 vendor 没有 ratios 报表——自从插件按日全市场拉取后就不成立了，实测 2026-09-04 有 4,791/4,797 个标的带 `return_on_equity`）。`stg_short_volume` / `stg_short_interest` 读的是 camelCase 键，payload 里从来没有，所以每一列都是 null；真实键是 snake_case，且 `short_volume_ratio` 是百分数而模型契约写的是比例。`mart_sepa_fundamental_ext` 把 ratios 过滤成 `period_type='quarterly'`，而 ratios 是按日的，匹配不到任何行。`short_pct_float` 保持 null 并写明原因：流通股数不在当前订阅内（float 端点 404），依赖它的两个 SEPA 情绪信号因此静默。
 
 ---
 

@@ -1,15 +1,33 @@
 # Option history backfill program — Wave LO-5
 
-> **Premise corrected 2026-09-06.** The table below assumed `tier: starter` meant
-> 5 requests/minute. The Owner's plan is paid Options Starter: **unlimited calls,
-> rolling 2-year window** (2024-08 aggregates → 403). A 22-symbol × 2-year backfill
-> is one night, not weeks. This program is superseded by
-> `docs/SUBSCRIPTION_FOCUS_PROGRAM.md` Phase P4; `worker/backfill.py` is still a
-> stub (passes the underlying as `option_ticker`) and must be rewritten first.
+> **Superseded 2026-09-08 by `docs/SUBSCRIPTION_FOCUS_PROGRAM.md` Phase P4, which
+> is implemented and running.** This file is kept for the decision history; the
+> tables below describe a world with a 5-requests-per-minute free tier that the
+> Owner never had.
 
-Owner decision required before unsuspending `k8s/cronjob-option-backfill.yaml`.
+## How the backfill actually works now
 
-See also [`bifrost-research/docs/BACKTEST_DATA_COVERAGE.md`](../../bifrost-research/docs/BACKTEST_DATA_COVERAGE.md).
+`worker/backfill.py`'s stub (it passed the underlying where an option ticker
+belonged) is retired in favour of a worker job kind, because the enumeration is
+far too big for an API request: SPY and SPX each list more than 50,000
+contracts in a two-year window.
+
+- **`option_backfill_plan`** — one job per underlying per expiry month. It
+  enumerates that month's contracts (`expired=true`), keeps those whose strike
+  is within ±30% of the underlying's close at the start of the contract's
+  pricing window, and bulk-enqueues one `option_daily` job per surviving
+  contract covering at most that contract's last 90 days of life. Measured:
+  NVDA's August 2026 expiries are 1,752 contracts, of which 1,008 survive the
+  strike filter.
+- **Order matters.** The strike filter reads `raw_market.stock_daily`, so the
+  five-year grouped-daily stock backfill has to land first. A month planned
+  before its spot prices exist keeps every strike instead of the band — more
+  data than intended, not less, but it costs vendor calls.
+- **Fire it** with `POST /market/ingest/enqueue-slot {"slot": "option-backfill",
+  "force": true}`. The slot has no cron: it is an Owner-run one-off, and the
+  ingest dashboard does not score it for adherence.
+
+## Historical decision record (superseded)
 
 ## Options
 
