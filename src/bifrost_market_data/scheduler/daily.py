@@ -351,6 +351,57 @@ def load_watchlist_symbols(
     return sorted(set(symbols))
 
 
+#: Research publishes the option universe as a rule (research.option_universe:
+#: resident / core / edge). When a slot is configured with `universe: research`
+#: the option slots enumerate that list instead of the watchlist, with the tier
+#: deciding priority and the row deciding how much history to backfill.
+RESEARCH_UNIVERSE_QUERY = """
+SELECT symbol, tier, history_months
+FROM research.option_universe
+ORDER BY CASE tier WHEN 'resident' THEN 0 WHEN 'core' THEN 1 ELSE 2 END, symbol
+""".strip()
+
+#: Added to the slot's base priority so a resident name is claimed before a
+#: core name, and both before an edge name or the standing backfill.
+TIER_PRIORITY_BUMP = {"resident": 3, "core": 2, "edge": 1}
+
+
+def load_research_universe(conn: Any) -> list[dict[str, Any]]:
+    """`[{symbol, tier, history_months}]` from research.option_universe, or [] when unreadable.
+
+    Empty means "fall back to the watchlist": a database without the table, or
+    one where Research has not run the rule yet, must not stall the option
+    slots.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(RESEARCH_UNIVERSE_QUERY)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — the watchlist path remains
+        logger.warning("research.option_universe unreadable; option slots use the watchlist: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym, tier, months = row.get("symbol"), row.get("tier"), row.get("history_months")
+        else:
+            sym, tier, months = (list(row) + [None, None, None])[:3]
+        if not sym:
+            continue
+        out.append(
+            {
+                "symbol": str(sym).strip().upper(),
+                "tier": str(tier or "edge").strip().lower(),
+                "history_months": int(months or 12),
+            }
+        )
+    return out
+
+
 def _option_contract_underlyings(conn: Any, *, limit: int = 200) -> list[str]:
     """Fallback symbol set when Trade watchlist is not on Golden Source."""
     try:
@@ -844,13 +895,33 @@ def enqueue_slot(
         symbols = load_watchlist_symbols(conn, cfg)
     else:
         symbols = []
+
+    # Research publishes the option universe as a rule (three tiers, no hand
+    # list). An option slot configured with `universe: research` enumerates that
+    # list; the watchlist stays as the fallback for a database where the table
+    # is empty or absent, so the slot never stalls.
+    tier_of: dict[str, str] = {}
+    months_of: dict[str, int] = {}
+    if slot_key in ("option-refresh", "option-backfill") and str(scfg.get("universe") or "").lower() == "research":
+        universe = load_research_universe(conn)
+        if universe:
+            symbols = [u["symbol"] for u in universe]
+            tier_of = {u["symbol"]: u["tier"] for u in universe}
+            months_of = {u["symbol"]: u["history_months"] for u in universe}
+        else:
+            logger.warning("universe=research but research.option_universe is empty; using the watchlist")
+
+    def _tier_pri(sym: str) -> int | None:
+        bump = TIER_PRIORITY_BUMP.get(tier_of.get(sym, ""))
+        return None if bump is None else priority + bump
     jobs: list[dict[str, Any]] = []
     specs: list[tuple[str, dict[str, Any], int, int]] = []
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
         # Collected here, written in one statement below.
-        specs.append((kind, payload, pri if pri is not None else priority, 3))
-        jobs.append({"kind": kind, "payload": payload, "id": None, "deduped": True})
+        effective = pri if pri is not None else priority
+        specs.append((kind, payload, effective, 3))
+        jobs.append({"kind": kind, "payload": payload, "id": None, "deduped": True, "priority": effective})
 
     if slot_key == "stock-eod":
         for sym in symbols:
@@ -893,7 +964,9 @@ def enqueue_slot(
         dte = int(scfg.get("dte") or 90)
         for sym in union_iv_radar_benchmarks(symbols, cfg):
             storage = storage_underlying(sym)
-            for back in range(months):
+            # An edge name carries a year of history, a core or resident name
+            # two; the row says which, the slot default covers the watchlist.
+            for back in range(months_of.get(sym, months)):
                 first = _month_start(day, back)
                 last = _month_end(first)
                 _add(
@@ -905,6 +978,7 @@ def enqueue_slot(
                         "strike_pct": strike_pct,
                         "dte": dte,
                     },
+                    pri=_tier_pri(sym),
                 )
 
     elif slot_key == "universe-daily":
@@ -930,18 +1004,30 @@ def enqueue_slot(
         batch_size = int(scfg.get("batch_size") or 12)
         benches = union_iv_radar_benchmarks([], cfg)
         bench_set = set(benches)
+        # Names the universe lists but nothing has enumerated yet go first,
+        # up to a per-run cap — that is how a 500-name core ramps in over a
+        # day or two of six-hourly runs without a one-off trigger, and how an
+        # edge newcomer gets its chain the next session. Re-listing the same
+        # name before its job finished is a no-op: jobs dedup on payload hash.
+        # The rotation below then keeps everyone fresh.
+        max_new = int(scfg.get("max_new_per_run") or 0)
+        fresh: list[str] = []
+        if symbols and max_new > 0 and tier_of:
+            have = set(_option_contract_underlyings(conn, limit=10000))
+            fresh = [s for s in symbols if s not in have and s not in bench_set][:max_new]
+        fresh_set = set(fresh)
         if symbols:
-            # Deterministic rotation so the whole watchlist is covered over days.
+            # Deterministic rotation so the whole list is covered over days.
             offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
             rotated = symbols[offset:] + symbols[:offset]
-            rest = [s for s in rotated if s not in bench_set]
-            batch = list(benches) + rest[: max(0, batch_size)]
+            rest = [s for s in rotated if s not in bench_set and s not in fresh_set]
+            batch = list(benches) + fresh + rest[: max(0, batch_size)]
         else:
             batch = list(benches)
         # The contract handler upserts option_expiration from the same page
         # walk, so a separate expiration job would re-download the catalogue.
         for sym in batch:
-            _add("option_contract", {"underlying": sym, "expired": False})
+            _add("option_contract", {"underlying": sym, "expired": False}, pri=_tier_pri(sym))
 
     elif slot_key == "option-bars":
         bars_syms = union_iv_radar_benchmarks(symbols, cfg)

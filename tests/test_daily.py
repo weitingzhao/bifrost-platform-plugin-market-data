@@ -153,6 +153,14 @@ class _DailyCursor:
                         picked.extend((c[0],) for c in cands[:per_right])
             self.parent._fetchall = sorted(picked)
             self.parent._fetchone = None
+        elif "from research.option_universe" in q:
+            self.parent._fetchall = list(self.parent.research_universe)
+            self.parent._fetchone = None
+        elif "group by upper(trim(underlying))" in q:
+            # _option_contract_underlyings: every underlying with any contract row.
+            seen = sorted({und for _t, und, *_r in self.parent.option_contracts})
+            self.parent._fetchall = [(u,) for u in seen]
+            self.parent._fetchone = None
         elif "from market.option_contract" in q or "from raw_market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
             as_of = params[1] if params and len(params) > 1 else None
@@ -270,12 +278,14 @@ class _DailyConn:
         spots: dict[str, float] | None = None,
         voided: list[str] | None = None,
         watchlist_cache: list[str] | None = None,
+        research_universe: list[tuple[str, str, int]] | None = None,
     ) -> None:
         self.session_evidence = session_evidence
         self.evidence_probes: list[Any] = []
         self.spots = spots or {}
         self.voided = voided or []
         self.watchlist_cache = watchlist_cache or []
+        self.research_universe = research_universe or []
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
@@ -1209,3 +1219,88 @@ def test_enqueue_option_backfill_plans_one_job_per_underlying_month() -> None:
     windows = sorted((j["payload"]["expiry_gte"], j["payload"]["expiry_lte"]) for j in result["jobs"])
     assert windows == [("2026-07-01", "2026-07-31"), ("2026-08-01", "2026-08-31"), ("2026-09-01", "2026-09-30")]
     assert all(j["payload"]["strike_pct"] == 0.25 and j["payload"]["dte"] == 60 for j in result["jobs"])
+
+
+# ── Research option universe (blueprint C-F5) ──────────────────────────────
+
+
+def _universe_rows() -> list[tuple[str, str, int]]:
+    return [("SPY", "resident", 24), ("AAPL", "core", 24), ("MSFT", "core", 24), ("HALO", "edge", 12)]
+
+
+def test_option_refresh_enumerates_the_research_universe_by_tier() -> None:
+    conn = _DailyConn(research_universe=_universe_rows(), option_contracts=[])
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        watchlist_symbols=["TSLA"],  # ignored: the universe is the rule
+        scheduler_cfg={"slots": {"option-refresh": {"priority": 4, "universe": "research", "max_new_per_run": 10}}},
+    )
+    by = {j["payload"]["underlying"]: j for j in r["jobs"]}
+    assert set(by) == {"SPY", "QQQ", "IWM", "AAPL", "MSFT", "HALO"}, "universe plus benchmarks, not the watchlist"
+    assert "TSLA" not in by
+    pri = {u: j["priority"] for u, j in by.items()}
+    assert pri["SPY"] == 4 + 3 and pri["AAPL"] == 4 + 2 and pri["HALO"] == 4 + 1
+    assert pri["QQQ"] == 4, "a benchmark not in the table keeps the slot priority"
+
+
+def test_option_refresh_ramps_new_names_first_within_the_daily_cap() -> None:
+    rows = [(f"N{i:03d}", "core", 24) for i in range(30)] + [("AAPL", "core", 24)]
+    # AAPL already has contracts; the thirty N-names do not.
+    conn = _DailyConn(research_universe=rows, option_contracts=[("O:AAPL260117C00200000", "AAPL", date(2026, 1, 17))])
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 1}}},
+    )
+    unds = [j["payload"]["underlying"] for j in r["jobs"]]
+    # Order is the contract: benchmarks, then the capped newcomers, then the
+    # rotation. (batch_size 0 reads as unset and falls back to the default.)
+    assert len(unds) == 3 + 12 + 1, "benchmarks + capped newcomers + one rotated name"
+    newcomers = unds[3:15]
+    assert all(u.startswith("N") for u in newcomers), "the cap bounds the ramp"
+    assert "AAPL" not in newcomers, "a name that already has contracts is not a newcomer"
+
+
+def test_option_backfill_takes_history_months_from_the_row() -> None:
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(
+        conn,
+        "option-backfill",
+        target_date=date(2026, 9, 9),
+        scheduler_cfg={"slots": {"option-backfill": {"universe": "research", "months": 24}}},
+    )
+    per = {}
+    for j in r["jobs"]:
+        per[j["payload"]["underlying"]] = per.get(j["payload"]["underlying"], 0) + 1
+    assert per["HALO"] == 12, "an edge name carries a year"
+    assert per["AAPL"] == 24 and per["SPY"] == 24, "core and resident carry two"
+    assert per["QQQ"] == 24, "a benchmark outside the table gets the slot default"
+
+
+def test_option_refresh_falls_back_to_the_watchlist_when_the_universe_is_empty() -> None:
+    conn = _DailyConn(research_universe=[])
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        watchlist_symbols=["TSLA", "NVDA"],
+        scheduler_cfg={"slots": {"option-refresh": {"universe": "research", "batch_size": 5}}},
+    )
+    unds = {j["payload"]["underlying"] for j in r["jobs"]}
+    assert {"TSLA", "NVDA", "SPY", "QQQ", "IWM"} == unds
+
+
+def test_option_refresh_ignores_the_universe_unless_configured() -> None:
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2026, 9, 9),
+        watchlist_symbols=["TSLA"],
+        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 5}}},
+    )
+    unds = {j["payload"]["underlying"] for j in r["jobs"]}
+    assert "HALO" not in unds and "TSLA" in unds

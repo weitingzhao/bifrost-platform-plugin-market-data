@@ -39,6 +39,12 @@ data:
           cron: "20 */6 * * *"
           priority: 4
           batch_size: 12
+          # Blueprint C-F5: enumerate research.option_universe (resident / core /
+          # edge), not the watchlist. Names the table lists but nothing has
+          # enumerated go first, up to this many per run; the table's tier sets
+          # the priority. Empty table → the watchlist, so the slot never stalls.
+          universe: research
+          max_new_per_run: 150
         option-bars:
           cron: "45 22 * * *"
           priority: 4
@@ -101,6 +107,8 @@ data:
           # score it for adherence. Fire it with POST /market/ingest/enqueue-slot.
           priority: 1
           months: 24
+          # Per-row history from research.option_universe (12 for edge, 24 otherwise).
+          universe: research
           strike_pct: 0.30
           dte: 90
         fundamentals-market:
