@@ -133,6 +133,19 @@ class _DailyCursor:
                 rows.append((r["symbol"], r["trade_date"], r["expiry"], r["atm_iv"]))
             self.parent._fetchall = rows
             self.parent._fetchone = None
+        elif "/* snapshot-window */" in q:
+            # (syms, syms, as_of, n_exp) → (symbol, close, nth expiry)
+            syms = set(params[0]); as_of = params[2]; n_exp = int(params[3])
+            rows = []
+            for und in sorted(syms):
+                spot = self.parent.spots.get(und)
+                if spot is None:
+                    continue
+                exps = sorted({c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of})
+                if len(exps) >= n_exp:
+                    rows.append((und, spot, exps[n_exp - 1]))
+            self.parent._fetchall = rows
+            self.parent._fetchone = None
         elif "/* near-spot */" in q:
             # (syms, as_of, syms, as_of, n_exp, per_right)
             syms = set(params[0])
@@ -1371,3 +1384,52 @@ def test_bulk_insert_dedups_across_chunks_within_a_batch() -> None:
     specs = [("k", {"n": i % 10}, 1, 3) for i in range(4500)]  # ten distinct payloads, repeated
     ids = enq.insert_jobs_bulk(conn, specs)
     assert sum(1 for i in ids if i is not None) == 10
+
+
+
+def test_snapshot_params_carry_the_near_the_money_window() -> None:
+    from bifrost_market_data.polygon import endpoints as ep
+
+    p = ep.options_snapshot_params(strike_gte=170.0, strike_lte=230.0, expiration_lte="2026-10-16")
+    assert p["strike_price.gte"] == 170.0 and p["strike_price.lte"] == 230.0
+    assert p["expiration_date.lte"] == "2026-10-16"
+    assert "strike_price" not in p
+    assert ep.options_snapshot_params() == {"limit": 250}, "no window means a whole chain, as before"
+
+
+def test_eod_pipeline_snapshots_the_universe_with_windows_by_tier() -> None:
+    d = date(2026, 9, 9)
+    contracts = [
+        ("O:AAPL261016C00200000", "AAPL", date(2026, 10, 16), 200.0),
+        ("O:AAPL261120C00200000", "AAPL", date(2026, 11, 20), 200.0),
+        ("O:AAPL261218C00200000", "AAPL", date(2026, 12, 18), 200.0),
+        ("O:AAPL270115C00200000", "AAPL", date(2027, 1, 15), 200.0),
+        ("O:SPY261016C00500000", "SPY", date(2026, 10, 16), 500.0),
+    ]
+    conn = _DailyConn(
+        research_universe=[("SPY", "resident", 24), ("AAPL", "core", 24), ("HALO", "edge", 12)],
+        option_contracts=contracts,
+        spots={"AAPL": 200.0, "SPY": 500.0},  # HALO has no close: whole chain, safer than a wrong bound
+    )
+    r = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=d,
+        watchlist_symbols=["TSLA"],
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5, "universe": "research", "expiries": 3, "strike_pct": 0.15}}},
+    )
+    snaps = {j["payload"]["underlying"]: j for j in r["jobs"] if j["kind"] == "option_snapshot"}
+    assert set(snaps) == {"SPY", "QQQ", "IWM", "AAPL", "HALO"}, "the universe plus benchmarks, not the watchlist"
+    aapl = snaps["AAPL"]["payload"]
+    assert aapl["strike_gte"] == 170.0 and aapl["strike_lte"] == 230.0, "±15% of spot"
+    assert aapl["expiration_lte"] == "2026-12-18", "the third listed expiry"
+    assert "strike_gte" not in snaps["SPY"]["payload"], "resident names are snapshotted whole"
+    assert "strike_gte" not in snaps["HALO"]["payload"], "no close, no bound"
+    assert snaps["SPY"]["priority"] == 5 + 3 and snaps["AAPL"]["priority"] == 5 + 2 and snaps["HALO"]["priority"] == 5 + 1
+
+
+def test_eod_pipeline_without_the_universe_is_unchanged() -> None:
+    conn = _DailyConn(research_universe=[("HALO", "edge", 12)])
+    r = enqueue_slot(conn, "eod-pipeline", target_date=date(2026, 9, 9), watchlist_symbols=["TSLA"], scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}})
+    snaps = {j["payload"]["underlying"] for j in r["jobs"] if j["kind"] == "option_snapshot"}
+    assert "TSLA" in snaps and "HALO" not in snaps

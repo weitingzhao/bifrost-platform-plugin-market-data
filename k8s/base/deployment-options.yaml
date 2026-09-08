@@ -11,7 +11,7 @@ metadata:
     bifrost.dev/session-label: Market Data Options
     bifrost.dev/session-group: market-data
 spec:
-  replicas: 4
+  replicas: 8
   strategy:
     type: RollingUpdate
     rollingUpdate:

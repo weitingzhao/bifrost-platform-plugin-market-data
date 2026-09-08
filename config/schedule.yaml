@@ -27,6 +27,13 @@ scheduler:
     eod-pipeline:
       cron: "0 22 * * *"
       priority: 5
+      # Blueprint C-F5: snapshot research.option_universe. Resident names whole;
+      # core and edge get the near-the-money window (next `expiries` expiries,
+      # strikes within ±strike_pct of spot) — a whole chain at 575 names is
+      # ~130 GB of 90-session retention, the window about 18 GB.
+      universe: research
+      expiries: 3
+      strike_pct: 0.15
     universe-daily:
       cron: "0 22 * * *"
       priority: 3

@@ -354,12 +354,18 @@ class PolygonClient:
         contract_type: str | None = None,
         max_pages: int = 500,
         cursor: str | None = None,
+        strike_gte: float | None = None,
+        strike_lte: float | None = None,
+        expiration_lte: str | None = None,
     ) -> dict[str, Any]:
         """GET ``/v3/snapshot/options/{underlying}`` with pagination."""
         path = ep.options_snapshot_path(underlying)
         params = ep.options_snapshot_params(
             expiration_date=expiration_date,
             contract_type=contract_type,
+            strike_gte=strike_gte,
+            strike_lte=strike_lte,
+            expiration_lte=expiration_lte,
         )
         return await self._paginate(path, params, max_pages=max_pages, start_cursor=cursor)
 

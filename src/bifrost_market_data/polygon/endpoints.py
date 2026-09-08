@@ -100,7 +100,14 @@ def options_snapshot_params(
     expiration_date: str | None = None,
     contract_type: str | None = None,
     limit: int = 250,
+    strike_gte: float | None = None,
+    strike_lte: float | None = None,
+    expiration_lte: str | None = None,
 ) -> dict[str, Any]:
+    """Chain snapshot query. The range filters are the near-the-money window:
+    a whole chain is 2,000–28,000 contracts per underlying per session, and at
+    575 underlyings that is ~130 GB of ninety-session retention. Filtering at
+    the vendor keeps both the call and the table proportionate."""
     params: dict[str, Any] = {"limit": min(int(limit), 250)}
     if strike_price is not None:
         params["strike_price"] = strike_price
@@ -108,6 +115,12 @@ def options_snapshot_params(
         params["expiration_date"] = expiration_date
     if contract_type:
         params["contract_type"] = contract_type
+    if strike_gte is not None:
+        params["strike_price.gte"] = strike_gte
+    if strike_lte is not None:
+        params["strike_price.lte"] = strike_lte
+    if expiration_lte:
+        params["expiration_date.lte"] = expiration_lte
     return params
 
 

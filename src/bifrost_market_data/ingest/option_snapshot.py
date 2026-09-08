@@ -170,6 +170,13 @@ def _contract_parts(item: Mapping[str, Any], storage: str) -> dict[str, Any] | N
     }
 
 
+def _opt_float(v: Any) -> float | None:
+    try:
+        return None if v is None or v == "" else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
     payload = job.payload or {}
     underlying = str(payload.get("underlying") or "").strip().upper()
@@ -225,11 +232,16 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
                 "underlying": storage,
             }
 
+    # The near-the-money window rides in the payload and survives cursor
+    # continuations, which copy every key but the cursor itself.
     data = await client.fetch_options_snapshot(
         api_underlying,
         expiration_date=expiration_date,
         contract_type=contract_type,
         cursor=payload.get("cursor") or None,
+        strike_gte=_opt_float(payload.get("strike_gte")),
+        strike_lte=_opt_float(payload.get("strike_lte")),
+        expiration_lte=str(payload["expiration_lte"]) if payload.get("expiration_lte") else None,
     )
     results = list(data.get("results") or [])
     snap_rows: list[tuple[Any, ...]] = []

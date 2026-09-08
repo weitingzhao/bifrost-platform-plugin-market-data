@@ -662,6 +662,69 @@ def option_trades_universe(
     return sorted([*keep, must])
 
 
+def load_snapshot_windows(
+    conn: Any,
+    symbols: Sequence[str],
+    *,
+    as_of: date,
+    expiries: int = 3,
+    strike_pct: float = 0.15,
+) -> dict[str, tuple[float, float, str]]:
+    """Per underlying: (strike_gte, strike_lte, expiration_lte) — the near-the-money window.
+
+    Spot is the latest close; the expiry bound is the ``expiries``-th listed
+    expiry at or after ``as_of``. A name with no close or no listed expiries
+    gets no window and is snapshotted whole, which is the safer failure: an
+    unbounded chain costs storage, a wrong bound costs the data.
+    """
+    syms = sorted({str(x).strip().upper() for x in symbols if str(x).strip()})
+    if not syms:
+        return {}
+    n_exp = max(1, int(expiries))
+    pct = max(0.0, float(strike_pct))
+    out: dict[str, tuple[float, float, str]] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                /* snapshot-window */
+                WITH spot AS (
+                  SELECT DISTINCT ON (symbol) symbol, close
+                  FROM raw_market.stock_daily
+                  WHERE symbol = ANY(%s) AND close IS NOT NULL AND close > 0
+                  ORDER BY symbol, bar_date DESC
+                ),
+                exp AS (
+                  SELECT underlying, expiry,
+                         DENSE_RANK() OVER (PARTITION BY underlying ORDER BY expiry) AS erank
+                  FROM (SELECT DISTINCT underlying, expiry FROM raw_market.option_contract
+                        WHERE underlying = ANY(%s) AND expiry >= %s) d
+                )
+                SELECT s.symbol, s.close, e.expiry
+                FROM spot s JOIN exp e ON e.underlying = s.symbol AND e.erank = %s
+                """,
+                (syms, syms, as_of, n_exp),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — no window beats a wrong one
+        logger.warning("snapshot window lookup failed; snapshotting whole chains: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym, close, expiry = row.get("symbol"), row.get("close"), row.get("expiry")
+        else:
+            sym, close, expiry = (list(row) + [None, None, None])[:3]
+        if not sym or close is None or expiry is None:
+            continue
+        spot = float(close)
+        out[str(sym).upper()] = (round(spot * (1 - pct), 2), round(spot * (1 + pct), 2), expiry.isoformat())
+    return out
+
+
 def load_option_tickers_near_spot(
     conn: Any,
     underlyings: Sequence[str],
@@ -961,7 +1024,7 @@ def enqueue_slot(
     # is empty or absent, so the slot never stalls.
     tier_of: dict[str, str] = {}
     months_of: dict[str, int] = {}
-    if slot_key in ("option-refresh", "option-backfill") and str(scfg.get("universe") or "").lower() == "research":
+    if slot_key in ("option-refresh", "option-backfill", "eod-pipeline") and str(scfg.get("universe") or "").lower() == "research":
         universe = load_research_universe(conn)
         if universe:
             symbols = [u["symbol"] for u in universe]
@@ -991,9 +1054,27 @@ def enqueue_slot(
         # open interest from the same response, so no second download.
         # Index spot (I:SPX) is not enqueued: it needs an Indices plan.
         pipeline_syms = union_iv_radar_benchmarks(symbols, cfg)
+        # Research universe: resident names are snapshotted whole — that is the
+        # watchlist and the benchmarks, the chains the Loop reads today. Core
+        # and edge get the near-the-money window: the next few expiries and a
+        # strike band around spot, the same shape option-bars already prices.
+        windows: dict[str, tuple[float, float, str]] = {}
+        if tier_of:
+            bounded = [s for s in pipeline_syms if tier_of.get(s) in ("core", "edge")]
+            windows = load_snapshot_windows(
+                conn,
+                bounded,
+                as_of=day,
+                expiries=int(scfg.get("expiries") or 3),
+                strike_pct=float(scfg.get("strike_pct") or 0.15),
+            )
         for sym in pipeline_syms:
             storage = storage_underlying(sym)
-            _add("option_snapshot", {"underlying": storage, "trade_date": day_s})
+            payload: dict[str, Any] = {"underlying": storage, "trade_date": day_s}
+            win = windows.get(sym)
+            if win is not None:
+                payload["strike_gte"], payload["strike_lte"], payload["expiration_lte"] = win
+            _add("option_snapshot", payload, pri=_tier_pri(sym))
 
     elif slot_key == "intraday-chain":
         # Several observations a session: the model keys each row to the instant
