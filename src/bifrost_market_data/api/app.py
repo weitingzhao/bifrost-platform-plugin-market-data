@@ -18,6 +18,7 @@ from bifrost_market_data.api.fundamentals import router as fundamentals_router
 from bifrost_market_data.api.fundamentals_db import router as fundamentals_db_router
 from bifrost_market_data.api.fundamentals_sepa import router as fundamentals_sepa_router
 from bifrost_market_data.api.deps import run_startup_schema_guard
+from bifrost_market_data.api.coverage_dimensions import router as dimensions_router
 from bifrost_market_data.api.docs import router as docs_router
 from bifrost_market_data.api.doctor import router as doctor_router
 from bifrost_market_data.api.health import router as health_router
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
         ),
         lifespan=_lifespan,
     )
+    app.include_router(dimensions_router)
     app.include_router(docs_router)
     app.include_router(health_router)
     # Mount under /market (P5 contract). Order: static prefixes before /stocks/{symbol}.
