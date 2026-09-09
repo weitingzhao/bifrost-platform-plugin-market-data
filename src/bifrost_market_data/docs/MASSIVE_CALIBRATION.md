@@ -58,13 +58,13 @@ status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
 
 | 编号 | 状态 | 证据 |
 |---|---|---|
-| C-B1 | ⚠️ | **同时存在 4 套"应该有多少标的"的分母**：`api/coverage.py:253` watchlist（默认 80）、`doctor.py:287-289` optionable watchlist ∪ 基准、`quality.py:156` 硬编码常数 4000、`api/readiness_summary.py:44-52` `v_us_equity_universe`。没有契约表。 |
+| C-B1 | ⚠️ | 契约表已落地（`contracts.py`，19 个数据集各自声明档位与分母），`/market/coverage/dimensions` 只读它。仍是 ⚠️：**旧的 4 套分母还在原地**——`api/coverage.py:253` watchlist（默认 80）、`doctor.py:287-289` optionable watchlist ∪ 基准、`quality.py:156` 硬编码常数 4000、`api/readiness_summary.py:44-52` `v_us_equity_universe`。收敛它们是下一步。 |
 | C-B2 | ✅ | `GET /market/coverage/dimensions` 同时报意图达成率与口径利用率，两者分列不合并。`/market/capabilities`（`subscription.py:105`）回答的是"哪些能力被实现了"，不是"持有了多少"；Console 的 Capability 面板 `capPct` 是手工标注的 implemented/partial 计数。 |
 | C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（`doctor.py:463-469`，error 含 `not entitled` 时不给 retry 处方）与可重试失败。但"vendor 无此数据"与"未排程"两类未区分：`ops_jobs.symbol_source_void`（`ddl.py:644`）记了前者却不在任何覆盖率分母里体现。 |
-| C-D1 | ✅ | 深度目标散落在代码常量里：`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`、`subscription.py:23-43` 的窗口字符串只是展示文案。无契约表。 |
-| C-D2 | ✅ | 唯一的深度面板 `StockDepthSection.tsx` 只覆盖 watchlist 的 80 个标的（`MarketDataCoverageTab.tsx:126-131` 不带 limit → 服务端默认 80），靠 N×2 并发拉取，且主视觉是缺口数（`:322-323, 342`）而非深度——"往回多少年"只出现在 tooltip 与折叠表格里。**期权深度零面板。** |
+| C-D1 | ✅ | 每个数据集在 `contracts.py` 的 `DepthTarget` 里声明窗口，取自订阅口径（stocks 5 年 / options 2 年 / financials 2009）或 tier 要求（24/12 个月），并带上"为什么是这个数"。旧的散落常量（`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`）仍在各自的调用点，但不再是深度的事实源。 |
+| C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。旧的 `StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代。 |
 | C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
-| C-D4 | ❌ | 回填进度不可见。`IngestDailyVolume` 显示的是 job 条数（09-08 那 356 万），无法回答"买到了多少个标的的多少个月"。 |
+| C-D4 | ⚠️ | `option_daily` 一行现在就是进度条：45/575 广度、58/70 达标、中位 24 个月（§2b）。仍是 ⚠️：它答得出"买到了多少"，答不出"按当前速率还要多久"——那需要把队列消化速率接进来。 |
 | C-F1 | ❌ | **"当期 session" 有 4 个定义**：`doctor.py:244-261` `resolve_session`（19:30 NY）、`quality.py` `fetch_completed_trading_days`（排除今天）、`api/ingest_dashboard.py` 的 22:30 ET grace、`api/readiness_summary.py:39-40` `_STALE_DAYS=7`。 |
 | C-F2 | ⚠️ | Doctor 的 `STALENESS`（`doctor.py:69-75`）已按 slot 分别声明（calendar 48h、option-refresh 12h、corporate 168h、fundamentals-rotate 48h），是四套里最接近契约的一套；但它只覆盖 5 个 slot，其余数据集共用一个 24/72 小时。 |
 | C-F3 | ❌ | **4 套阈值并存**：`quality.py:14-16`（24h / 周末 72h）、`doctor.py:69-75`（12/48/168h）、platform-api 的 `freshnessWeekendMaxAgeH`、Console `dataVitalsModel.ts:9-10`（12h / 72h）。同一个数据集在不同面板上可以显示不同健康状态。 |
