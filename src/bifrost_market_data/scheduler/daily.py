@@ -1536,7 +1536,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # CNPG / ClusterIP occasionally resets the first TCP handshake from short-lived
     # CronJob pods; retry briefly before failing the Job.
-    kw = postgres_connect_kwargs(cfg)
+    # The `bifrost` role defaults to statement_timeout=2s, which is a writer
+    # safety net sized for handler batches, not for the slots. Three separate
+    # failures traced back to this one omission: the job trim's batched delete,
+    # the intraday snapshot delete, and CREATE TABLE ... PARTITION OF, each
+    # cancelled at two seconds while the API and the workers — which do raise it
+    # — ran the same statements fine. The slots raise it once, here.
+    kw = postgres_connect_kwargs(cfg, statement_timeout="120s")
     conn = None
     last_err: Exception | None = None
     for attempt in range(1, 6):

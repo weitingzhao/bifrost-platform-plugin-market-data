@@ -1656,3 +1656,20 @@ def test_the_evidence_probe_excludes_intraday_in_sql() -> None:
     assert captured[0] == "set local statement_timeout = '30s'"
     assert "not coalesce((payload ->> 'intraday')::boolean, false)" in captured[1]
     assert "status <> 'failed'" in captured[1]
+
+
+def test_the_slot_cli_raises_its_statement_budget() -> None:
+    """Three separate failures traced back to this one omission.
+
+    The `bifrost` role defaults to statement_timeout=2s — a writer safety net
+    sized for handler batches, not for slots. The job trim's batched delete, the
+    intraday snapshot delete and CREATE TABLE ... PARTITION OF were each
+    cancelled at two seconds while the API and workers, which do raise it, ran
+    the same statements fine.
+    """
+    import inspect
+
+    from bifrost_market_data.scheduler import daily
+
+    src = inspect.getsource(daily.main)
+    assert 'postgres_connect_kwargs(cfg, statement_timeout=' in src

@@ -1065,6 +1065,10 @@ def ensure_partitions(conn: _Connection) -> None:
     callers — a second copy in the scheduler would be a list that drifts.
     """
     with conn.cursor() as cur:
+        # Creating a partition on a large parent takes a lock and builds the
+        # indexes; the role's 2s default cancels it. Defence in depth — the
+        # callers raise it too, but this must work whoever opens the connection.
+        cur.execute("SET LOCAL statement_timeout = '120s'")
         _ensure_partitions(cur)
     conn.commit()
 
