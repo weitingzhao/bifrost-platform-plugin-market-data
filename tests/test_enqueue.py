@@ -42,6 +42,9 @@ class _EnqueueCursor:
                 self.parent._fetchone = (self.parent.next_id,)
         elif "delete from" in q:
             self.rowcount = self.parent.delete_rowcount
+        elif ") capped" in q:
+            # The cheap "are we over the backstop" count.
+            self.parent._fetchone = (self.parent.finished_rows,)
         elif "order by finished_at desc" in q:
             # The row-cap cutoff: the finished_at of the keep_max-th newest job.
             self.parent._fetchone = self.parent.cutoff
@@ -62,8 +65,16 @@ class _EnqueueCursor:
 
 
 class _EnqueueConn:
-    def __init__(self, *, delete_rowcount: int = 0, cutoff: Any = ("2026-09-02",)) -> None:
+    def __init__(
+        self,
+        *,
+        delete_rowcount: int = 0,
+        cutoff: Any = ("2026-09-02",),
+        finished_rows: int = 0,
+    ) -> None:
         self.cutoff = cutoff
+        # How many finished rows the cheap cap check should report.
+        self.finished_rows = finished_rows
         self.statements: list[tuple[str, Any]] = []
         self.committed = 0
         self.rolled_back = 0
@@ -118,7 +129,7 @@ def test_insert_job_dedup_returns_none() -> None:
 
 def test_trim_old_jobs() -> None:
     """One age pass and one cap pass, each stopping on a short batch."""
-    conn = _EnqueueConn(delete_rowcount=3)
+    conn = _EnqueueConn(delete_rowcount=3, finished_rows=5001)
     n = trim_old_jobs(conn, keep_hours=48, keep_max=5000, batch_size=20)
     assert n == 6  # a short batch ends each pass: 3 by age + 3 by the row cap
     deletes = [st for st in conn.statements if "DELETE FROM ops_jobs.job_ingest" in st[0]]
@@ -134,7 +145,7 @@ def test_trim_keeps_deleting_until_a_batch_comes_up_short() -> None:
     60-second budget cancelled, so trim stopped completing at all and 1.26M
     finished rows stayed on the table.
     """
-    conn = _EnqueueConn(delete_rowcount=20)
+    conn = _EnqueueConn(delete_rowcount=20, finished_rows=5001)
     calls = {"n": 0}
     original = conn.cursor
 
@@ -190,7 +201,7 @@ def test_trim_carries_its_own_statement_budget() -> None:
 
 def test_trim_row_cap_orders_the_way_the_index_does() -> None:
     """`finished_at DESC NULLS LAST, id DESC` matched no index and seq-scanned."""
-    conn = _EnqueueConn(delete_rowcount=0)
+    conn = _EnqueueConn(delete_rowcount=0, finished_rows=40_001)
     trim_old_jobs(conn, keep_hours=48, keep_max=40000)
     cutoff = [st[0] for st in conn.statements if "OFFSET" in st[0]]
     assert cutoff, "no cutoff query ran"
@@ -266,3 +277,18 @@ def test_snapshot_retention_does_not_depend_on_dropping_a_partition() -> None:
     sql = [st[0] for st in conn.statements if "option_snapshot" in st[0]][0]
     assert "DROP TABLE" not in sql
     assert "16:00" not in sql  # the long window takes the EOD rows too
+
+
+def test_the_row_cap_costs_nothing_when_it_is_not_engaged() -> None:
+    """Asking for the 5,000,000th newest row walks the whole index.
+
+    After a mass delete its dead entries make that a heap fetch per row —
+    measured at over 30 seconds against 144k live rows, which cancelled the
+    whole trim. The backstop must not charge for itself when it is not needed.
+    """
+    conn = _EnqueueConn(delete_rowcount=0, cutoff=("2026-09-02",))
+    trim_old_jobs(conn, keep_hours=48, keep_max=5_000_000)
+    counted = [st for st in conn.statements if "LIMIT %s\n            ) capped" in st[0]]
+    assert counted, "the cheap count did not run"
+    offsets = [st for st in conn.statements if "OFFSET" in st[0]]
+    assert offsets == [], "the cutoff ran even though the cap was not engaged"

@@ -174,6 +174,28 @@ TRIM_MAX_ROWS = 5_000_000
 TRIM_STATEMENT_TIMEOUT = "30s"
 
 
+def _over_cap(conn: _Connection, keep_max: int) -> bool:
+    """Whether finished rows exceed the backstop, without counting them all."""
+    with conn.cursor() as cur:
+        cur.execute(f"SET LOCAL statement_timeout = '{TRIM_STATEMENT_TIMEOUT}'")
+        cur.execute(
+            """
+            SELECT count(*)::bigint FROM (
+                SELECT 1 FROM ops_jobs.job_ingest
+                WHERE status IN ('done', 'failed')
+                LIMIT %s
+            ) capped
+            """,
+            (int(keep_max) + 1,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None:
+        return False
+    n = int((row[0] if not isinstance(row, Mapping) else next(iter(row.values()))) or 0)
+    return n > int(keep_max)
+
+
 def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
     """``finished_at`` of the keep_max-th newest finished job, or None.
 
@@ -341,7 +363,12 @@ def trim_old_jobs(
             if n < batch_size:
                 break
 
-        cutoff = _finished_cutoff(conn, keep_max)
+        # Only pay for the cutoff when the backstop is actually engaged. Asking
+        # for the 5,000,000th newest row walks the whole index, and after a mass
+        # delete its dead entries turn that into a heap fetch per row: measured
+        # at over 30 seconds against 144k live rows. The count below stops as
+        # soon as it has seen one row more than the cap.
+        cutoff = _finished_cutoff(conn, keep_max) if _over_cap(conn, keep_max) else None
         while cutoff is not None and monotonic() - started < budget_sec:
             n = _delete(
                 """
