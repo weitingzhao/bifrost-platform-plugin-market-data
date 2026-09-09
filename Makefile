@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry apply-roles apply-ownership rollback-ownership run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
+.PHONY: install-dev test lint db-init db-init-dry apply-roles ownership-sql apply-ownership rollback-ownership run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
 
 install-dev:
 	pip install -e ".[dev]"
@@ -19,16 +19,18 @@ db-init-dry:
 apply-roles:
 	python scripts/init_schema.py --roles-only
 
-# Elevated: give the plugin's role ownership of raw_market / ops_jobs so it can
-# create and drop its own partitions. Needs superuser POSTGRES_* credentials.
-# Without it, ensure_month_partitions starts failing in 2026-10 and inserts for
-# 2027-01 have nowhere to land.
-apply-ownership:
-	psql "$${POSTGRES_ADMIN_URL:?set POSTGRES_ADMIN_URL to an elevated connection string}" \
-	  -v ON_ERROR_STOP=1 -f scripts/fix_object_ownership.sql
+# Ownership of raw_market / ops_jobs, without which the plugin cannot create or
+# drop its own partitions — and inserts for 2027-01 have nowhere to land.
+# Needs a role that already owns the objects, so apply refuses as the plugin's
+# own role and tells you what to run; --ownership-sql prints it for that session.
+ownership-sql:
+	python scripts/init_schema.py --ownership-sql
 
-# Undo the above. scripts/rollback_object_ownership.sql is a snapshot of who
-# owned what before; regenerate it first if the catalogue has moved since.
+apply-ownership:
+	python scripts/init_schema.py --ownership-only
+
+# Undo. scripts/rollback_object_ownership.sql is a snapshot of who owned what
+# before; regenerate it if the catalogue has moved since it was taken.
 rollback-ownership:
 	psql "$${POSTGRES_ADMIN_URL:?set POSTGRES_ADMIN_URL to an elevated connection string}" \
 	  -v ON_ERROR_STOP=1 -f scripts/rollback_object_ownership.sql

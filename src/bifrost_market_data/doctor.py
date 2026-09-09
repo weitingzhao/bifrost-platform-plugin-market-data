@@ -376,7 +376,7 @@ def _partition_runway(conn: Any) -> list[tuple[str, date | None, bool]] | None:
     own. On 2026-09-09 every partition in raw_market was owned by ``postgres``
     while the plugin runs as ``bifrost``, so ``ensure_month_partitions`` would
     have started failing three months before the first insert had nowhere to go.
-    ``scripts/fix_object_ownership.sql`` is the elevated fix.
+    ``make ownership-sql`` emits the fix for a privileged session.
     """
     try:
         with conn.cursor() as cur:
@@ -876,7 +876,7 @@ def run_doctor(
             " The plugin owns the table and builds them ahead automatically."
             if owned
             else " The plugin does not own the table and cannot create the next one —"
-            " run scripts/fix_object_ownership.sql from an elevated session."
+            " run `make ownership-sql` and pipe it into a privileged session."
         )
         findings.append(
             Finding(
@@ -906,8 +906,8 @@ def run_doctor(
                 f"{len(unowned)} partitioned table(s) in raw_market are owned by another "
                 f"role, so the plugin can neither drop nor create their partitions: "
                 f"{', '.join(unowned)}. Retention deletes rows instead, but the next "
-                f"partition cannot be built — run scripts/fix_object_ownership.sql from "
-                f"an elevated session.",
+                f"partition cannot be built — run `make ownership-sql` and pipe it "
+                f"into a privileged session.",
                 session=session_s,
             )
         )

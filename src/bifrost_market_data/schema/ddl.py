@@ -1094,3 +1094,127 @@ MARKET_VIEWS: tuple[str, ...] = (
     "v_option_snapshot_with_stock",
     "stock_financials",
 )
+
+
+#: The schemas the plugin owns (spine D13). features.* belongs to
+#: bifrost-research and dw_stock.* to its dbt models; ownership never reaches
+#: them.
+PLUGIN_SCHEMAS: tuple[str, ...] = ("raw_market", "ops_jobs")
+
+#: The role the plugin connects as, and therefore the role that must own the
+#: plugin's objects. Postgres checks ownership, not grants, for DDL.
+PLUGIN_ROLE = "bifrost"
+
+
+def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
+    """SQL making ``role`` the owner of everything in the plugin's schemas.
+
+    Ownership is part of the schema, not an operational afterthought: an object
+    the plugin does not own is one it cannot drop, re-create, or partition. The
+    162 relations in ``raw_market`` are owned by ``postgres`` only because the
+    first migration happened to run as that role, and the consequence is dated —
+    ``ensure_month_partitions`` builds three months ahead, so from 2026-10 it
+    fails, and inserts for 2027-01 have nowhere to land.
+
+    Returned rather than executed because applying it needs a role that owns the
+    objects, which the plugin's own role by definition does not. Same shape as
+    ``--wave9-sql``: the tool generates it, a privileged session runs it.
+
+    Idempotent — an object already owned by ``role`` is skipped.
+    """
+    if not role.isidentifier():
+        raise ValueError(f"role must be a bare identifier, got {role!r}")
+    schemas = ", ".join(f"'{s}'" for s in PLUGIN_SCHEMAS)
+    return (
+        f"""
+        DO $ownership$
+        DECLARE
+          target_role CONSTANT text := '{role}';
+          obj     record;
+          changed int := 0;
+          skipped int := 0;
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_role) THEN
+            RAISE EXCEPTION 'role % does not exist; apply create_roles.sql first', target_role;
+          END IF;
+
+          FOR obj IN
+            SELECT n.nspname AS schema_name, c.relname AS object_name, c.relkind,
+                   pg_get_userbyid(c.relowner) AS current_owner
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ({schemas}) AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
+            ORDER BY n.nspname, c.relname
+          LOOP
+            IF obj.current_owner = target_role THEN
+              skipped := skipped + 1;
+              CONTINUE;
+            END IF;
+            -- ALTER TABLE covers ordinary tables, partitions and partitioned
+            -- tables; sequences and views need their own verbs.
+            IF obj.relkind = 'S' THEN
+              EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I',
+                             obj.schema_name, obj.object_name, target_role);
+            ELSIF obj.relkind = 'v' THEN
+              EXECUTE format('ALTER VIEW %I.%I OWNER TO %I',
+                             obj.schema_name, obj.object_name, target_role);
+            ELSIF obj.relkind = 'm' THEN
+              EXECUTE format('ALTER MATERIALIZED VIEW %I.%I OWNER TO %I',
+                             obj.schema_name, obj.object_name, target_role);
+            ELSE
+              EXECUTE format('ALTER TABLE %I.%I OWNER TO %I',
+                             obj.schema_name, obj.object_name, target_role);
+            END IF;
+            changed := changed + 1;
+          END LOOP;
+          RAISE NOTICE 'relations: % reassigned, % already owned by %',
+                       changed, skipped, target_role;
+
+          changed := 0;
+          skipped := 0;
+          FOR obj IN
+            SELECT p.oid::regprocedure AS signature,
+                   pg_get_userbyid(p.proowner) AS current_owner
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname IN ({schemas})
+            ORDER BY 1
+          LOOP
+            IF obj.current_owner = target_role THEN
+              skipped := skipped + 1;
+              CONTINUE;
+            END IF;
+            EXECUTE format('ALTER FUNCTION %s OWNER TO %I', obj.signature, target_role);
+            changed := changed + 1;
+          END LOOP;
+          RAISE NOTICE 'functions: % reassigned, % already owned by %',
+                       changed, skipped, target_role;
+
+          FOR obj IN
+            SELECT n.nspname AS schema_name, pg_get_userbyid(n.nspowner) AS current_owner
+            FROM pg_namespace n WHERE n.nspname IN ({schemas})
+          LOOP
+            IF obj.current_owner <> target_role THEN
+              EXECUTE format('ALTER SCHEMA %I OWNER TO %I', obj.schema_name, target_role);
+              RAISE NOTICE 'schema % reassigned to %', obj.schema_name, target_role;
+            END IF;
+          END LOOP;
+        END
+        $ownership$
+        """.strip(),
+        # Objects the new owner creates from here must stay reachable by the
+        # consumers. Ownership does not change existing grants; this covers the
+        # ones made after it.
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA raw_market "
+        "GRANT SELECT ON TABLES TO market_reader",
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA raw_market "
+        "GRANT ALL ON TABLES TO data_writer",
+        f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA ops_jobs "
+        "GRANT ALL ON TABLES TO data_writer",
+    )
+
+
+def apply_ownership(conn: _Connection, role: str = PLUGIN_ROLE) -> None:
+    """Run ``ownership_statements``. Needs a role that owns the objects."""
+    with conn.cursor() as cur:
+        for stmt in ownership_statements(role):
+            cur.execute(stmt)
+    conn.commit()

@@ -19,8 +19,11 @@ from bifrost_market_data.schema.ddl import (  # noqa: E402
     MARKET_ANALYTICS_TABLES,
     MARKET_TABLES,
     MARKET_VIEWS,
+    PLUGIN_ROLE,
     apply_ddl,
+    apply_ownership,
     apply_wave8_migrations,
+    ownership_statements,
 )
 
 _ROLES_SQL = _ROOT / "scripts" / "create_roles.sql"
@@ -78,11 +81,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the Wave 9 option_snapshot migration as SQL (run it as the DB superuser)",
     )
     parser.add_argument(
+        "--ownership-sql",
+        action="store_true",
+        help=(
+            "Print the SQL that makes the plugin's role own raw_market / ops_jobs "
+            "(run it as a role that owns them; the plugin's own role cannot)"
+        ),
+    )
+    parser.add_argument(
+        "--ownership-only",
+        action="store_true",
+        help="Apply the ownership SQL (no DDL). Needs a role that owns the objects.",
+    )
+    parser.add_argument(
         "--wave8-only",
         action="store_true",
         help="Only apply Wave 8 migrations (OI partition, financials split, drop data_ops shim)",
     )
     args = parser.parse_args(argv)
+
+    if args.ownership_sql:
+        # Same idiom as --wave9-sql: the tool generates it, a privileged session
+        # runs it. Ownership cannot be granted to oneself.
+        print("BEGIN;")
+        for stmt in ownership_statements():
+            print(f"{stmt.strip().rstrip(';')};")
+        print("COMMIT;")
+        return 0
 
     if args.wave9_sql:
         from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_VIEW_SQL
@@ -120,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         with psycopg.connect(**kw) as conn:
             if args.roles_only:
                 _apply_roles(conn)
+            elif args.ownership_only:
+                apply_ownership(conn)
             elif args.wave8_only:
                 apply_wave8_migrations(conn)
             else:
@@ -127,11 +154,27 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.skip_roles:
                     _apply_roles(conn)
     except Exception as e:
+        if args.ownership_only and "must be owner" in str(e):
+            # The plugin's role cannot grant itself ownership; that is the whole
+            # point of the command. Say what to run instead of a bare traceback.
+            print(
+                f"Ownership apply refused: {e}\n"
+                "The connecting role does not own these objects. Run as one that "
+                "does — on a CloudNativePG cluster with superuser access disabled "
+                "that means peer authentication inside the instance:\n"
+                "  python scripts/init_schema.py --ownership-sql | \\\n"
+                "    kubectl -n data exec -i <cnpg-primary> -c postgres -- \\\n"
+                "      psql -d bifrost_golden_source -v ON_ERROR_STOP=1 -f -",
+                file=sys.stderr,
+            )
+            return 1
         print(f"DDL failed: {e}", file=sys.stderr)
         return 1
 
     if args.roles_only:
         print("Roles apply finished.")
+    elif args.ownership_only:
+        print(f"Ownership of raw_market + ops_jobs is now {PLUGIN_ROLE}'s.")
     elif args.wave8_only:
         print("Wave 8 migrations applied (idempotent).")
     else:
