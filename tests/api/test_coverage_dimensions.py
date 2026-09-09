@@ -258,8 +258,9 @@ def test_only_one_refresh_runs_per_key(wired: dict[str, Any]) -> None:
     mod.threading.Thread = _Thread  # type: ignore[assignment]
     try:
         assert mod._start_refresh("all", list(CONTRACTS)) is True
-        assert mod._start_refresh("all", list(CONTRACTS)) is False  # already in flight
-        assert len(calls) == 1
+        # A second caller is told a refresh is in flight, not that none is.
+        assert mod._start_refresh("all", list(CONTRACTS)) is True
+        assert len(calls) == 1  # but only one thread runs
     finally:
         mod.threading.Thread = original  # type: ignore[assignment]
         assert real_threading is mod.threading

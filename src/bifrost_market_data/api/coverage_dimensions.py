@@ -333,10 +333,15 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
 
 
 def _start_refresh(key: str, wanted: list[DatasetContract]) -> bool:
-    """Kick off a background recompute unless one is already running for this key."""
+    """Ensure a recompute is in flight for this key; True when one is.
+
+    Answers "is a refresh running", not "did I start one" — a caller arriving
+    while another is already scanning was told computing=false and shown an
+    empty page it had no reason to poll again.
+    """
     with _REFRESH_LOCK:
         if _REFRESHING.get(key):
-            return False
+            return True
         _REFRESHING[key] = True
 
     def run() -> None:
