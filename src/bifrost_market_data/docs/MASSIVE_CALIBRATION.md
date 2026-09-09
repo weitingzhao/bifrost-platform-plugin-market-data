@@ -1,5 +1,5 @@
 ---
-version: 2026-09-09.10
+version: 2026-09-09.11
 updated: 2026-09-09
 status: 四轴齐了（新增厚度）· 分母已收敛 · Doctor 巡检 575 个名字 · 深度仍是最大的一块
 ---
@@ -63,7 +63,7 @@ status: 四轴齐了（新增厚度）· 分母已收敛 · Doctor 巡检 575 �
 | C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（error 含 `not entitled` 时不给 retry 处方）与可重试失败，**并新增了第三类**：期权链的存在性检查只对"vendor 列出了未到期合约"的标的判定——2026-09-08 的 session 里 CIX / EA / ISTR / NVR / SENEA 五个名字没有任何快照行，但它们本来就没有活合约，报成缺口是误判。仍是 ⚠️：`ops_jobs.symbol_source_void`（`ddl.py:644`）记的"vendor 无此数据"还不在任何覆盖率分母里体现。 |
 | C-D1 | ✅ | 每个数据集在 `contracts.py` 的 `DepthTarget` 里声明窗口，取自订阅口径（stocks 5 年 / options 2 年 / financials 2009）或 tier 要求（24/12 个月），并带上"为什么是这个数"。旧的散落常量（`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`）仍在各自的调用点，但不再是深度的事实源。 |
 | C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。`StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代——**更正**：它的 `Math.max(rows.length, 1)` 是 `ScoreRing` 的分区总数（ready + thin + blocked 三块加起来就是取回的行数），不是覆盖率分母，不该被当成假分母；真正的问题是页面没说这 80 个是 20,695 个里的抽样。 |
-| C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
+| C-D3 | ⚠️ | `doctor.py` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90` 也正确记录了"95% 结构上不可达"。**ratios 端点忽略 `date`、历史只能向前累积**这条边界现在写在契约里（`DepthTarget("forward_only", why=...)`）。仍是 ⚠️，而且原因变了：**这条边界曾被错误地推广**——`short_volume` 也标了 `forward_only`，是从 ratios 抄的，实测它认 `?date` 且有两年窗口，已改为 `rolling_days` 并补齐。计划边界必须逐个实测，不能按邻居推定。 |
 | C-D4 | ✅ | `option_daily` 一行是进度条（广度、达标数、深度中位数，§2b），而"按当前速率还要多久"由 `ops_jobs.queue_sample` 回答：每 5 分钟一行，记深度、入队量、消化量、最老待跑年龄与 handler 的 p50/p95，Console 的 Queue history 面板画成曲线（6h/24h/3d/7d）。这也补上了此前唯一的历史来源——`job_ingest` 的 trim 把已完成行压到 40,000 条，按现在的速率只有约 15 分钟。 |
 | C-F1 | ✅ | `session.py` 是唯一定义（19:30 NY 锚点 + 交易日历），`doctor` 与 `quality` 都调用它，交易日探针可注入以保留既有测试接缝。`ingest_dashboard` 的 22:30 ET 是 **cron 宽限窗口**，回答"该点火了吗"，与"该持有哪个 session"是两个问题，刻意保留。 |
 | C-F2 | ✅ | 19 个数据集各自在契约里声明截止时间；`quality.check_freshness` 按维度取 `deadline_for_dimension()`，返回体里每个维度带自己的 `deadline_hours`，平铺的 `max_age_hours` 已为 `None`。线上实测：stock_daily / option_snapshot / option_open_interest 各 2h，calendar 48h。**0.19.5 修掉一处遗漏**：`fundamentals_market` 用 `session_is_today` 当截止时间的替身，而它在纽约午夜翻面——夏令时是 04:00 UTC，比 04:30 UTC 发布槽早半小时。2026-09-09 04:10 UTC 实测到这条假 critical，现按契约声明的 30h 判定。 |
@@ -72,7 +72,7 @@ status: 四轴齐了（新增厚度）· 分母已收敛 · Doctor 巡检 575 �
 | C-C1 | ✅ | 发布节奏在契约里声明（`DatasetContract.cadence`：`session` / `settlement`），只有 `session` 的才拿交易日历判缺失。实测依据：最近 120 天的中位间隔，`short_interest` 15 天（双月结算），`ratios` / `short_volume` / `stock_daily` / `treasury_yield` 各 1 天。第一次读数时没声明节奏，`short_interest` 被误报 56 天缺失。 |
 | C-C2 | ✅ | 缺失日与稀薄日分列，`days_absent` / `days_thin` 两个字段，Console 的 Continuity 列写成「1 missing · 1 thin of 25」。 |
 | C-C3 | ✅ | 稀薄对**前序产出**判定（`continuity.thin_days`，前 10 天中位数的 50%）。试错三次：全窗口中位数把 09-08 宇宙 26→575 的台阶判成 25 个洞；居中邻域仍误判台阶两侧；前序才对。实测 `option_open_interest` 从 25 个误报降到 8 个真的，同时保住 `option_daily` 2026-07-18 只有 1 行（此前 45,534）。 |
-| C-C4 | ✅ | 读取时计算（`/market/coverage/dimensions` 第四轴），不依赖事后记录——记录只能看见打开之后。编译耗时从 94 秒升到 155 秒，在后台缓存后面。 |
+| C-C4 | ✅ | 读取时计算（`/market/coverage/dimensions` 第四轴），不依赖事后记录——记录只能看见打开之后。编译耗时 94 → 155 秒，`short_volume` 回填到 700 万行后升到 286 秒，都在后台缓存后面。 |
 | C-G1 | ⚠️ | `DataInventoryStrip` 的三个假分母已修：Option/Snapshots 用过 `max(watchlist, 实际值)`（不可能小于被测量的数），Stock Day 是"大于零即满格"的存在标志画成满条。现在都除以契约表的分母，且**没有分母时不画条**而是明说。**更正 2026-09-09.2 的一处误判**：`OptionCoverageSection.tsx:191` 的 `max(1, ...)` 是条形图的相对刻度（`contractCount / maxContracts`），不是覆盖率分母，不该被列为假分母。本轮逐一核对了 Console 的 market-data 面板：`ScoreRing total=` 的十来处 `Math.max(x.length, 1)` 都是分区总数，不是覆盖率分母。**查出并修好第五处真的假分母**：`analyticsDemandModel.ts` 的 `optionTarget = max(watchlist, snapshot, oi, 1)`（分母把被测量的数算了进去，采到 1 个也是满格）、`inputOf` 的 `target = count` 默认值（分母就是分子）、`CS_FUND_TARGET = 5000` 手写常数、`Stock daily` 的"大于零即 100%"——四处全部改为除以 `/market/coverage/dimensions` 的契约分母，**没有分母就不画条**。它同时喂着 Overview 页与 `massiveAgentPack`，是这一类里影响面最大的一处。**同一个错误在同一处又犯了一次并当场修掉**：把 Stock daily 的表指向全市场分母时，
 分子取的是 `stock_daily` 有史以来见过的 20,695 个标的，分母是今天活跃的 5,317 个 ticker，卡片上写着"20,695 / 5,317"（不夹逼就是 389%，正是四条契约首读时的同一个毛病）。
 改成两端都取自 `/market/coverage/dimensions` 已经算好的同源读数：持有 5,182 / 口径 5,317，范围外 7,336。教训是同一条：**比率的分子必须取自它自己的分母集合**。 |
@@ -85,20 +85,25 @@ status: 四轴齐了（新增厚度）· 分母已收敛 · Doctor 巡检 575 �
 
 | 数据集 | 节奏 | 有数据的天 | 缺失 | 稀薄 | 最薄的一天 |
 |---|---|---|---|---|---|
-| `stock_daily` | session | 81 | 0 | 0 | — |
-| `ratios` | session | 22 | 0 | 0 | — |
-| `short_volume` | session | 12 | **68** | 0 | — |
+| `stock_daily` | session | 82 | 0 | 0 | — |
+| `ratios` | session | 23 | 0 | 0 | — |
+| `short_volume` | session | 81 | 0 | 0 | — （补完后；补之前是 12 在场 / 68 缺失） |
 | `short_interest` | settlement | 7 | 0 | 0 | — |
 | `treasury_yield` | session | 80 | 0 | 0 | — |
 | `option_snapshot` | session | 24 | 1 | 1 | 2026-08-18：9,716（此前约 22,480） |
 | `option_open_interest` | session | 56 | 0 | 8 | 2026-07-24：384（此前约 2,027） |
-| `option_daily` | session | 81 | 0 | 3 | 2026-07-18：**1**（此前约 45,534） |
+| `option_daily` | session | 81 | 0 | 4 | 2026-07-18：**1**（此前约 45,534） |
 | `stock_minute` | session | 22 | 1 | 0 | — |
 | `option_minute` | session | 22 | 1 | 5 | 2026-09-03：8（此前约 180） |
 
 **为什么需要这一轴**：同一时刻 `stock_daily` 的另外三轴是 20,695 个标的、五年历史、当日新鲜——全绿。而最近 90 天里有 **7 个普通交易日只有 15–19 行**（正常 12,400）：`universe-daily` 的全市场调用失败、`stock-eod` 的自选股照跑。doctor 当天必然报了 crit，但它是**无记忆的逐 session 检查**，那天过去洞就永久隐形。这七天已用 7 个 `universe-daily --date` 任务补回，上表的 0 是补完之后的读数。
 
-**最大的一处是 `short_volume`**：12 天有数据、68 天缺失，中位间隔 1 天而最大间隔 99 天——2026-05-14 起整整三个月没有采到，此前没有任何维度看得见。
+**最大的一处是 `short_volume`，已补完**。这一处比首读时看到的更糟也更好修：全表只有 17 个日期，其中 15 个各只有 1 行（退役的逐标的路径残留），真正全市场的只有两天。
+契约把它标成 `forward_only`（只能向前累积）是**从 `ratios` 抄来的、没验证过**——`ratios` 的端点确实忽略 `?date` 只返回最新，而短量不是：实测 `?date=2026-06-15` 返回的就是 6 月 15 日的行，窗口约 2 年（2024-09-16 有、2023-09-15 空）。契约已改为 `rolling_days` 730 天，496 个交易日已回填，**501/501 全部齐了**，700 万行 / 4.6 GB，0 失败。
+
+回填只发 `short_volume_market` 单个 kind：走 `--slot fundamentals-market` 会连带发 `ratios_market`（日期被忽略，纯浪费）和 `short_interest_market`（结算频率，45 天回看已覆盖）。优先级给 4，因为 `fundamentals-market` 默认的 2 和期权回填同级，按创建时间排永远排不上。
+
+**这一轴的已知盲区**：前序基线只能发现「一直好好的然后掉下去」，发现不了「从来就没好过」。那 15 个各 1 行的日子是均匀的坏，没有健康邻居可比；广度也看不见它，因为广度数的是「有史以来见过的标的」，两个好日子就贡献了 5,216 个。补法可能是给全市场日频数据集在契约里声明每 session 的行数下限（类比 doctor 的 `STOCK_DAILY_MIN_SESSION_SYMBOLS`），未做。
 
 ## 2b. 三维首次读数（2026-09-09，`/market/coverage/dimensions`）
 
@@ -224,6 +229,7 @@ status: 四轴齐了（新增厚度）· 分母已收敛 · Doctor 巡检 575 �
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.11 | 2026-09-09 | 厚度轴照出的最大一处已修：`short_volume` 原本只有 2 天真数据，契约把它误标为不可回填（抄自 `ratios`）。改为 `rolling_days` 730 天并补齐 496 个交易日，501/501。 |
 | 2026-09-09.10 | 2026-09-09 | 第四轴：厚度（C-C1–C-C4）。蓝图升到 v1.1。首次读数见 §2c——`stock_daily` 的 7 个空洞已补，`short_volume` 三个月的缺口首次可见。 |
 | 2026-09-09.9 | 2026-09-09 | 队列吞吐 666→2,400/分（满负荷被当成空闲）；trim 分批后恢复；新增 `ops_jobs.queue_sample` 与 Console 的 Queue history 曲线，C-D4 转 ✅（✅ 7 / ⚠️ 6 / ❌ 1）。详见 §3.1c。 |
 | 2026-09-09.8 | 2026-09-09 | Console 实测复核：Stock daily 的表把"有史以来的标的"除以"今天活跃的 ticker"，改为同源读数 5,182/5,317；无条的表现在会说清缺的是口径还是数字。Overview 从"blocked 6"变为"ready 6"。 |
