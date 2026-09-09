@@ -40,6 +40,9 @@ class _Cur:
             self._rows = [(s,) for s in self.conn.universe]
         elif self.conn.raise_on and self.conn.raise_on in q:
             raise RuntimeError("statement timeout")
+        elif "count(*)::bigint AS n" in q:
+            # Continuity asks for rows per day, not rows per symbol.
+            self._rows = list(self.conn.per_day)
         elif q.startswith("SELECT max("):
             self._rows = [(self.conn.newest,)]
         elif q.startswith("SELECT DISTINCT"):
@@ -59,7 +62,11 @@ class _Conn:
         raise_on: str | None = None,
         active: list[str] | None = None,
         universe: list[str] | None = None,
+        per_day: list[tuple[date, int]] | None = None,
     ) -> None:
+        self.per_day = per_day if per_day is not None else [
+            (date(2026, 9, 1), 100), (date(2026, 9, 2), 100), (date(2026, 9, 3), 100)
+        ]
         self.per_symbol = per_symbol
         self.active = active if active is not None else ["AAPL", "MSFT"]
         self.universe = universe if universe is not None else ["AAPL", "XYZ"]
@@ -218,8 +225,12 @@ def test_a_boundary_dataset_is_never_scanned_per_symbol(wired: dict[str, Any]) -
     scopes = {"whole-market": {"AAPL"}, "universe": set(), "benchmark-only": set(), "global": set()}
     mod._one(BY_DATASET["raw_market.ratios"], {"whole-market": 1, "scopes": scopes}, TODAY, conn)
 
-    assert not any("GROUP BY" in q for q in conn.queries)
+    # The claim is about the per-symbol scan, not about grouping in general:
+    # continuity groups these same rows by day, which is cheap and is the point.
+    # The per-symbol scan is the one that takes a min() date per group.
+    assert not any("min(" in q and "GROUP BY" in q for q in conn.queries)
     assert any(q.startswith("SELECT DISTINCT") for q in conn.queries)
+    assert any("count(*)::bigint AS n" in q for q in conn.queries), "continuity still ran"
 
 
 def test_a_cold_read_answers_at_once_and_refreshes_behind_itself(

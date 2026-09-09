@@ -206,34 +206,45 @@ def _one(
     if own:
         conn = connect_db(statement_timeout=STATEMENT_TIMEOUT)
     try:
-        per_symbol: list[tuple[str, date | None]] = []
-        if c.symbol_column is None:
-            held_symbols: set[str] = set()
-            held_total = 1
-        else:
-            held_symbols = _held_symbols(conn, c)
-            held_total = len(held_symbols)
-        # A dataset whose depth is a plan boundary has no target to measure
-        # against, so the per-symbol scan would be work done only to discard.
-        # That is most of the cost: short_interest alone is 22,932 symbols.
-        if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
-            per_symbol = _per_symbol_oldest(conn, c)
-        newest = _newest(conn, c)
-        # The fourth axis. Breadth, depth and freshness all read healthy over
-        # seven blank days in stock_daily; only this one looks at the middle.
-        continuity = measure_continuity(
-            conn, c, expected_days=expected_days, statement_timeout=STATEMENT_TIMEOUT
-        )
-        error = None
-    except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
-        logger.warning("coverage dimensions failed for %s: %s", c.dataset, exc)
         try:
-            conn.rollback()
-        except Exception:
-            pass
-        per_symbol, held_symbols, held_total, newest = [], set(), 0, None
-        continuity = {"measured": False, "why": "read failed"}
-        error = str(exc)[:160]
+            per_symbol: list[tuple[str, date | None]] = []
+            if c.symbol_column is None:
+                held_symbols: set[str] = set()
+                held_total = 1
+            else:
+                held_symbols = _held_symbols(conn, c)
+                held_total = len(held_symbols)
+            # A dataset whose depth is a plan boundary has no target to measure
+            # against, so the per-symbol scan would be work done only to discard.
+            # That is most of the cost: short_interest alone is 22,932 symbols.
+            if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
+                per_symbol = _per_symbol_oldest(conn, c)
+            newest = _newest(conn, c)
+            error = None
+        except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
+            logger.warning("coverage dimensions failed for %s: %s", c.dataset, exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            per_symbol, held_symbols, held_total, newest = [], set(), 0, None
+            error = str(exc)[:160]
+
+        # The fourth axis, in a guard of its own. Breadth, depth and freshness
+        # all read healthy over seven blank days in stock_daily and only this
+        # one looks at the middle — but it is the newest of the four, and a
+        # fault in it must not erase three measurements that already succeeded.
+        try:
+            continuity = measure_continuity(
+                conn, c, expected_days=expected_days, statement_timeout=STATEMENT_TIMEOUT
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("continuity failed for %s: %s", c.dataset, exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            continuity = {"measured": False, "why": "read failed"}
     finally:
         if own:
             _close_quietly(conn)

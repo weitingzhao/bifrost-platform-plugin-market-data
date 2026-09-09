@@ -116,6 +116,9 @@ def per_day_counts(
                 (int(window_days),),
             )
             rows = _rows(cur)
+        # Parsing belongs inside the guard too: an unexpected row shape is as
+        # much a failed read as a timeout, and neither may escape.
+        return [(r[0], int(r[1] or 0)) for r in rows if r and r[0] is not None]
     except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
         logger.warning("continuity read failed for %s: %s", table, exc)
         try:
@@ -123,7 +126,6 @@ def per_day_counts(
         except Exception:
             pass
         return None
-    return [(r[0], int(r[1] or 0)) for r in rows if r and r[0] is not None]
 
 
 def measure(
