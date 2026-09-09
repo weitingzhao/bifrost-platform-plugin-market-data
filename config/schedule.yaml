@@ -92,6 +92,9 @@ scheduler:
       cron: "15 2 * * *"
       keep_days: 7
       keep_max: 40000  # ~7 days at 5000 financials/day; adherence evidence must outlive the trim
+      # The job rows are a work queue, not a record. ops_jobs.queue_sample keeps
+      # the throughput series once they are gone.
+      queue_sample_keep_days: 90
       option_trades_keep_days: 30
       # One observation per session, so retention is counted in sessions.
       option_snapshot_keep_sessions: 90

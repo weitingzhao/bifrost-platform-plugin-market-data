@@ -916,7 +916,9 @@ def test_enqueue_calendar_and_trim() -> None:
         "trim",
         scheduler_cfg={"slots": {"trim": {"keep_days": 7, "keep_max": 100}}},
     )
-    assert trim["trimmed"] == 4  # two DELETEs × rowcount 2
+    # One age batch, short of batch_size, so that pass ends. The fake answers
+    # the row-cap cutoff query with nothing, so the cap pass does not run.
+    assert trim["trimmed"] == 2
     assert trim["enqueued"] == 0
 
 

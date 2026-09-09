@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -198,6 +199,64 @@ async def test_run_loop_sleeps_when_idle(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     await stopper
     assert claim_count["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_run_loop_keeps_claiming_at_full_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Full is not idle.
+
+    The loop broke out of its claim burst when every slot was busy, left
+    ``claimed_any`` false, and then took the idle branch — sleeping the whole
+    poll interval at exactly the moment it had the most work to claim. Measured
+    on 2026-09-09: each pod ran five jobs, slept five seconds, repeated, and the
+    fleet held 3.8 of 40 slots busy while 2.4M jobs waited.
+
+    The jobs here outlast the old 0.05s courtesy wait, which is what made the
+    next round see a full pod and fall through to the sleep.
+    """
+    done_ids: list[int] = []
+    seq = itertools.count(1)
+
+    def claim_fn(conn: Any, kinds: list[str]) -> JobRow | None:
+        return _job(job_id=next(seq))
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "bifrost_market_data.worker.loop.mark_done",
+        lambda conn, job_id, result=None: done_ids.append(job_id),
+    )
+    monkeypatch.setattr("bifrost_market_data.worker.loop.mark_failed", lambda *a, **k: None)
+
+    async def slow_handler(job: JobRow) -> dict[str, Any]:
+        await asyncio.sleep(0.05)
+        return {"status": "ok"}
+
+    stop = asyncio.Event()
+
+    async def _stop_soon() -> None:
+        await asyncio.sleep(0.4)
+        stop.set()
+
+    stopper = asyncio.create_task(_stop_soon())
+    await run_loop(
+        pool="stocks",
+        cfg={},
+        shutdown_event=stop,
+        handlers={"stock_daily": slow_handler},
+        health_port=0,
+        connect=_Conn,
+        claim_fn=claim_fn,
+        reclaim_fn=None,
+        poll_interval_sec=5.0,  # the old loop slept this between every round
+        concurrency=2,
+    )
+    await stopper
+    # Two slots turning over every 50ms for 400ms is roughly sixteen jobs. The
+    # old loop finished the first two and then slept until shutdown.
+    assert len(done_ids) > 6, f"only {len(done_ids)} jobs ran — the loop went idle while full"
 
 
 @pytest.mark.asyncio

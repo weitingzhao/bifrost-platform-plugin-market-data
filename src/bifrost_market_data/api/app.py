@@ -31,6 +31,8 @@ from bifrost_market_data.api.option_daily import router as option_daily_router
 from bifrost_market_data.api.option_minute import router as option_minute_router
 from bifrost_market_data.api.options import router as options_router
 from bifrost_market_data.api.pcr import router as pcr_router
+from bifrost_market_data.api.queue_history import router as queue_history_router
+from bifrost_market_data.api.queue_history import start_sampler
 from bifrost_market_data.api.readiness_data import router as readiness_data_router
 from bifrost_market_data.api.readiness_summary import router as readiness_summary_router
 from bifrost_market_data.api.reference import router as reference_router
@@ -47,6 +49,9 @@ async def _lifespan(app: FastAPI):
     # uvicorn owns the handlers here; attach redaction to whatever it made.
     install_redaction()
     run_startup_schema_guard()
+    # Nothing else records what the queue did; job_ingest is trimmed to about an
+    # hour of finished rows.
+    start_sampler()
     yield
 
 
@@ -71,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(doctor_router, prefix=market_prefix)
     app.include_router(chain_by_expiry_router, prefix=market_prefix)
     app.include_router(pcr_router, prefix=market_prefix)
+    app.include_router(queue_history_router, prefix=market_prefix)
     app.include_router(ingest_router, prefix=market_prefix)
     app.include_router(ingest_bars_router, prefix=market_prefix)
     app.include_router(ingest_options_router, prefix=market_prefix)

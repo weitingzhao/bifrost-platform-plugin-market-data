@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from time import monotonic
 from typing import Any, Mapping, Protocol, Sequence
 
 
@@ -147,44 +148,109 @@ def insert_jobs_bulk(
     return [id_by_key.get(key) if key is not None else None for key in positions]
 
 
+#: Rows per delete statement. Measured 2026-09-09 against ops_jobs.job_ingest
+#: with its nine indexes: 20,000 rows in 0.51s, which is the knee — 10,000 costs
+#: nearly as much per statement and 50,000 costs more per row.
+TRIM_BATCH_ROWS = 20000
+#: Wall-clock budget for one trim. The API connection allows 60s; a trim that
+#: cannot finish must stop having made progress, not be cancelled having made
+#: none.
+TRIM_BUDGET_SEC = 45.0
+
+
+def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
+    """``finished_at`` of the keep_max-th newest finished job, or None.
+
+    Written to match ``job_ingest_finished_at`` exactly — one column, DESC, and
+    no NULLS clause, since DESC already means NULLS FIRST. The previous form
+    ordered by ``finished_at DESC NULLS LAST, id DESC``, which no index can
+    serve: it seq-scanned 1.27M rows and spilled a 32MB external sort, 14
+    seconds before deleting a single row. This answers in 60ms.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT finished_at
+            FROM ops_jobs.job_ingest
+            WHERE status IN ('done', 'failed')
+            ORDER BY finished_at DESC
+            OFFSET %s LIMIT 1
+            """,
+            (int(keep_max),),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None:
+        return None
+    return row[0] if not isinstance(row, Mapping) else next(iter(row.values()), None)
+
+
 def trim_old_jobs(
     conn: _Connection,
     *,
     keep_days: int = 7,
     keep_max: int = 5000,
+    batch_size: int = TRIM_BATCH_ROWS,
+    budget_sec: float = TRIM_BUDGET_SEC,
 ) -> int:
-    """Delete finished jobs older than ``keep_days``, then cap total finished rows.
+    """Delete finished jobs older than ``keep_days``, then cap the finished rows.
 
-    Returns number of rows deleted.
+    Both passes delete in bounded, committed batches. The single-statement form
+    was fine while the queue was small and stopped working once it was not: the
+    row cap had to delete 1.23M rows in one statement, which the API's
+    60-second budget cancelled, so trim last completed on 2026-09-08 and 1.26M
+    finished rows stayed on the table. Batching means a backlog cannot outgrow
+    one statement, and a run that hits its budget still leaves the table
+    smaller than it found it.
+
+    Returns the number of rows deleted.
     """
     deleted = 0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM ops_jobs.job_ingest
-                WHERE status IN ('done', 'failed')
-                  AND finished_at IS NOT NULL
-                  AND finished_at < now() - (%s || ' days')::interval
-                """,
-                (int(keep_days),),
-            )
-            deleted += int(getattr(cur, "rowcount", 0) or 0)
+    started = monotonic()
 
-            cur.execute(
+    def _delete(sql: str, params: tuple[Any, ...]) -> int:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            n = int(getattr(cur, "rowcount", 0) or 0)
+        conn.commit()
+        return n
+
+    try:
+        while monotonic() - started < budget_sec:
+            n = _delete(
                 """
                 DELETE FROM ops_jobs.job_ingest
-                WHERE id IN (
-                    SELECT id FROM ops_jobs.job_ingest
+                WHERE ctid IN (
+                    SELECT ctid FROM ops_jobs.job_ingest
                     WHERE status IN ('done', 'failed')
-                    ORDER BY finished_at DESC NULLS LAST, id DESC
-                    OFFSET %s
+                      AND finished_at IS NOT NULL
+                      AND finished_at < now() - (%s || ' days')::interval
+                    LIMIT %s
                 )
                 """,
-                (int(keep_max),),
+                (int(keep_days), int(batch_size)),
             )
-            deleted += int(getattr(cur, "rowcount", 0) or 0)
-        conn.commit()
+            deleted += n
+            if n < batch_size:
+                break
+
+        cutoff = _finished_cutoff(conn, keep_max)
+        while cutoff is not None and monotonic() - started < budget_sec:
+            n = _delete(
+                """
+                DELETE FROM ops_jobs.job_ingest
+                WHERE ctid IN (
+                    SELECT ctid FROM ops_jobs.job_ingest
+                    WHERE status IN ('done', 'failed')
+                      AND finished_at < %s
+                    LIMIT %s
+                )
+                """,
+                (cutoff, int(batch_size)),
+            )
+            deleted += n
+            if n < batch_size:
+                break
     except Exception:
         conn.rollback()
         raise

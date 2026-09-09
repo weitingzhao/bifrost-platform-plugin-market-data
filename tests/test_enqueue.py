@@ -36,6 +36,9 @@ class _EnqueueCursor:
                 self.parent._fetchone = (self.parent.next_id,)
         elif "delete from" in q:
             self.rowcount = self.parent.delete_rowcount
+        elif "order by finished_at desc" in q:
+            # The row-cap cutoff: the finished_at of the keep_max-th newest job.
+            self.parent._fetchone = self.parent.cutoff
         else:
             self.parent._fetchone = None
 
@@ -53,7 +56,8 @@ class _EnqueueCursor:
 
 
 class _EnqueueConn:
-    def __init__(self, *, delete_rowcount: int = 0) -> None:
+    def __init__(self, *, delete_rowcount: int = 0, cutoff: Any = ("2026-09-02",)) -> None:
+        self.cutoff = cutoff
         self.statements: list[tuple[str, Any]] = []
         self.committed = 0
         self.rolled_back = 0
@@ -107,11 +111,57 @@ def test_insert_job_dedup_returns_none() -> None:
 
 
 def test_trim_old_jobs() -> None:
+    """One age pass and one cap pass, each stopping on a short batch."""
     conn = _EnqueueConn(delete_rowcount=3)
-    n = trim_old_jobs(conn, keep_days=7, keep_max=5000)
-    assert n == 6  # two DELETE statements × rowcount 3
-    assert conn.committed == 1
-    assert any("DELETE FROM ops_jobs.job_ingest" in s[0] for s in conn.statements)
+    n = trim_old_jobs(conn, keep_days=7, keep_max=5000, batch_size=20)
+    assert n == 6  # a short batch ends each pass: 3 by age + 3 by the row cap
+    deletes = [st for st in conn.statements if "DELETE FROM ops_jobs.job_ingest" in st[0]]
+    assert len(deletes) == 2
+    # Every batch commits, so a run that runs out of budget keeps its progress.
+    assert conn.committed >= 3
+
+
+def test_trim_keeps_deleting_until_a_batch_comes_up_short() -> None:
+    """A backlog must not need more than one statement's worth of budget.
+
+    The single-statement form had to delete 1.23M rows at once, which the API's
+    60-second budget cancelled, so trim stopped completing at all and 1.26M
+    finished rows stayed on the table.
+    """
+    conn = _EnqueueConn(delete_rowcount=20)
+    calls = {"n": 0}
+    original = conn.cursor
+
+    def counting_cursor() -> Any:
+        cur = original()
+        inner = cur.execute
+
+        def execute(query: str, params: Any = None) -> None:
+            if "DELETE FROM ops_jobs.job_ingest" in query:
+                calls["n"] += 1
+                # The fourth delete comes up short and ends the pass.
+                conn.delete_rowcount = 20 if calls["n"] < 4 else 7
+            inner(query, params)
+
+        cur.execute = execute  # type: ignore[method-assign]
+        return cur
+
+    conn.cursor = counting_cursor  # type: ignore[method-assign]
+    n = trim_old_jobs(conn, keep_days=7, keep_max=5000, batch_size=20)
+    # Three full batches, then a short one ends the age pass; the cap pass then
+    # runs its own. The point is that one statement is not the limit.
+    assert calls["n"] >= 4, "trim gave up after one statement"
+    assert n == 20 + 20 + 20 + 7 + 7
+
+
+def test_trim_row_cap_orders_the_way_the_index_does() -> None:
+    """`finished_at DESC NULLS LAST, id DESC` matched no index and seq-scanned."""
+    conn = _EnqueueConn(delete_rowcount=0)
+    trim_old_jobs(conn, keep_days=7, keep_max=40000)
+    cutoff = [st[0] for st in conn.statements if "OFFSET" in st[0]]
+    assert cutoff, "no cutoff query ran"
+    assert "NULLS LAST" not in cutoff[0]
+    assert "id DESC" not in cutoff[0]
 
 
 def test_insert_jobs_bulk_one_statement_one_commit() -> None:

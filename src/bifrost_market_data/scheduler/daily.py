@@ -906,6 +906,18 @@ def enqueue_slot(
         keep_days = int(scfg.get("keep_days") or 7)
         keep_max = int(scfg.get("keep_max") or 5000)
         deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
+        # The job rows go; the record of what they did stays for the retention
+        # window, because that series is the only history the queue has.
+        try:
+            from bifrost_market_data.queue_history import KEEP_DAYS, trim_samples
+
+            samples_dropped = trim_samples(
+                conn, keep_days=int(scfg.get("queue_sample_keep_days") or KEEP_DAYS)
+            )
+            if samples_dropped:
+                logger.info("trimmed %s queue_sample rows", samples_dropped)
+        except Exception as exc:  # noqa: BLE001 — sample retention must not fail the trim
+            logger.warning("queue_sample trim skipped: %s", exc)
         try:
             update_freshness(conn, "job_trim", int(deleted or 0), status="ok")
         except Exception as exc:  # noqa: BLE001 — freshness must not fail trim

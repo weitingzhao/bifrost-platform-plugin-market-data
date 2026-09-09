@@ -604,6 +604,44 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
+    # Queue history. job_ingest is a work queue, not a record: the trim caps
+    # finished rows at a few tens of thousands, which at 600 jobs a minute is
+    # about an hour, and ingest_freshness is keyed by dimension and overwritten.
+    # So nothing anywhere held a series, and every question about the queue had
+    # to be answered by whatever a probe happened to catch. One row per kind per
+    # sample; pending and running are null for rows reconstructed after the
+    # fact, because a past queue depth cannot be recovered from finished jobs.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.queue_sample (
+            sample_ts             timestamptz NOT NULL,
+            kind                  text        NOT NULL,
+            pending               bigint,
+            running               bigint,
+            created_delta         bigint      NOT NULL DEFAULT 0,
+            done_delta            bigint      NOT NULL DEFAULT 0,
+            failed_delta          bigint      NOT NULL DEFAULT 0,
+            oldest_pending_age_sec double precision,
+            p50_sec               double precision,
+            p95_sec               double precision,
+            PRIMARY KEY (sample_ts, kind)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS queue_sample_kind_ts
+        ON ops_jobs.queue_sample (kind, sample_ts DESC)
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON TABLE ops_jobs.queue_sample IS
+          'Queue depth and throughput over time, one row per kind per sample. '
+          'The only place a history of ops_jobs.job_ingest survives its trim.'
+        """
+    )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS ops_jobs.ingest_freshness (
@@ -1043,6 +1081,7 @@ MARKET_ANALYTICS_TABLES: tuple[str, ...] = ()
 
 DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",
+    "queue_sample",
     "ingest_freshness",
     "data_source_void",
     "symbol_source_void",
