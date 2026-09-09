@@ -21,6 +21,7 @@ from typing import Any, Sequence
 from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import connect_db
+from bifrost_market_data.continuity import measure as measure_continuity
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
@@ -174,8 +175,32 @@ def _depth(
     }
 
 
+def _expected_days(conn: Any, today: date) -> list[date]:
+    """Trading days in the continuity window, or [] when the calendar is unreadable.
+
+    Without it a completely blank session is invisible: it contributes no row to
+    a per-day count, so nothing notices it is not there.
+    """
+    from bifrost_market_data.continuity import WINDOW_DAYS, window_start
+    from bifrost_market_data.trading_calendar import expected_trading_days
+
+    try:
+        return expected_trading_days(conn, start=window_start(WINDOW_DAYS, today), end=today)
+    except Exception as exc:  # noqa: BLE001 — absent days go unnamed, the rest still reports
+        logger.warning("continuity calendar unavailable: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+
+
 def _one(
-    c: DatasetContract, denominators: dict[str, Any], today: date, conn: Any = None
+    c: DatasetContract,
+    denominators: dict[str, Any],
+    today: date,
+    conn: Any = None,
+    expected_days: Sequence[date] | None = None,
 ) -> dict[str, Any]:
     own = conn is None
     if own:
@@ -194,6 +219,11 @@ def _one(
         if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
             per_symbol = _per_symbol_oldest(conn, c)
         newest = _newest(conn, c)
+        # The fourth axis. Breadth, depth and freshness all read healthy over
+        # seven blank days in stock_daily; only this one looks at the middle.
+        continuity = measure_continuity(
+            conn, c, expected_days=expected_days, statement_timeout=STATEMENT_TIMEOUT
+        )
         error = None
     except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
         logger.warning("coverage dimensions failed for %s: %s", c.dataset, exc)
@@ -201,7 +231,9 @@ def _one(
             conn.rollback()
         except Exception:
             pass
-        per_symbol, held_symbols, held_total, newest, error = [], set(), 0, None, str(exc)[:160]
+        per_symbol, held_symbols, held_total, newest = [], set(), 0, None
+        continuity = {"measured": False, "why": "read failed"}
+        error = str(exc)[:160]
     finally:
         if own:
             _close_quietly(conn)
@@ -234,6 +266,7 @@ def _one(
         },
         "depth": _depth(c, per_symbol, today),
         "freshness": _freshness(c, newest, today),
+        "continuity": continuity,
     }
 
 
@@ -295,13 +328,21 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
     try:
         denominators = _denominators(probe)
         today = _today()
+        # One calendar read for the whole page: an absent session can only be
+        # named against the days the market was actually open.
+        expected_days = _expected_days(probe, today)
         workers = min(MAX_WORKERS, len(wanted))
         if workers == 1:
-            rows = [_one(wanted[0], denominators, today, probe)]
+            rows = [_one(wanted[0], denominators, today, probe, expected_days)]
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dimensions") as pool:
-                futures = [pool.submit(_one, wanted[0], denominators, today, probe)]
-                futures += [pool.submit(_one, c, denominators, today) for c in wanted[1:]]
+                futures = [
+                    pool.submit(_one, wanted[0], denominators, today, probe, expected_days)
+                ]
+                futures += [
+                    pool.submit(_one, c, denominators, today, None, expected_days)
+                    for c in wanted[1:]
+                ]
                 rows = [f.result() for f in futures]
     finally:
         _close_quietly(probe)
