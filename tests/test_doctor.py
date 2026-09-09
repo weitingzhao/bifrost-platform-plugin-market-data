@@ -22,12 +22,25 @@ class _Cur:
         q = " ".join(query.lower().split())
         self.parent.statements.append((q, params))
         d = self.parent.data
-        if "from raw_market.option_contract" in q:
-            self._rows = [(u, n) for u, n in d.get("live", {}).items()]
+        # The option tables are now asked twice with different symbol lists —
+        # a ratio for the whole chains, presence for the windowed tiers — so the
+        # fake has to honour ``ANY(%s)`` the way PG does, or both reads return
+        # the same rows and the split is untestable.
+        scope: set[str] | None = None
+        if isinstance(params, (list, tuple)) and params and isinstance(params[0], (list, tuple)):
+            scope = {str(x).strip().upper() for x in params[0]}
+
+        def _scoped(key: str) -> list[Any]:
+            return [(u, n) for u, n in d.get(key, {}).items() if scope is None or u in scope]
+
+        if "from research.option_universe" in q:
+            self._rows = list(d.get("universe", []))
+        elif "from raw_market.option_contract" in q:
+            self._rows = _scoped("live")
         elif "from raw_market.option_snapshot" in q:
-            self._rows = [(u, n) for u, n in d.get("snapshot", {}).items()]
+            self._rows = _scoped("snapshot")
         elif "from raw_market.option_open_interest" in q:
-            self._rows = [(u, n) for u, n in d.get("oi", {}).items()]
+            self._rows = _scoped("oi")
         elif "from raw_market.stock_daily" in q and "distinct symbol" in q:
             self._rows = [{"symbol": s} for s in d.get("daily_watch", [])]
         elif "from raw_market.stock_daily" in q:
@@ -351,3 +364,99 @@ def test_a_saturated_pool_reads_as_busy_not_dead() -> None:
     assert f["severity"] == "warn"
     assert "saturated, not down" in f["detail"]
     assert rep["eod_critical"]["verdict"] == "healthy"
+
+
+# ── The three-tier universe: what the collector collects, checked how it collects ──
+
+
+def _ruled(data: dict[str, Any], rows: list[tuple[str, str, int]]) -> dict[str, Any]:
+    """Publish a research.option_universe rule into the fake."""
+    data["universe"] = rows
+    return data
+
+
+def test_universe_widens_to_the_research_rule() -> None:
+    """The doctor checks what `eod-pipeline` enqueues, not the watchlist it predates."""
+    data = _ruled(
+        _healthy_data(), [("AAPL", "resident", 24), ("PLTR", "core", 24), ("SOFI", "edge", 12)]
+    )
+    data["live"].update({"PLTR": 4000, "SOFI": 900})
+    data["snapshot"].update({"PLTR": 120, "SOFI": 40})
+    data["oi"].update({"PLTR": 120, "SOFI": 40})
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    # Four watchlist names plus the two the rule added, split by how they are collected.
+    assert rep["universe"]["optionable"] == 6
+    assert rep["universe"]["whole_chain"] == 4
+    assert rep["universe"]["windowed"] == 2
+
+
+def test_windowed_names_are_judged_on_presence_not_share() -> None:
+    """Core and edge chains hold a strike band by design; 3% of the catalogue is not a gap."""
+    data = _ruled(_healthy_data(), [("PLTR", "core", 24)])
+    data["live"]["PLTR"] = 4000
+    data["snapshot"]["PLTR"] = 120
+    data["oi"]["PLTR"] = 120
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    by = {f["id"].split(":", 1)[0]: f for f in rep["findings"]}
+    assert by["option_chain_windowed"]["severity"] == "ok"
+    assert by["option_oi_windowed"]["severity"] == "ok"
+    # PLTR's 4,000 live contracts stay out of the ratio's denominator.
+    assert by["option_snapshot"]["expected"] == ">= 90% of 4000"
+    assert rep["verdict"] == "healthy"
+
+
+def test_unreached_windowed_name_is_a_finding() -> None:
+    """A name with a live chain and no rows for the session is the failure this exists to see."""
+    data = _ruled(_healthy_data(), [("PLTR", "core", 24), ("SOFI", "core", 24)])
+    data["live"].update({"PLTR": 4000, "SOFI": 900})
+    data["snapshot"]["PLTR"] = 120  # SOFI was never reached
+    data["oi"]["PLTR"] = 120
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("option_chain_windowed"))
+    assert f["severity"] == "crit"  # one of two missing, well past 10%
+    assert f["missing_sample"] == ["SOFI"]
+    assert f["fix"] == {
+        "action": "enqueue-slot",
+        "slot": "eod-pipeline",
+        "force": True,
+        "date": SESSION.isoformat(),
+    }
+
+
+def test_one_absent_name_in_a_large_universe_is_a_warning() -> None:
+    """A single name the vendor answered nothing for is not a failed session."""
+    ruled = [(f"SYM{i:03d}", "core", 24) for i in range(20)]
+    data = _ruled(_healthy_data(), ruled)
+    for sym, _tier, _months in ruled:
+        data["live"][sym] = 900
+        data["snapshot"][sym] = 40
+        data["oi"][sym] = 40
+    del data["snapshot"]["SYM007"]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("option_chain_windowed"))
+    assert f["severity"] == "warn"
+    assert f["missing_sample"] == ["SYM007"]
+
+
+def test_windowed_name_without_a_live_chain_is_not_a_gap() -> None:
+    """No unexpired contracts means nothing to collect — the C-B3 attribution."""
+    data = _ruled(_healthy_data(), [("PLTR", "core", 24), ("SENEA", "edge", 12)])
+    data["live"]["PLTR"] = 4000  # SENEA lists no live contracts at all
+    data["snapshot"]["PLTR"] = 120
+    data["oi"]["PLTR"] = 120
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("option_chain_windowed"))
+    assert f["severity"] == "ok"
+    assert f["expected"] == "1 with a live chain"
+
+
+def test_presence_checks_do_not_gate_the_research_batch() -> None:
+    """Widening what blocks dbt is a decision about the gate, not a new check's side effect."""
+    data = _ruled(_healthy_data(), [("PLTR", "core", 24), ("SOFI", "core", 24)])
+    data["live"].update({"PLTR": 4000, "SOFI": 900})
+    data["snapshot"]["PLTR"] = 120
+    data["oi"]["PLTR"] = 120
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert rep["verdict"] == "critical"
+    assert rep["eod_critical"]["verdict"] == "healthy"
+    assert not [i for i in rep["eod_critical"]["findings"] if "windowed" in i]

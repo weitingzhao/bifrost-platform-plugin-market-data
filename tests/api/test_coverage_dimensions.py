@@ -36,6 +36,8 @@ class _Cur:
         self.conn.queries.append(q)
         if "raw_market.ticker WHERE active" in q:
             self._rows = [(s,) for s in self.conn.active]
+        elif "research.option_universe" in q:
+            self._rows = [(s,) for s in self.conn.universe]
         elif self.conn.raise_on and self.conn.raise_on in q:
             raise RuntimeError("statement timeout")
         elif q.startswith("SELECT max("):
@@ -56,9 +58,11 @@ class _Conn:
         newest: date,
         raise_on: str | None = None,
         active: list[str] | None = None,
+        universe: list[str] | None = None,
     ) -> None:
         self.per_symbol = per_symbol
         self.active = active if active is not None else ["AAPL", "MSFT"]
+        self.universe = universe if universe is not None else ["AAPL", "XYZ"]
         self.newest = newest
         self.raise_on = raise_on
         self.queries: list[str] = []
@@ -86,10 +90,17 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "universe": [{"symbol": "AAPL", "tier": "resident"}, {"symbol": "XYZ", "tier": "core"}],
         "active": ["AAPL", "MSFT"],
     }
-    monkeypatch.setattr(mod, "_watchlist", lambda conn: set())
+    # The scope helpers are shared now; the fake connection answers them.
+    monkeypatch.setattr(mod, "benchmark_scope", lambda conn, benchmarks, **kw: set(benchmarks))
 
     def fake_connect(**_kw: Any) -> _Conn:
-        return _Conn(state["per_symbol"], state["newest"], state["raise_on"], state["active"])
+        return _Conn(
+            state["per_symbol"],
+            state["newest"],
+            state["raise_on"],
+            state["active"],
+            [u["symbol"] for u in state["universe"]],
+        )
 
     monkeypatch.setattr(mod, "connect_db", fake_connect)
     monkeypatch.setattr(mod, "load_research_universe", lambda conn: state["universe"])

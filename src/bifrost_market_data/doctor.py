@@ -26,6 +26,7 @@ from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.quality import fetch_completed_trading_days, filter_optionable_underlyings
 from bifrost_market_data.scheduler.daily import (
     enqueue_slot,
+    load_research_universe,
     load_watchlist_symbols,
     union_iv_radar_benchmarks,
 )
@@ -33,7 +34,7 @@ from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 
-from bifrost_market_data.contracts import staleness_by_slot
+from bifrost_market_data.contracts import STOCK_DAILY_MIN_SESSION_SYMBOLS, staleness_by_slot
 from bifrost_market_data.session import EOD_EXPECTED_BY_NY as _EOD_BY_NY
 from bifrost_market_data.session import resolve_session as _resolve_session
 
@@ -45,8 +46,9 @@ _NY = ZoneInfo("America/New_York")
 EOD_EXPECTED_BY_NY = _EOD_BY_NY
 
 # Whole-market floors: below these the pull did not happen, whatever the count.
-# A normal session lands ~12.5k stock_daily and ~13k stock_snapshot rows.
-STOCK_DAILY_MIN_ROWS = 12000
+# A normal session lands ~12.5k stock_daily and ~13k stock_snapshot rows. The
+# stock_daily floor is the contract table's, shared with the quality gate.
+STOCK_DAILY_MIN_ROWS = STOCK_DAILY_MIN_SESSION_SYMBOLS
 STOCK_SNAPSHOT_MIN_ROWS = 12000
 
 # A session's chain must cover this share of the underlying's live contracts.
@@ -55,6 +57,13 @@ STOCK_SNAPSHOT_MIN_ROWS = 12000
 # live probe), so 95% of the catalogue is unreachable by construction. Healthy
 # sessions measure 94-100%; the sessions the old model broke measured 33-72%.
 SNAPSHOT_COVERAGE_MIN = 0.90
+
+# The tiers the EOD slot collects with the near-the-money window. Their rows are
+# a deliberate slice of the chain, so they are checked for presence, not share.
+WINDOWED_TIERS = ("core", "edge")
+# Above this share of windowed names unreached, the slot did not run; below it,
+# a handful of names the vendor answered nothing for on the day.
+CHAIN_PRESENCE_MISSING_CRIT = 0.10
 
 # The checks whose failure means the session's EOD data is not fit for dbt.
 # Everything else (rotates, reference refreshes, maintenance) can lag a day
@@ -216,6 +225,130 @@ def _coverage_finding(
     )
 
 
+def _presence_finding(
+    check_id: str,
+    title: str,
+    expected: Sequence[str],
+    got: Mapping[str, int],
+    *,
+    session: date,
+    fixable: bool,
+) -> Finding:
+    """One finding for whether the session reached each windowed underlying.
+
+    Core and edge chains are collected near the money by design, so a share of
+    the full contract catalogue would grade the design instead of the run. What
+    is checkable is presence: the slot either wrote rows for the name this
+    session or it did not. ``expected`` is already narrowed to names the vendor
+    lists a live chain for.
+    """
+    session_s = session.isoformat()
+    total = len(expected)
+    missing = sorted(s for s in expected if int(got.get(s, 0)) <= 0)
+    have = total - len(missing)
+    if not missing:
+        severity = "ok"
+    elif total and len(missing) / total > CHAIN_PRESENCE_MISSING_CRIT:
+        severity = "crit"
+    else:
+        severity = "warn"
+    detail = (
+        f"{have}/{total} windowed chains written for {session_s} "
+        f"({(have / total) if total else 1.0:.0%})."
+    )
+    if missing:
+        detail += (
+            f" {len(missing)} underlyings with a live chain were not reached: "
+            + ", ".join(missing[:8])
+            + "."
+        )
+    if missing and not fixable:
+        detail += (
+            " The chain now reflects a later session, so this one can no longer"
+            " be observed — it is lost, not pending."
+        )
+    return Finding(
+        f"{check_id}:{session_s}",
+        "eod-pipeline",
+        severity,
+        title,
+        f"{total} with a live chain",
+        have,
+        detail,
+        session=session_s,
+        fix=_slot_fix("eod-pipeline", session) if (missing and fixable) else None,
+        auto_fixable=bool(missing) and fixable,
+        missing_sample=missing[:8],
+    )
+
+
+def _presence_findings(
+    conn: Any,
+    expected: Sequence[str],
+    *,
+    session: date,
+    session_s: str,
+    day_start: datetime,
+    day_end: datetime,
+    fixable: bool,
+) -> list[Finding]:
+    """Snapshot and open-interest presence for the windowed part of the universe.
+
+    Deliberately outside ``EOD_CRITICAL_CHECKS``: widening what blocks the
+    Research batch is a decision about the gate, not a consequence of adding a
+    check. These report; they do not gate.
+    """
+    syms = list(expected)
+    snap = _counts(
+        conn,
+        """
+        SELECT underlying, count(*)::bigint FROM raw_market.option_snapshot
+        WHERE underlying = ANY(%s) AND snapshot_ts >= %s AND snapshot_ts < %s
+        GROUP BY 1
+        """,
+        (syms, day_start, day_end),
+    )
+    oi = _counts(
+        conn,
+        """
+        SELECT underlying, count(*)::bigint FROM raw_market.option_open_interest
+        WHERE underlying = ANY(%s) AND trade_date = %s GROUP BY 1
+        """,
+        (syms, session),
+    )
+    if snap is None or oi is None:
+        return [
+            Finding(
+                f"option_chain_windowed:{session_s}",
+                "eod-pipeline",
+                "warn",
+                "Windowed chain presence",
+                len(syms),
+                None,
+                "presence query failed — see API log",
+                session=session_s,
+            )
+        ]
+    return [
+        _presence_finding(
+            "option_chain_windowed",
+            "Windowed chain snapshot",
+            syms,
+            snap,
+            session=session,
+            fixable=fixable,
+        ),
+        _presence_finding(
+            "option_oi_windowed",
+            "Windowed chain open interest",
+            syms,
+            oi,
+            session=session,
+            fixable=fixable,
+        ),
+    ]
+
+
 def _distinct(conn: Any, sql: str, params: tuple[Any, ...], key: str) -> list[str] | None:
     try:
         with conn.cursor() as cur:
@@ -287,8 +420,29 @@ def run_doctor(
     findings: list[Finding] = []
 
     symbols = list(watchlist) if watchlist is not None else load_watchlist_symbols(conn, cfg)
-    universe = sorted({storage_underlying(s) for s in union_iv_radar_benchmarks(symbols, cfg)})
+    # The population the collector actually works on. Since the three-tier rule
+    # landed, ``eod-pipeline`` enqueues research.option_universe together with
+    # the benchmarks -- 575 names -- while this check still divided by the
+    # 28-name watchlist it predated, so a session that collected 26 of them read
+    # healthy for weeks.
+    tier_of: dict[str, str] = {}
+    for row in load_research_universe(conn) or []:
+        sym = storage_underlying(str(row.get("symbol") or ""))
+        if sym:
+            tier_of[sym] = str(row.get("tier") or "")
+    universe = sorted(
+        {storage_underlying(s) for s in union_iv_radar_benchmarks(symbols, cfg)} | set(tier_of)
+    )
     optionable = filter_optionable_underlyings(conn, universe)
+    # Two questions, because the collector asks two different things of these
+    # names. Resident names -- and anything outside the rule, the benchmarks
+    # included -- are snapshotted whole, so they answer a ratio. Core and edge
+    # get the near-the-money window on purpose (``config/schedule.yaml``
+    # eod-pipeline: the next few expiries, strikes within +-15% of spot), so
+    # dividing their rows by the full contract catalogue would report the design
+    # as a shortfall. They answer presence instead.
+    windowed = [s for s in optionable if tier_of.get(s) in WINDOWED_TIERS]
+    whole_chain = [s for s in optionable if tier_of.get(s) not in WINDOWED_TIERS]
 
     # ── EOD option chain: how much of each live chain the session actually holds ──
     if optionable:
@@ -307,8 +461,15 @@ def run_doctor(
             WHERE underlying = ANY(%s) AND expiry >= %s AND first_seen_at < %s
             GROUP BY 1
             """,
+            # The live catalogue is read for every name: the ratio divides by it
+            # and the presence check uses it to tell "nothing to collect" apart
+            # from "not collected".
             (optionable, session, day_end),
         )
+        # ``count(DISTINCT option_ticker)`` is what a ratio needs and it is the
+        # costly shape — 5.5s for the 27 whole-chain names on DEV, 11.0s when it
+        # covered all 575. Presence needs no DISTINCT, so the windowed names get
+        # a plain count in ``_presence_findings``: 0.6s for 543 of them.
         snap = _counts(
             conn,
             """
@@ -317,7 +478,7 @@ def run_doctor(
             WHERE underlying = ANY(%s) AND snapshot_ts >= %s AND snapshot_ts < %s
             GROUP BY 1
             """,
-            (optionable, day_start, day_end),
+            (whole_chain, day_start, day_end),
         )
         oi = _counts(
             conn,
@@ -325,7 +486,7 @@ def run_doctor(
             SELECT underlying, count(*)::bigint FROM raw_market.option_open_interest
             WHERE underlying = ANY(%s) AND trade_date = %s GROUP BY 1
             """,
-            (optionable, session),
+            (whole_chain, session),
         )
         if live is None or snap is None or oi is None:
             findings.append(
@@ -341,26 +502,48 @@ def run_doctor(
                 )
             )
         else:
-            findings.append(
-                _coverage_finding(
-                    "option_snapshot",
-                    "Option chain snapshot",
-                    live,
-                    snap,
-                    session=session,
-                    fixable=fixable,
+            whole_set = set(whole_chain)
+            live_whole = {u: n for u, n in live.items() if u in whole_set}
+            # A check with no population is not a passing check: emit the ratio
+            # only when there is a whole chain to divide by.
+            if live_whole:
+                findings.append(
+                    _coverage_finding(
+                        "option_snapshot",
+                        "Option chain snapshot",
+                        live_whole,
+                        snap,
+                        session=session,
+                        fixable=fixable,
+                    )
                 )
-            )
-            findings.append(
-                _coverage_finding(
-                    "option_open_interest",
-                    "Open interest",
-                    live,
-                    oi,
-                    session=session,
-                    fixable=fixable,
+                findings.append(
+                    _coverage_finding(
+                        "option_open_interest",
+                        "Open interest",
+                        live_whole,
+                        oi,
+                        session=session,
+                        fixable=fixable,
+                    )
                 )
-            )
+            # An underlying the vendor lists no unexpired contracts for has
+            # nothing to collect, and calling that a gap is the mis-attribution
+            # C-B3 exists to prevent: five names (CIX, EA, ISTR, NVR, SENEA)
+            # read as missing on the 2026-09-08 session for that reason alone.
+            expect_present = [s for s in windowed if live.get(s, 0) > 0]
+            if expect_present:
+                findings.extend(
+                    _presence_findings(
+                        conn,
+                        expect_present,
+                        session=session,
+                        session_s=session_s,
+                        day_start=day_start,
+                        day_end=day_end,
+                        fixable=fixable,
+                    )
+                )
 
     # ── Stock EOD: whole market + watchlist for the session ──
     n_daily = _count(
@@ -632,6 +815,10 @@ def run_doctor(
             "watchlist": len(symbols),
             "underlyings": len(universe),
             "optionable": len(optionable),
+            # How the chain checks split it: whole chains answer a ratio, the
+            # windowed tiers answer presence.
+            "whole_chain": len(whole_chain),
+            "windowed": len(windowed),
         },
         "verdict": verdict,
         "summary": f"{len(crit)} critical · {len(warn)} warning · {sum(1 for f in findings if f.severity == 'ok')} ok",

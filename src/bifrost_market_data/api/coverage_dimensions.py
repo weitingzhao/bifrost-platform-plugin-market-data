@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException, Query
 from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
 from bifrost_market_data.scheduler.daily import load_research_universe
+from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market/coverage", tags=["market-coverage"])
@@ -250,24 +251,18 @@ def _freshness(c: DatasetContract, newest: date | None, today: date) -> dict[str
 
 
 def _denominators(conn: Any) -> dict[str, Any]:
-    """The four denominators, each from its declared source — never from a panel.
+    """The four denominators, each from ``scopes`` — never from a panel.
 
     Each carries its symbol set, because a percentage is only honest when the
-    numerator is drawn from the same set: "of the instruments this tier asked
-    for, how many do we hold". Without that, five years of stock symbols over
-    today's active tickers reads as 389% coverage.
+    numerator is drawn from the same population: five years of stock symbols
+    over today's active tickers reads as 389% coverage.
     """
-    active = {
-        str(r[0]) for r in _rows(conn, "SELECT symbol FROM raw_market.ticker WHERE active") if r[0]
-    }
-    universe = load_research_universe(conn) or []
-    universe_syms = {str(u.get("symbol")) for u in universe if u.get("symbol")}
+    active = active_tickers(conn, statement_timeout=STATEMENT_TIMEOUT)
+    universe_syms = universe_symbols(conn, statement_timeout=STATEMENT_TIMEOUT)
     by_tier: dict[str, int] = {}
-    for row in universe:
+    for row in load_research_universe(conn) or []:
         by_tier[str(row.get("tier") or "?")] = by_tier.get(str(row.get("tier") or "?"), 0) + 1
-    # The minute slots target the watchlist union, not the benchmarks alone —
-    # asking 18 held against 11 benchmarks reported 164%.
-    bench = set(_benchmarks()) | _watchlist(conn)
+    bench = benchmark_scope(conn, _benchmarks(), statement_timeout=STATEMENT_TIMEOUT)
     return {
         "whole-market": len(active),
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
@@ -280,17 +275,6 @@ def _denominators(conn: Any) -> dict[str, Any]:
             "global": set(),
         },
     }
-
-
-def _watchlist(conn: Any) -> set[str]:
-    """The names the minute slots rotate through, alongside the benchmarks."""
-    try:
-        from bifrost_market_data.scheduler.daily import load_watchlist_symbols
-
-        return {str(s).strip().upper() for s in (load_watchlist_symbols(conn, {}) or [])}
-    except Exception as exc:  # noqa: BLE001 — a missing watchlist narrows the scope, it does not break it
-        logger.warning("watchlist for the benchmark scope unavailable: %s", exc)
-        return set()
 
 
 def _benchmarks() -> list[str]:

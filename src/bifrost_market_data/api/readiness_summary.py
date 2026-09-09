@@ -21,6 +21,7 @@ from bifrost_market_data.api.readiness_data import (
     query_vendor_gap,
 )
 from bifrost_market_data.api.source_void import VALID_DATA_TYPES, query_all_voids
+from bifrost_market_data.scopes import active_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,15 @@ _STALE_DAYS = 7
 
 
 def _universe_count(conn: Any) -> int:
+    """The SEPA population: US common stock, which is what the readiness steps rank.
+
+    Deliberately *not* the whole-market denominator. ``v_us_equity_universe``
+    filters ``raw_market.ticker`` to locale US, market stocks, type CS; the
+    contract table divides by every active ticker. The two return the same 5,317
+    today (measured 2026-09-08) because nothing else is loaded active, and they
+    are meant to diverge the moment ETFs are — SEPA should not rank an ETF, and
+    the whole-market feed should not pretend it skipped one.
+    """
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -216,9 +226,11 @@ def build_readiness_summary(conn: Any) -> dict[str, Any]:
     """Assemble Trade-compatible ``SepaReadinessSummaryResponse``."""
     out: dict[str, Any] = {"ok": True}
 
-    universe = _universe_count(conn)
-    out["universe_count"] = universe
-    out["tickers_active_count"] = universe
+    out["universe_count"] = _universe_count(conn)
+    # "How many tickers are active" has one answer, and it is the one the
+    # contract table divides by (C-B1). This used to echo the SEPA count, which
+    # made the readiness page and the coverage panel two sources for one number.
+    out["tickers_active_count"] = len(active_tickers(conn))
     out["tickers_last_synced_at"] = None
 
     out["price_readiness_live"] = _price_readiness(conn)

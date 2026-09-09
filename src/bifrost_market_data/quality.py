@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from bifrost_market_data.contracts import deadline_for_dimension
+from bifrost_market_data.contracts import STOCK_DAILY_MIN_SESSION_SYMBOLS, deadline_for_dimension
 from bifrost_market_data.session import is_late, resolve_session
 from bifrost_market_data.scheduler.daily import resolve_watchlist_symbols_for_coverage
 
-# Acceptance thresholds (program YAML)
-STOCK_DAILY_MIN_SYMBOLS = 4000
+# Acceptance thresholds. The stock_daily floor lives in the contract table: it
+# and the doctor grade the same session-scoped count, and 4,000 here against
+# 12,000 there meant a session could pass the gate and fail the doctor.
+STOCK_DAILY_MIN_SYMBOLS = STOCK_DAILY_MIN_SESSION_SYMBOLS
 STOCK_DAILY_GAP_LOOKBACK_DAYS = 30
 # Kept for callers that still pass an explicit override; the gate itself now
 # measures against the session and each dataset's own contract deadline.
@@ -101,10 +103,16 @@ def fetch_completed_trading_days(
 
 
 def filter_optionable_underlyings(conn: Any, symbols: Sequence[str]) -> list[str]:
-    """Watchlist symbols that have ≥1 row in ``market.option_contract``.
+    """Symbols that have ≥1 row in ``raw_market.option_contract``.
 
     Equity-only names (e.g. SATS with zero contracts) must not fail option
     snapshot / OI acceptance.
+
+    The predicate is on the bare column: ``UPPER(TRIM(underlying))`` cannot use
+    ``option_contract_underlying_expiry`` and forced a scan every call. The
+    column is written normalized — a count of rows where
+    ``underlying <> UPPER(TRIM(underlying))`` returned 0 on 2026-09-08 — so the
+    wrapper only cost time. The doctor now asks this for 575 names, not 28.
     """
     syms = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
     if not syms:
@@ -113,9 +121,9 @@ def filter_optionable_underlyings(conn: Any, symbols: Sequence[str]) -> list[str
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT UPPER(TRIM(underlying)) AS und
+                SELECT DISTINCT underlying AS und
                 FROM raw_market.option_contract
-                WHERE UPPER(TRIM(underlying)) = ANY(%s)
+                WHERE underlying = ANY(%s)
                 """,
                 (syms,),
             )

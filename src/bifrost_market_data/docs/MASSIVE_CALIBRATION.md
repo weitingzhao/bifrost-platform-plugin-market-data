@@ -1,7 +1,7 @@
 ---
-version: 2026-09-09.3
+version: 2026-09-09.4
 updated: 2026-09-09
-status: 口径已收敛到契约表 · 深度仍是唯一的大洞
+status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯一的大洞
 ---
 
 # Massive 校准
@@ -58,18 +58,18 @@ status: 口径已收敛到契约表 · 深度仍是唯一的大洞
 
 | 编号 | 状态 | 证据 |
 |---|---|---|
-| C-B1 | ⚠️ | 契约表已落地（`contracts.py`，19 个数据集各自声明档位与分母），`/market/coverage/dimensions` 只读它。仍是 ⚠️：**旧的 4 套分母还在原地**——`api/coverage.py:253` watchlist（默认 80）、`doctor.py:287-289` optionable watchlist ∪ 基准、`quality.py:156` 硬编码常数 4000、`api/readiness_summary.py:44-52` `v_us_equity_universe`。收敛它们是下一步。 |
+| C-B1 | ✅ | 契约表（`contracts.py`，19 个数据集各自声明档位与分母）是唯一事实源，`scopes.py` 是唯一读它的地方。四套旧分母已收敛：**doctor** 改读 `load_research_universe()`——**检查用的名单就是采集用的那一份**，28 → 575；**quality** 的常数 4000 与 doctor 的 12000 是同一个量的两个门槛，合并为 `contracts.STOCK_DAILY_MIN_SESSION_SYMBOLS = 12000`（19 个 session 实测 12,396–12,576，2026-08-11 的失败 session 只有 18 行）；**readiness** 的 `tickers_active_count` 改读 `scopes.active_tickers`（`universe_count` 保留 `v_us_equity_universe`，因为 SEPA 排名的是美股普通股，是另一个问题——今天两者都是 5,317）；`api/coverage.py:253` 的 `limit=80` **不是分母**，是一份抽样清单（见 C-D2）。 |
 | C-B2 | ✅ | `GET /market/coverage/dimensions` 同时报意图达成率与口径利用率，两者分列不合并。`/market/capabilities`（`subscription.py:105`）回答的是"哪些能力被实现了"，不是"持有了多少"；Console 的 Capability 面板 `capPct` 是手工标注的 implemented/partial 计数。 |
-| C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（`doctor.py:463-469`，error 含 `not entitled` 时不给 retry 处方）与可重试失败。但"vendor 无此数据"与"未排程"两类未区分：`ops_jobs.symbol_source_void`（`ddl.py:644`）记了前者却不在任何覆盖率分母里体现。 |
+| C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（error 含 `not entitled` 时不给 retry 处方）与可重试失败，**并新增了第三类**：期权链的存在性检查只对"vendor 列出了未到期合约"的标的判定——2026-09-08 的 session 里 CIX / EA / ISTR / NVR / SENEA 五个名字没有任何快照行，但它们本来就没有活合约，报成缺口是误判。仍是 ⚠️：`ops_jobs.symbol_source_void`（`ddl.py:644`）记的"vendor 无此数据"还不在任何覆盖率分母里体现。 |
 | C-D1 | ✅ | 每个数据集在 `contracts.py` 的 `DepthTarget` 里声明窗口，取自订阅口径（stocks 5 年 / options 2 年 / financials 2009）或 tier 要求（24/12 个月），并带上"为什么是这个数"。旧的散落常量（`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`）仍在各自的调用点，但不再是深度的事实源。 |
-| C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。旧的 `StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代。 |
+| C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。`StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代——**更正**：它的 `Math.max(rows.length, 1)` 是 `ScoreRing` 的分区总数（ready + thin + blocked 三块加起来就是取回的行数），不是覆盖率分母，不该被当成假分母；真正的问题是页面没说这 80 个是 20,695 个里的抽样。 |
 | C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
 | C-D4 | ⚠️ | `option_daily` 一行现在就是进度条：45/575 广度、58/70 达标、中位 24 个月（§2b）。仍是 ⚠️：它答得出"买到了多少"，答不出"按当前速率还要多久"——那需要把队列消化速率接进来。 |
 | C-F1 | ✅ | `session.py` 是唯一定义（19:30 NY 锚点 + 交易日历），`doctor` 与 `quality` 都调用它，交易日探针可注入以保留既有测试接缝。`ingest_dashboard` 的 22:30 ET 是 **cron 宽限窗口**，回答"该点火了吗"，与"该持有哪个 session"是两个问题，刻意保留。 |
 | C-F2 | ✅ | 19 个数据集各自在契约里声明截止时间；`quality.check_freshness` 按维度取 `deadline_for_dimension()`，返回体里每个维度带自己的 `deadline_hours`，平铺的 `max_age_hours` 已为 `None`。线上实测：stock_daily / option_snapshot / option_open_interest 各 2h，calendar 48h。 |
 | C-F3 | ⚠️ | Plugin 侧已收敛：doctor 的 `STALENESS` 由 `contracts.staleness_by_slot()` 派生（一条测试断言两者逐条一致），`quality` 的 24h/72h 周末规则退役——问交易日历后周末例外根本不需要存在。仍是 ⚠️：**platform-api 的 `freshnessWeekendMaxAgeH` 与 Console `dataVitalsModel.ts:9-10` 还各有一份**。 |
-| C-F4 | ⚠️ | 0.18.1 起 `SESSION_ONCE_SLOTS` 的守卫改为按覆盖判定并排除盘中行（`scheduler/daily.py`），跳过不再等于成功。但 `_slot_adherence`（`api/ingest_dashboard.py:513-711`）仍以 job 证据判定 `on_plan/missed`，未对数据判定。 |
-| C-G1 | ⚠️ | `DataInventoryStrip` 的三个假分母已修：Option/Snapshots 用过 `max(watchlist, 实际值)`（不可能小于被测量的数），Stock Day 是"大于零即满格"的存在标志画成满条。现在都除以契约表的分母，且**没有分母时不画条**而是明说。**更正 2026-09-09.2 的一处误判**：`OptionCoverageSection.tsx:191` 的 `max(1, ...)` 是条形图的相对刻度（`contractCount / maxContracts`），不是覆盖率分母，不该被列为假分母。仍是 ⚠️：其余面板尚未逐一核对。 |
+| C-F4 | ⚠️ | 0.18.1 起 `SESSION_ONCE_SLOTS` 的守卫改为按覆盖判定并排除盘中行；0.19.3 起 Doctor 也真的巡检 575 个名字而不是 28 个——**这是"跳过不是成功"第一次有牙齿**：26/575 这种 session 以前在 Doctor 上是绿的。检查方式按采集方式分：整链的名字（27 个 resident + 基准）比覆盖率，窗口的名字（543 个 core/edge，只取近价 3 个到期 ±15% 行权价）比"有没有写进来"。仍是 ⚠️：`_slot_adherence`（`api/ingest_dashboard.py:513-711`）仍以 job 证据判定 `on_plan/missed`，未对数据判定。 |
+| C-G1 | ⚠️ | `DataInventoryStrip` 的三个假分母已修：Option/Snapshots 用过 `max(watchlist, 实际值)`（不可能小于被测量的数），Stock Day 是"大于零即满格"的存在标志画成满条。现在都除以契约表的分母，且**没有分母时不画条**而是明说。**更正 2026-09-09.2 的一处误判**：`OptionCoverageSection.tsx:191` 的 `max(1, ...)` 是条形图的相对刻度（`contractCount / maxContracts`），不是覆盖率分母，不该被列为假分母。本轮逐一核对了 Console 的 market-data 面板：`ScoreRing total=` 的十来处 `Math.max(x.length, 1)` 都是分区总数，不是覆盖率分母。**查出并修好第五处真的假分母**：`analyticsDemandModel.ts` 的 `optionTarget = max(watchlist, snapshot, oi, 1)`（分母把被测量的数算了进去，采到 1 个也是满格）、`inputOf` 的 `target = count` 默认值（分母就是分子）、`CS_FUND_TARGET = 5000` 手写常数、`Stock daily` 的"大于零即 100%"——四处全部改为除以 `/market/coverage/dimensions` 的契约分母，**没有分母就不画条**。它同时喂着 Overview 页与 `massiveAgentPack`，是这一类里影响面最大的一处。 |
 | C-G2 | ⚠️ | 19 个数据集全部报出三个轴（`/market/coverage/dimensions`）。仍是 ⚠️：`stock_movers` 是 top-N 榜单，用全市场当分母得到 0.4%，是无意义的比率——它需要自己的档位。 |
 | C-G3 | ❌ | entitled 但未持有的 8 个数据面（§4）在任何界面上都不可见；`/market/capabilities` 只列 planned（需升级）与 unavailable（端点 404），不列"已付费但没在采"。 |
 
@@ -120,9 +120,10 @@ status: 口径已收敛到契约表 · 深度仍是唯一的大洞
 | 差距 | 证据 | 最小改动 |
 |---|---|---|
 | 新鲜度被至少 **7 个面板**回答 | `WorkersFreshnessPanel` / `DataVitalsStrip` / `SepaStatsSection` / `QualityScoreSection` / `QueueDashboardPanel` / `DoctorPanel` / `HusbandryStrip` | 收敛到契约表的截止时间，面板只渲染 |
-| 陈旧阈值 4 套 | 见 C-F3 | 单一来源，其余读它 |
-| session 定义 4 套 | 见 C-F1 | 统一到 `doctor.resolve_session` |
-| 分母 4 套 + 2 个永远 100% 的假分母 | 见 C-B1 / C-G1 | 契约表 |
+| ~~陈旧阈值 4 套~~ | Plugin 侧已收敛（C-F3）；platform-api 与 Console `dataVitalsModel.ts` 各留一份 | 那两份读契约表 |
+| ~~session 定义 4 套~~ | 已收敛到 `session.py`（C-F1） | — |
+| ~~分母 4 套~~ | 已收敛到 `contracts.py` + `scopes.py`（C-B1） | — |
+| ~~永远 100% 的假分母~~ | `DataInventoryStrip` 三处 + `analyticsDemandModel` 四处已修（C-G1） | — |
 | `/coverage/quality-score` 被三处 fetch | `MarketDataOverviewTab.tsx:68-73`、`QualityScoreSection.tsx:46-51`（共享缓存）、`ReadinessPanel.tsx:70-75`（**独立 queryKey，真重复请求**） | 统一 queryKey |
 | `/coverage/contracts` 被两处不同 limit 打两次 | `DataVitalsStrip.tsx:105-110`（默认 100）与 `OptionCoverageSection.tsx:159`（500）——Vitals 卡上的 contracts 只是前 100 名之和，与 Coverage 页对不上 | 同一 limit 或同一 query |
 | 纯 alias 端点 | `coverage.py:701-707` `stock-day-quality-detail` = `bar-quality-detail` | 删一个 |
@@ -162,6 +163,7 @@ status: 口径已收敛到契约表 · 深度仍是唯一的大洞
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.4 | 2026-09-09 | 分母收敛完毕（C-B1 ✅）。Doctor 的巡检面从 28 个名字扩到 575，按采集方式分档判定；顺带发现并修掉第五处假分母（`analyticsDemandModel` 的四个），以及 `k8s/base` 钉在一个从未构建过的 tag 上。契约状态 ✅ 6 / ⚠️ 7 / ❌ 1。 |
 | 2026-09-09.3 | 2026-09-09 | 口径收敛：`session.py` 一套 session 定义，阈值全部派生自契约表；Console 的假分母改为除以真分母、无分母不画条；顺带修好 quality gate 在回填负载下的 500。契约状态 ✅ 5 / ⚠️ 8 / ❌ 1（上一轮 ✅ 3 / ⚠️ 5 / ❌ 6）。 |
 | 2026-09-09.2 | 2026-09-09 | 契约表代码化（`contracts.py`，19 个数据集）+ `/market/coverage/dimensions` + Console 三维表。三维首次可读（§2b）。契约状态 ✅ 3 / ⚠️ 5 / ❌ 6。 |
 | 2026-09-09.1 | 2026-09-09 | 基线。三维首次实测；14 条契约中 ✅ 0 / ⚠️ 4 / ❌ 10。深度维度确认为最大空白（575 个标的里 47 个有期权历史，零面板显示）。 |

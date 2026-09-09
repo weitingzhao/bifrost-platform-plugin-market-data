@@ -81,6 +81,14 @@ FINANCIALS_SINCE = "2009-01-01"
 # The Research universe's per-tier history requirement (research.option_universe).
 UNIVERSE_MONTHS = {"resident": 24, "core": 24, "edge": 12}
 
+#: Below this many symbols, the whole-market grouped pull did not happen for the
+#: session — whatever the job status says. One number because there were two:
+#: the doctor asked for 12,000 rows and the quality gate for 4,000 symbols, of
+#: the same session-scoped count, so the same table could pass one and fail the
+#: other. Measured on 19 sessions from 2026-08-12 to 2026-09-08: 12,396 low,
+#: 12,576 high, and a failed session on 2026-08-11 wrote 18.
+STOCK_DAILY_MIN_SESSION_SYMBOLS = 12000
+
 CONTRACTS: tuple[DatasetContract, ...] = (
     # ── whole-market: one call covers everyone, so pull the entitlement ──
     DatasetContract(
