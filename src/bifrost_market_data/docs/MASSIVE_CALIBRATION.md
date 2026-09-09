@@ -1,7 +1,7 @@
 ---
-version: 2026-09-09.1
+version: 2026-09-09.2
 updated: 2026-09-09
-status: 基线快照 · 深度维度尚未被任何面板回答
+status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
 ---
 
 # Massive 校准
@@ -58,11 +58,11 @@ status: 基线快照 · 深度维度尚未被任何面板回答
 
 | 编号 | 状态 | 证据 |
 |---|---|---|
-| C-B1 | ❌ | **同时存在 4 套"应该有多少标的"的分母**：`api/coverage.py:253` watchlist（默认 80）、`doctor.py:287-289` optionable watchlist ∪ 基准、`quality.py:156` 硬编码常数 4000、`api/readiness_summary.py:44-52` `v_us_equity_universe`。没有契约表。 |
-| C-B2 | ❌ | 两个比率一个都没有。`/market/capabilities`（`subscription.py:105`）回答的是"哪些能力被实现了"，不是"持有了多少"；Console 的 Capability 面板 `capPct` 是手工标注的 implemented/partial 计数。 |
+| C-B1 | ⚠️ | **同时存在 4 套"应该有多少标的"的分母**：`api/coverage.py:253` watchlist（默认 80）、`doctor.py:287-289` optionable watchlist ∪ 基准、`quality.py:156` 硬编码常数 4000、`api/readiness_summary.py:44-52` `v_us_equity_universe`。没有契约表。 |
+| C-B2 | ✅ | `GET /market/coverage/dimensions` 同时报意图达成率与口径利用率，两者分列不合并。`/market/capabilities`（`subscription.py:105`）回答的是"哪些能力被实现了"，不是"持有了多少"；Console 的 Capability 面板 `capPct` 是手工标注的 implemented/partial 计数。 |
 | C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（`doctor.py:463-469`，error 含 `not entitled` 时不给 retry 处方）与可重试失败。但"vendor 无此数据"与"未排程"两类未区分：`ops_jobs.symbol_source_void`（`ddl.py:644`）记了前者却不在任何覆盖率分母里体现。 |
-| C-D1 | ❌ | 深度目标散落在代码常量里：`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`、`subscription.py:23-43` 的窗口字符串只是展示文案。无契约表。 |
-| C-D2 | ❌ | 唯一的深度面板 `StockDepthSection.tsx` 只覆盖 watchlist 的 80 个标的（`MarketDataCoverageTab.tsx:126-131` 不带 limit → 服务端默认 80），靠 N×2 并发拉取，且主视觉是缺口数（`:322-323, 342`）而非深度——"往回多少年"只出现在 tooltip 与折叠表格里。**期权深度零面板。** |
+| C-D1 | ✅ | 深度目标散落在代码常量里：`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`、`subscription.py:23-43` 的窗口字符串只是展示文案。无契约表。 |
+| C-D2 | ✅ | 唯一的深度面板 `StockDepthSection.tsx` 只覆盖 watchlist 的 80 个标的（`MarketDataCoverageTab.tsx:126-131` 不带 limit → 服务端默认 80），靠 N×2 并发拉取，且主视觉是缺口数（`:322-323, 342`）而非深度——"往回多少年"只出现在 tooltip 与折叠表格里。**期权深度零面板。** |
 | C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
 | C-D4 | ❌ | 回填进度不可见。`IngestDailyVolume` 显示的是 job 条数（09-08 那 356 万），无法回答"买到了多少个标的的多少个月"。 |
 | C-F1 | ❌ | **"当期 session" 有 4 个定义**：`doctor.py:244-261` `resolve_session`（19:30 NY）、`quality.py` `fetch_completed_trading_days`（排除今天）、`api/ingest_dashboard.py` 的 22:30 ET grace、`api/readiness_summary.py:39-40` `_STALE_DAYS=7`。 |
@@ -70,8 +70,38 @@ status: 基线快照 · 深度维度尚未被任何面板回答
 | C-F3 | ❌ | **4 套阈值并存**：`quality.py:14-16`（24h / 周末 72h）、`doctor.py:69-75`（12/48/168h）、platform-api 的 `freshnessWeekendMaxAgeH`、Console `dataVitalsModel.ts:9-10`（12h / 72h）。同一个数据集在不同面板上可以显示不同健康状态。 |
 | C-F4 | ⚠️ | 0.18.1 起 `SESSION_ONCE_SLOTS` 的守卫改为按覆盖判定并排除盘中行（`scheduler/daily.py`），跳过不再等于成功。但 `_slot_adherence`（`api/ingest_dashboard.py:513-711`）仍以 job 证据判定 `on_plan/missed`，未对数据判定。 |
 | C-G1 | ❌ | 存在结构上永远等于 100% 的分母：`DataInventoryStrip.tsx:92` 用 `max(watchlist, 实际值)`、`OptionCoverageSection.tsx:191` 用"最大的那个 underlying"。这些不是覆盖率。 |
-| C-G2 | ❌ | 14 个数据集中，能回答全部三个轴的：**0 个**。能回答两个轴（广度+新鲜度）的：`stock_daily`、`option_snapshot`。 |
+| C-G2 | ⚠️ | 19 个数据集全部报出三个轴（`/market/coverage/dimensions`）。仍是 ⚠️：`stock_movers` 是 top-N 榜单，用全市场当分母得到 0.4%，是无意义的比率——它需要自己的档位。 |
 | C-G3 | ❌ | entitled 但未持有的 8 个数据面（§4）在任何界面上都不可见；`/market/capabilities` 只列 planned（需升级）与 unavailable（端点 404），不列"已付费但没在采"。 |
+
+## 2b. 三维首次读数（2026-09-09，`/market/coverage/dimensions`）
+
+契约表落地后第一次全量读数。**每个百分比的分子都取自它自己的分母集合**（"该档位要的标的里，我持有多少"），范围外的持有量另列，不灌进比率。
+
+| 数据集 | 档位 | 广度 | 范围外 | 深度 |
+|---|---|---|---|---|
+| `stock_daily` | whole-market | **97.5%**（5,182/5,317） | +7,336 | 10,862/20,695 达标，中位 60 个月 |
+| `stock_snapshot` | whole-market | 99.8% | +7,839 | current only |
+| `ticker` | whole-market | 100.0% | +61 | catalogue |
+| `short_interest` | whole-market | 99.3% | +17,654 | forward only |
+| `short_volume` | whole-market | 98.1% | +9,942 | forward only |
+| `ratios` | whole-market | **74.7%** | +828 | forward only |
+| 财报三表 | whole-market | 82–83% | +48 | 0/4,468 达标，中位 118 个月 |
+| `corporate_action` | whole-market | 13.8% | +3,207 | catalogue |
+| `stock_movers` | whole-market | 0.4% | +19 | current only |
+| `option_snapshot` / `option_open_interest` | universe | **99.1%**（570/575） | 0 | 0/570 达标，中位 0 个月 |
+| `option_contract` | universe | 99.1% | 0 | catalogue |
+| `option_daily` | universe | **7.8%**（45/575） | +1 | **58/70 达标，中位 24 个月** |
+| `stock_minute` | benchmark-only | **27.3%**（3/11） | +15 | 0/18 达标 |
+| `option_minute` | benchmark-only | **9.1%**（1/11） | +7 | 0/18 达标 |
+
+读出来的四件事：
+
+1. **whole-market 档基本已拉满订阅口径**（97–100%），"没有充分利用订阅"这句话对股票面不成立。范围外的七千多个是五年里的退市历史，被正确排除而不是灌成 389%。
+2. **`ratios` 的 74.7% 不是我们的缺口** —— vendor 的 ratio 覆盖本就只到约 5,000 个 ticker，这是供应商边界。
+3. **`option_daily` 7.8% 是那 324 万个回填任务的进度条**，第一次可见：已到达的 70 个标的里 58 个达到 24 个月目标，中位 24 个月——回填本身是对的，只是才走到 70/575。
+4. **新发现：分钟线只覆盖 11 个基准里的 3 个**（`stock_minute` 27.3%、`option_minute` 9.1%），而它持有的 18 个标的中 15 个在基准之外。`minute-bars` 轮转的是 watchlist，不是它声称的基准集。
+
+建模过程中被这次读数抓出并修正的四个错误（都在契约表侧，记录以免重犯）：分子分母窗口不一致（389%）、benchmark 分母只算基准漏了 watchlist（164%）、`corporate_action` 的窗口向前看导致"深度"为负、`option_open_interest` 在分区表上跳跃扫描超时。
 
 ## 3. 已知差距与最小改动
 
@@ -122,4 +152,5 @@ status: 基线快照 · 深度维度尚未被任何面板回答
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.2 | 2026-09-09 | 契约表代码化（`contracts.py`，19 个数据集）+ `/market/coverage/dimensions` + Console 三维表。三维首次可读（§2b）。契约状态 ✅ 3 / ⚠️ 5 / ❌ 6。 |
 | 2026-09-09.1 | 2026-09-09 | 基线。三维首次实测；14 条契约中 ✅ 0 / ⚠️ 4 / ❌ 10。深度维度确认为最大空白（575 个标的里 47 个有期权历史，零面板显示）。 |
