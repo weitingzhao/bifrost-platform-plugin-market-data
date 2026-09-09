@@ -150,3 +150,17 @@ def test_a_daily_series_still_is() -> None:
     assert contract_for("raw_market.short_volume").cadence == "session"
     assert contract_for("raw_market.ratios").cadence == "session"
     assert contract_for("raw_market.stock_daily").cadence == "session"
+
+
+def test_short_volume_history_is_bought_not_merely_accrued() -> None:
+    """forward_only was ratios' constraint, copied here without being checked.
+
+    ratios' endpoint ignores ?date and always returns the latest, so its history
+    can only accumulate. Short volume for 2026-06-15 comes back dated
+    2026-06-15, measured 2026-09-09 — which is what made a two-year gap fixable
+    rather than permanent.
+    """
+    c = contract_for("raw_market.short_volume")
+    assert c.depth.kind == "rolling_days"
+    assert c.depth.value == 730
+    assert contract_for("raw_market.ratios").depth.kind == "forward_only"
