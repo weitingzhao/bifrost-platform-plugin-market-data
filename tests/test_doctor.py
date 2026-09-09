@@ -53,6 +53,8 @@ class _Cur:
             self._rows = [{"count": d.get("short_volume", 0)}]
         elif "from ops_jobs.ingest_freshness" in q:
             self._rows = list(d.get("freshness", []))
+        elif "relpartbound" in q:
+            self._rows = list(d.get("partitions", []))
         elif "from ops_jobs.queue_sample" in q:
             # The recorded failure counts, which outlive the job rows.
             self._rows = list(d.get("failed_samples", []))
@@ -556,3 +558,61 @@ def test_without_the_sample_table_the_queue_rows_still_answer() -> None:
     f = next(x for x in rep["findings"] if x["id"] == "failed:option_daily")
     assert f["actual"] == 6
     assert "still on the queue" not in f["detail"]
+
+
+# ── Partition runway: running out is an outage, not a degradation ──
+
+
+def _bound(to_date: str) -> str:
+    return f"FOR VALUES FROM ('2026-01-01 00:00:00+00') TO ('{to_date} 00:00:00+00')"
+
+
+def test_a_table_running_out_of_partitions_is_reported() -> None:
+    """A row with no partition to land in is rejected outright."""
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", True, _bound("2026-09-20"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(x for x in rep["findings"] if x["id"] == "partition_runway:option_snapshot")
+    # Sixteen days from the 2026-09-04 session: short of the runway, but there
+    # is still time for the nightly build-ahead to do it.
+    assert f["severity"] == "warn"
+    assert f["actual"] == "16 days"
+    assert "through 2026-09-20" in f["detail"]
+    assert "builds them ahead automatically" in f["detail"]
+
+
+def test_two_weeks_of_runway_is_critical() -> None:
+    """Close enough that the next build-ahead is the last chance to matter."""
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", True, _bound("2026-09-12"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(x for x in rep["findings"] if x["id"] == "partition_runway:option_snapshot")
+    assert f["severity"] == "crit"
+
+
+def test_not_owning_the_table_is_critical_however_far_out_it_reaches() -> None:
+    """The plugin cannot extend a table it does not own, so time does not help."""
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", False, _bound("2026-10-10"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(x for x in rep["findings"] if x["id"] == "partition_runway:option_snapshot")
+    assert f["severity"] == "crit"
+    assert "fix_object_ownership.sql" in f["detail"]
+
+
+def test_a_long_runway_is_not_a_finding() -> None:
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", True, _bound("2027-06-01"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert not [x for x in rep["findings"] if x["id"].startswith("partition_runway:")]
+
+
+def test_the_furthest_partition_is_the_one_that_counts() -> None:
+    """Several partitions per table; the runway is the last one, not the first."""
+    data = _healthy_data()
+    data["partitions"] = [
+        ("option_snapshot", True, _bound("2026-09-10")),
+        ("option_snapshot", True, _bound("2027-06-01")),
+    ]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert not [x for x in rep["findings"] if x["id"].startswith("partition_runway:")]

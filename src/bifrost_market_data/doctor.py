@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -58,6 +59,12 @@ STOCK_SNAPSHOT_MIN_ROWS = 12000
 # live probe), so 95% of the catalogue is unreachable by construction. Healthy
 # sessions measure 94-100%; the sessions the old model broke measured 33-72%.
 SNAPSHOT_COVERAGE_MIN = 0.90
+
+# How far ahead a partitioned table must already have partitions. Inserts fail
+# outright when a row has no partition to land in, so this has to warn early
+# enough to run an elevated script: `ensure_month_partitions` builds three months
+# ahead, and only the owner of the parent may create one.
+PARTITION_RUNWAY_MIN_DAYS = 45
 
 # The tiers the EOD slot collects with the near-the-money window. Their rows are
 # a deliberate slice of the chain, so they are checked for presence, not share.
@@ -351,6 +358,64 @@ def _presence_findings(
             fixable=fixable,
         ),
     ]
+
+
+_PARTITION_BOUND_TO = re.compile(r"TO \('([^']+)'\)")
+
+
+def _partition_runway(conn: Any) -> list[tuple[str, date | None, bool]] | None:
+    """Per partitioned table: how far its partitions reach, and whether we own it.
+
+    A row with no partition to land in is rejected, so running out is an outage
+    rather than a degradation — and the plugin cannot extend a table it does not
+    own. On 2026-09-09 every partition in raw_market was owned by ``postgres``
+    while the plugin runs as ``bifrost``, so ``ensure_month_partitions`` would
+    have started failing three months before the first insert had nowhere to go.
+    ``scripts/fix_object_ownership.sql`` is the elevated fix.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.relname,
+                       pg_get_userbyid(p.relowner) = current_user AS owned,
+                       pg_get_expr(c.relpartbound, c.oid)
+                FROM pg_class p
+                JOIN pg_namespace n ON n.oid = p.relnamespace
+                JOIN pg_inherits i ON i.inhparent = p.oid
+                JOIN pg_class c ON c.oid = i.inhrelid
+                WHERE n.nspname = 'raw_market' AND p.relkind = 'p'
+                """
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — a catalogue probe must not sink the report
+        logger.warning("doctor partition runway read failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+    reach: dict[str, tuple[date | None, bool]] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            values = list(row.values())
+            parent, owned, bound = values[0], values[1], values[2]
+        else:
+            parent, owned, bound = row[0], row[1], row[2]
+        parent = str(parent)
+        match = _PARTITION_BOUND_TO.search(str(bound or ""))
+        upper: date | None = None
+        if match:
+            try:
+                upper = datetime.fromisoformat(match.group(1)).date()
+            except ValueError:
+                upper = None
+        current, current_owned = reach.get(parent, (None, bool(owned)))
+        if upper is not None and (current is None or upper > current):
+            current = upper
+        reach[parent] = (current, bool(owned))
+    return [(k, v[0], v[1]) for k, v in sorted(reach.items())]
 
 
 def _failed_since(conn: Any, since: datetime) -> dict[str, int] | None:
@@ -786,6 +851,37 @@ def run_doctor(
                 auto_fixable=not unentitled and bool(ids),
             )
         )
+    # ── Partition runway: a row with nowhere to land is rejected, not degraded ──
+    runway = _partition_runway(conn)
+    for parent, reaches, owned in runway or []:
+        if reaches is None:
+            continue
+        days_left = (reaches - session).days
+        if days_left >= PARTITION_RUNWAY_MIN_DAYS:
+            continue
+        detail = (
+            f"raw_market.{parent} has partitions through {reaches.isoformat()}, "
+            f"{days_left} days out; inserts past that are rejected."
+        )
+        detail += (
+            " The plugin owns the table and builds them ahead automatically."
+            if owned
+            else " The plugin does not own the table and cannot create the next one —"
+            " run scripts/fix_object_ownership.sql from an elevated session."
+        )
+        findings.append(
+            Finding(
+                f"partition_runway:{parent}",
+                "trim",
+                "crit" if days_left < 14 or not owned else "warn",
+                f"Partition runway: {parent}",
+                f">= {PARTITION_RUNWAY_MIN_DAYS} days",
+                f"{days_left} days",
+                detail,
+                session=session_s,
+            )
+        )
+
     stuck = _count(
         conn,
         """
