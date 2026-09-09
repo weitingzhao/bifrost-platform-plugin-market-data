@@ -185,3 +185,71 @@ def test_an_unknown_tier_is_a_400(wired: dict[str, Any]) -> None:
     with pytest.raises(mod.HTTPException) as err:
         mod.get_dimensions(tier="nope", refresh=True)
     assert err.value.status_code == 400
+
+
+def test_a_boundary_dataset_is_never_scanned_per_symbol(wired: dict[str, Any]) -> None:
+    """Measuring depth only to discard it was most of the cost: short_interest
+    alone is 22,932 symbols, and its history can only accumulate forward."""
+    conn = _Conn([("AAPL", date(2024, 1, 1))], date(2026, 9, 8))
+    mod._one(BY_DATASET["raw_market.ratios"], {"whole-market": 5317}, TODAY, conn)
+
+    assert not any("GROUP BY" in q for q in conn.queries)
+    assert any("count(DISTINCT" in q for q in conn.queries)
+
+
+def test_a_cold_read_answers_at_once_and_refreshes_behind_itself(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scanning every dataset took 154s against the real tables; the gateway
+    gives up at 60. A reader must never wait for that."""
+    started: list[str] = []
+    monkeypatch.setattr(mod, "_start_refresh", lambda key, wanted: (started.append(key), True)[1])
+    mod._CACHE.clear()
+
+    body = mod.get_dimensions(tier=None, refresh=False)["data"]
+
+    assert body["computing"] is True
+    assert body["datasets"] == []
+    assert body["age_sec"] is None
+    assert started == ["all"]
+
+
+def test_a_stale_answer_is_served_while_the_refresh_runs(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mod, "_start_refresh", lambda key, wanted: True)
+    fresh = mod.get_dimensions(tier="global", refresh=True)["data"]
+    # Age the cache past its TTL without waiting for it.
+    at, payload = mod._CACHE["global"]
+    mod._CACHE["global"] = (at - mod.TTL_SEC - 1, payload)
+
+    stale = mod.get_dimensions(tier="global", refresh=False)["data"]
+
+    assert stale["generated_at"] == fresh["generated_at"]  # the last good answer, not an empty page
+    assert stale["computing"] is True
+    assert stale["age_sec"] > mod.TTL_SEC
+
+
+def test_only_one_refresh_runs_per_key(wired: dict[str, Any]) -> None:
+    mod._REFRESHING.clear()
+    calls: list[str] = []
+
+    class _Thread:
+        def __init__(self, target: Any, name: str = "", daemon: bool = False) -> None:
+            calls.append(name)
+
+        def start(self) -> None:
+            return None
+
+    import threading as real_threading
+
+    original = mod.threading.Thread
+    mod.threading.Thread = _Thread  # type: ignore[assignment]
+    try:
+        assert mod._start_refresh("all", list(CONTRACTS)) is True
+        assert mod._start_refresh("all", list(CONTRACTS)) is False  # already in flight
+        assert len(calls) == 1
+    finally:
+        mod.threading.Thread = original  # type: ignore[assignment]
+        assert real_threading is mod.threading
+        mod._REFRESHING.clear()

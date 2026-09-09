@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import statistics
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from time import monotonic
@@ -37,6 +38,8 @@ MAX_WORKERS = 4
 # a cached number as live.
 TTL_SEC = 600.0
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_REFRESHING: dict[str, bool] = {}
+_REFRESH_LOCK = threading.Lock()
 
 #: Depth kinds that name a plan boundary rather than a target to reach (C-D3).
 BOUNDARY_KINDS = frozenset({"current_only", "catalogue", "forward_only"})
@@ -160,7 +163,10 @@ def _one(
         conn = connect_db(statement_timeout=STATEMENT_TIMEOUT)
     try:
         per_symbol: list[tuple[str, date | None]] = []
-        if c.symbol_column and c.date_column:
+        # A dataset whose depth is a plan boundary has no target to measure
+        # against, so the per-symbol scan would be work done only to discard.
+        # That is most of the cost: short_interest alone is 22,932 symbols.
+        if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
             per_symbol = _per_symbol_oldest(conn, c)
             held = len(per_symbol)
         else:
@@ -239,25 +245,8 @@ def _benchmarks() -> list[str]:
     return [str(s) for s in names]
 
 
-@router.get("/dimensions")
-def get_dimensions(
-    tier: str | None = Query(None, description="whole-market | universe | benchmark-only | global"),
-    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
-) -> dict[str, Any]:
-    """Breadth, depth and freshness for every dataset that has a contract."""
-    key = tier or "all"
-    now = monotonic()
-    if not refresh:
-        hit = _CACHE.get(key)
-        if hit and now - hit[0] <= TTL_SEC:
-            out = dict(hit[1])
-            out["age_sec"] = round(now - hit[0], 1)
-            return _ok(out)
-
-    wanted = [c for c in CONTRACTS if tier is None or c.tier == tier]
-    if not wanted:
-        raise HTTPException(status_code=400, detail=f"no datasets in tier {tier!r}")
-
+def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
+    """The expensive part, shared by the synchronous and background paths."""
     probe = connect_db(statement_timeout=STATEMENT_TIMEOUT)
     try:
         denominators = _denominators(probe)
@@ -271,23 +260,73 @@ def get_dimensions(
                 futures = [pool.submit(_one, wanted[0], denominators, today, probe)]
                 futures += [pool.submit(_one, c, denominators, today) for c in wanted[1:]]
                 rows = [f.result() for f in futures]
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("coverage dimensions failed")
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         _close_quietly(probe)
-
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "age_sec": 0.0,
+        "computing": False,
         "computed_ms": int((monotonic() - started) * 1000),
         "denominators": denominators,
         "datasets": rows,
     }
-    _CACHE[key] = (now, payload)
-    return _ok(payload)
+    _CACHE[key] = (monotonic(), payload)
+    return payload
+
+
+def _start_refresh(key: str, wanted: list[DatasetContract]) -> bool:
+    """Kick off a background recompute unless one is already running for this key."""
+    with _REFRESH_LOCK:
+        if _REFRESHING.get(key):
+            return False
+        _REFRESHING[key] = True
+
+    def run() -> None:
+        try:
+            _compute(key, wanted)
+        except Exception:  # noqa: BLE001 — a failed refresh leaves the last good answer
+            logger.exception("coverage dimensions refresh failed for %s", key)
+        finally:
+            with _REFRESH_LOCK:
+                _REFRESHING[key] = False
+
+    threading.Thread(target=run, name=f"dimensions-{key}", daemon=True).start()
+    return True
+
+
+@router.get("/dimensions")
+def get_dimensions(
+    tier: str | None = Query(None, description="whole-market | universe | benchmark-only | global"),
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Breadth, depth and freshness for every dataset that has a contract."""
+    key = tier or "all"
+    wanted = [c for c in CONTRACTS if tier is None or c.tier == tier]
+    if not wanted:
+        raise HTTPException(status_code=400, detail=f"no datasets in tier {tier!r}")
+
+    now = monotonic()
+    hit = _CACHE.get(key)
+    if not refresh:
+        # Scanning every dataset takes minutes; the API gateway gives up at 60s
+        # and the reader should never wait that long for numbers that move once
+        # a day. Answer from the cache and refresh behind it, saying plainly how
+        # old the answer is and whether a fresher one is on its way.
+        fresh_enough = hit is not None and now - hit[0] <= TTL_SEC
+        if not fresh_enough:
+            started_refresh = _start_refresh(key, wanted)
+            if hit is None:
+                return _ok({"computing": started_refresh, "age_sec": None, "datasets": []})
+        out = dict(hit[1])
+        out["age_sec"] = round(now - hit[0], 1)
+        out["computing"] = not fresh_enough
+        return _ok(out)
+
+    try:
+        return _ok(_compute(key, wanted))
+    except Exception as exc:
+        logger.exception("coverage dimensions failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 __all__ = ["router", "get_dimensions", "TTL_SEC"]
