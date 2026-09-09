@@ -135,10 +135,13 @@ def test_summary_contract_fields(monkeypatch) -> None:
         "short_interest_actionable_gap_count": 10,
         "short_volume_actionable_gap_count": 10,
     }
-    monkeypatch.setattr(summary_mod, "require_db", lambda: _DummyConn())
+    monkeypatch.setattr(summary_mod, "connect_db", lambda **_k: _DummyConn())
     monkeypatch.setattr(summary_mod, "build_readiness_summary", lambda _c: sample)
+    summary_mod.SUMMARY_CACHE.clear()
     client = TestClient(create_app())
-    resp = client.get("/market/readiness/summary")
+    # The composite takes 81s against the real tables, so the plain read comes
+    # from cache; `refresh` is the synchronous path this contract test wants.
+    resp = client.get("/market/readiness/summary?refresh=true")
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True

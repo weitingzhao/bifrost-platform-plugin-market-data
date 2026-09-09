@@ -89,9 +89,12 @@ def test_coverage_inventory(monkeypatch) -> None:
         "generated_at": "2026-08-07T20:30:00Z",
     }
     monkeypatch.setattr(mod, "query_inventory", lambda *_a, **_k: sample)
-    monkeypatch.setattr(mod, "require_db", lambda: _DummyConn())
+    monkeypatch.setattr(mod, "connect_db", lambda **_k: _DummyConn())
+    mod.INVENTORY_CACHE.clear()
     client = TestClient(create_app())
-    resp = client.get("/market/coverage/inventory")
+    # The full pass takes minutes against the real tables, so the plain read is
+    # served from cache; `refresh` is the synchronous path this test wants.
+    resp = client.get("/market/coverage/inventory?refresh=true")
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
@@ -101,6 +104,27 @@ def test_coverage_inventory(monkeypatch) -> None:
     assert data["option"]["underlyings"] == 2
     assert data["analytics"]["max_pain"]["symbols"] == 2
     assert len(data["watchlist_symbols"]) == 2
+
+
+def test_coverage_inventory_cold_read_answers_at_once(monkeypatch) -> None:
+    """151 seconds of `stock_daily` against a 60-second gateway: nobody waits."""
+    from bifrost_market_data.api import coverage as mod
+
+    mod.INVENTORY_CACHE.clear()
+    started: list[str] = []
+    monkeypatch.setattr(
+        mod.INVENTORY_CACHE,
+        "start_refresh",
+        lambda key, compute: (started.append(key), True)[1],
+    )
+    client = TestClient(create_app())
+    data = client.get("/market/coverage/inventory").json()
+
+    assert data["ok"] is True
+    assert data["computing"] is True
+    assert data["age_sec"] is None
+    assert data["stock_daily"] is None  # still counting, not counted as zero
+    assert started == ["inventory"]
 
 
 def test_coverage_watchlist(monkeypatch) -> None:

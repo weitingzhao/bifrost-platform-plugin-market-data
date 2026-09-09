@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import logging
 import statistics
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
-from time import monotonic
 from typing import Any, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
@@ -26,6 +24,7 @@ from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
+from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
 from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
 
 logger = logging.getLogger(__name__)
@@ -37,11 +36,10 @@ STATEMENT_TIMEOUT = "120s"
 MAX_WORKERS = 4
 # The numbers move once a day. Several viewers polling must not each pay for a
 # 13.6M-row scan, and `age_sec` says how old the answer is rather than dressing
-# a cached number as live.
-TTL_SEC = 600.0
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_REFRESHING: dict[str, bool] = {}
-_REFRESH_LOCK = threading.Lock()
+# a cached number as live. The mechanism is shared with the inventory and the
+# readiness summary, which have the same problem for the same reason.
+TTL_SEC = DEFAULT_TTL_SEC
+CACHE = BackgroundCache("dimensions", ttl_sec=TTL_SEC)
 
 #: Depth kinds that name a plan boundary rather than a target to reach (C-D3).
 BOUNDARY_KINDS = frozenset({"current_only", "catalogue", "forward_only"})
@@ -297,7 +295,6 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
     try:
         denominators = _denominators(probe)
         today = _today()
-        started = monotonic()
         workers = min(MAX_WORKERS, len(wanted))
         if workers == 1:
             rows = [_one(wanted[0], denominators, today, probe)]
@@ -309,41 +306,11 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
     finally:
         _close_quietly(probe)
     public_denominators = {k: v for k, v in denominators.items() if k != "scopes"}
-    payload = {
+    return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "age_sec": 0.0,
-        "computing": False,
-        "computed_ms": int((monotonic() - started) * 1000),
         "denominators": public_denominators,
         "datasets": rows,
     }
-    _CACHE[key] = (monotonic(), payload)
-    return payload
-
-
-def _start_refresh(key: str, wanted: list[DatasetContract]) -> bool:
-    """Ensure a recompute is in flight for this key; True when one is.
-
-    Answers "is a refresh running", not "did I start one" — a caller arriving
-    while another is already scanning was told computing=false and shown an
-    empty page it had no reason to poll again.
-    """
-    with _REFRESH_LOCK:
-        if _REFRESHING.get(key):
-            return True
-        _REFRESHING[key] = True
-
-    def run() -> None:
-        try:
-            _compute(key, wanted)
-        except Exception:  # noqa: BLE001 — a failed refresh leaves the last good answer
-            logger.exception("coverage dimensions refresh failed for %s", key)
-        finally:
-            with _REFRESH_LOCK:
-                _REFRESHING[key] = False
-
-    threading.Thread(target=run, name=f"dimensions-{key}", daemon=True).start()
-    return True
 
 
 @router.get("/dimensions")
@@ -357,28 +324,19 @@ def get_dimensions(
     if not wanted:
         raise HTTPException(status_code=400, detail=f"no datasets in tier {tier!r}")
 
-    now = monotonic()
-    hit = _CACHE.get(key)
+    # Scanning every dataset takes minutes; the API gateway gives up at 60s and
+    # the reader should never wait that long for numbers that move once a day.
+    def _work() -> dict[str, Any]:
+        return _compute(key, wanted)
+
     if not refresh:
-        # Scanning every dataset takes minutes; the API gateway gives up at 60s
-        # and the reader should never wait that long for numbers that move once
-        # a day. Answer from the cache and refresh behind it, saying plainly how
-        # old the answer is and whether a fresher one is on its way.
-        fresh_enough = hit is not None and now - hit[0] <= TTL_SEC
-        if not fresh_enough:
-            started_refresh = _start_refresh(key, wanted)
-            if hit is None:
-                return _ok({"computing": started_refresh, "age_sec": None, "datasets": []})
-        out = dict(hit[1])
-        out["age_sec"] = round(now - hit[0], 1)
-        out["computing"] = not fresh_enough
-        return _ok(out)
+        return _ok(CACHE.read(key, _work, empty={"datasets": []}))
 
     try:
-        return _ok(_compute(key, wanted))
+        return _ok(CACHE.compute_now(key, _work))
     except Exception as exc:
         logger.exception("coverage dimensions failed")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-__all__ = ["router", "get_dimensions", "TTL_SEC"]
+__all__ = ["router", "get_dimensions", "CACHE", "TTL_SEC"]

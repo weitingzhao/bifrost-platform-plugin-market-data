@@ -109,7 +109,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # the test supplies it instead of letting the loader read schedule.yaml.
     monkeypatch.setattr(mod, "resolve_scheduler_cfg", lambda: {"iv_radar_benchmarks": ["SPY"]})
     monkeypatch.setattr(mod, "_today", lambda: TODAY)
-    mod._CACHE.clear()
+    mod.CACHE.clear()
     return state
 
 
@@ -228,8 +228,10 @@ def test_a_cold_read_answers_at_once_and_refreshes_behind_itself(
     """Scanning every dataset took 154s against the real tables; the gateway
     gives up at 60. A reader must never wait for that."""
     started: list[str] = []
-    monkeypatch.setattr(mod, "_start_refresh", lambda key, wanted: (started.append(key), True)[1])
-    mod._CACHE.clear()
+    monkeypatch.setattr(
+        mod.CACHE, "start_refresh", lambda key, compute: (started.append(key), True)[1]
+    )
+    mod.CACHE.clear()
 
     body = mod.get_dimensions(tier=None, refresh=False)["data"]
 
@@ -242,43 +244,17 @@ def test_a_cold_read_answers_at_once_and_refreshes_behind_itself(
 def test_a_stale_answer_is_served_while_the_refresh_runs(
     wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(mod, "_start_refresh", lambda key, wanted: True)
+    monkeypatch.setattr(mod.CACHE, "start_refresh", lambda key, compute: True)
     fresh = mod.get_dimensions(tier="global", refresh=True)["data"]
     # Age the cache past its TTL without waiting for it.
-    at, payload = mod._CACHE["global"]
-    mod._CACHE["global"] = (at - mod.TTL_SEC - 1, payload)
+    at, payload = mod.CACHE._cache["global"]
+    mod.CACHE._cache["global"] = (at - mod.TTL_SEC - 1, payload)
 
     stale = mod.get_dimensions(tier="global", refresh=False)["data"]
 
     assert stale["generated_at"] == fresh["generated_at"]  # the last good answer, not an empty page
     assert stale["computing"] is True
     assert stale["age_sec"] > mod.TTL_SEC
-
-
-def test_only_one_refresh_runs_per_key(wired: dict[str, Any]) -> None:
-    mod._REFRESHING.clear()
-    calls: list[str] = []
-
-    class _Thread:
-        def __init__(self, target: Any, name: str = "", daemon: bool = False) -> None:
-            calls.append(name)
-
-        def start(self) -> None:
-            return None
-
-    import threading as real_threading
-
-    original = mod.threading.Thread
-    mod.threading.Thread = _Thread  # type: ignore[assignment]
-    try:
-        assert mod._start_refresh("all", list(CONTRACTS)) is True
-        # A second caller is told a refresh is in flight, not that none is.
-        assert mod._start_refresh("all", list(CONTRACTS)) is True
-        assert len(calls) == 1  # but only one thread runs
-    finally:
-        mod.threading.Thread = original  # type: ignore[assignment]
-        assert real_threading is mod.threading
-        mod._REFRESHING.clear()
 
 
 def test_the_doctor_and_the_contracts_agree_on_every_deadline() -> None:

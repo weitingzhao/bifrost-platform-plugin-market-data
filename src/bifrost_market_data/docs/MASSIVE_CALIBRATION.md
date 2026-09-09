@@ -1,5 +1,5 @@
 ---
-version: 2026-09-09.6
+version: 2026-09-09.7
 updated: 2026-09-09
 status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯一的大洞
 ---
@@ -128,16 +128,22 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 | `/coverage/contracts` 被两处不同 limit 打两次 | `DataVitalsStrip.tsx:105-110`（默认 100）与 `OptionCoverageSection.tsx:159`（500）——Vitals 卡上的 contracts 只是前 100 名之和，与 Coverage 页对不上 | 同一 limit 或同一 query |
 | 纯 alias 端点 | `coverage.py:701-707` `stock-day-quality-detail` = `bar-quality-detail` | 删一个 |
 
-### 3.1b 打不开的面（2026-09-09 实测）
+### 3.1b 打不开的面 → 已修（0.19.7）
 
-回填负载下，两个端点在 pod 里能算完，但都超过 platform-api 的 60 秒网关：
+回填负载下，三个端点在 pod 里能算完，但都超过 platform-api 的 60 秒网关：
 
-| 端点 | pod 内耗时 | 经网关 | 后果 |
+| 端点 | pod 内耗时 | 之前 | 现在 |
 |---|---|---|---|
-| `/market/coverage/inventory` | 141 秒 | 502 | Overview 的 Analytics demand 卡在 "Loading inventory…"，六个产品全判 blocked |
-| `/market/readiness/summary` | 81 秒 | 502 | Readiness 页拿不到数（`query_snapshot_coverage` 与 `query_vendor_gap` 单独跑各自超过 180 秒的语句超时，端点靠降级返回） |
+| `/market/coverage/dimensions` | 80 秒 | 已是后台算 + 缓存 | 同左，改用共用实现 |
+| `/market/coverage/inventory` | 141 秒 | 502，Analytics demand 卡在 "Loading inventory…"、六个产品全判 blocked | 立刻回上一次的答案并报年龄 |
+| `/market/readiness/summary` | 81 秒 | 502，Readiness 页拿不到数 | 同上；后台无网关，两条子查询拿到 600 秒预算，不再靠降级返回 |
 
-`/market/coverage/dimensions` 已经解决过同一形状的问题——后台算、带缓存、立刻回答并说明年龄。这两个端点是同一套做法的下一个应用点，**是目前最刺眼的一处**：面板本身是对的，取不到数而已。
+**不是把查询变快，而是不让读的人等。** 存量口径本来就快不了：inventory 最宽的一条是对 1,363 万行 `stock_daily` 做一次全表 distinct 计数，
+2026-09-09 实测 151 秒，而**去掉 `UPPER(TRIM())` 反而更慢**（401 秒，两种写法都要读全表），所以谓词不是问题。
+共用实现在 `api/slow_cache.py`：立刻回上一次的答案、后台重算、明说年龄与"是否有更新的在路上"，同一个 key 同时只跑一次。
+
+配套改了 Console 一处判断：**"还在数"不等于"数完了是零"**。之前 inventory 取不到数时六个产品全判 blocked，
+现在 `computing` 期间判 unknown 并保持加载态，拿到数后照常评级，卡片上带年龄标签。
 
 ### 3.2 深度的空白
 
@@ -174,6 +180,7 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.7 | 2026-09-09 | §3.1b 的两个端点改成后台算 + 缓存（共用 `api/slow_cache.py`，dimensions 一并迁过去）。Console 区分"还在数"与"数完是零"。 |
 | 2026-09-09.6 | 2026-09-09 | 记下 §3.1b：`coverage/inventory`（141 秒）与 `readiness/summary`（81 秒）都超过 60 秒网关，Overview 与 Readiness 两页因此取不到数。 |
 | 2026-09-09.5 | 2026-09-09 | 收敛后的两次实测各抓到一个错：benchmark 档的分母把 watchlist 丢了（11 而非 26，`stock_minute` 因此报 3/11 而非 18/26）；`fundamentals_market` 拿纽约午夜当截止时间，夏令时每晚有半小时报假 critical。两条都是"新仪器照出自己的毛病"，不是新引入的缺陷。 |
 | 2026-09-09.4 | 2026-09-09 | 分母收敛完毕（C-B1 ✅）。Doctor 的巡检面从 28 个名字扩到 575，按采集方式分档判定；顺带发现并修掉第五处假分母（`analyticsDemandModel` 的四个），以及 `k8s/base` 钉在一个从未构建过的 tag 上。契约状态 ✅ 6 / ⚠️ 7 / ❌ 1。 |

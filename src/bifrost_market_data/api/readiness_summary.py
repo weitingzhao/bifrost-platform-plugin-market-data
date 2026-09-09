@@ -10,9 +10,9 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
-from bifrost_market_data.api.deps import iso_value, require_db, table_exists
+from bifrost_market_data.api.deps import connect_db, iso_value, table_exists
 from bifrost_market_data.api.fundamentals_sepa import query_gaps
 from bifrost_market_data.api.readiness_data import (
     query_bar_aggregate,
@@ -20,6 +20,7 @@ from bifrost_market_data.api.readiness_data import (
     query_snapshot_coverage,
     query_vendor_gap,
 )
+from bifrost_market_data.api.slow_cache import BackgroundCache
 from bifrost_market_data.api.source_void import VALID_DATA_TYPES, query_all_voids
 from bifrost_market_data.scopes import active_tickers
 
@@ -301,11 +302,36 @@ def build_readiness_summary(conn: Any) -> dict[str, Any]:
     return out
 
 
-@router.get("/summary")
-def get_readiness_summary() -> dict[str, Any]:
-    """Composite readiness summary matching Trade FE contract fields."""
-    conn = require_db()
+#: 81 seconds inside the pod on 2026-09-09, against a 60-second API gateway, so
+#: the Readiness page received nothing at all. Two of the composite's parts --
+#: the snapshot coverage and the vendor gap -- exceeded even a 180-second
+#: statement budget under backfill load and were degrading silently; behind the
+#: cache there is no request waiting on them, so they get a real budget and the
+#: page gets whole answers instead of partial ones.
+SUMMARY_CACHE = BackgroundCache("readiness-summary")
+SUMMARY_STATEMENT_TIMEOUT = "600s"
+
+#: Same keys, no figures: a caller can tell "still computing" from "computed,
+#: and the answer is nothing".
+_SUMMARY_EMPTY: dict[str, Any] = {"ok": True, "universe_count": None}
+
+
+def _summary_payload() -> dict[str, Any]:
+    conn = connect_db(statement_timeout=SUMMARY_STATEMENT_TIMEOUT)
     try:
         return build_readiness_summary(conn)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — a close that fails must not lose the answer
+            pass
+
+
+@router.get("/summary")
+def get_readiness_summary(
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Composite readiness summary matching Trade FE contract fields."""
+    if not refresh:
+        return SUMMARY_CACHE.read("summary", _summary_payload, empty=_SUMMARY_EMPTY)
+    return SUMMARY_CACHE.compute_now("summary", _summary_payload)

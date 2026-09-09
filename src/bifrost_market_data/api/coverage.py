@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -17,8 +18,11 @@ from bifrost_market_data.api.deps import (
     safe_count,
     table_exists,
 )
+from bifrost_market_data.api.slow_cache import BackgroundCache
 from bifrost_market_data.quality import run_all_checks
 from bifrost_market_data.scheduler.daily import resolve_watchlist_with_source
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/coverage", tags=["coverage"])
 
@@ -717,14 +721,52 @@ def coverage_quality_score() -> dict[str, Any]:
         conn.close()
 
 
-@router.get("/inventory")
-def coverage_inventory() -> dict[str, Any]:
-    """Aggregate data scope — one-glance inventory of all tracked data."""
-    conn = require_db()
+#: The inventory's widest read is one full pass over 13.6M ``stock_daily`` rows
+#: to count distinct symbols: 151 seconds on 2026-09-09, against a 60-second API
+#: gateway. It cannot be made fast — writing the predicate without the
+#: ``UPPER(TRIM())`` wrapper measured *slower*, 401s, since either way every row
+#: is read — so the reader is served the last answer while the next is computed.
+INVENTORY_CACHE = BackgroundCache("inventory")
+#: No gateway sits in front of the background pass, so it gets a real budget.
+INVENTORY_STATEMENT_TIMEOUT = "600s"
+
+#: What a caller sees before the first pass has finished. Same shape, no
+#: figures: a panel can tell "still counting" from "counted, and it is zero".
+_INVENTORY_EMPTY: dict[str, Any] = {
+    "ok": True,
+    "scope": None,
+    "watchlist_symbols": [],
+    "stock_daily": None,
+    "stock_min": None,
+    "option": None,
+    "analytics": {},
+    "generated_at": None,
+}
+
+
+def _inventory_payload() -> dict[str, Any]:
+    conn = connect_db(statement_timeout=INVENTORY_STATEMENT_TIMEOUT)
     try:
         return query_inventory(conn)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — a close that fails must not lose the answer
+            pass
+
+
+@router.get("/inventory")
+def coverage_inventory(
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Aggregate data scope — one-glance inventory of all tracked data."""
+    if not refresh:
+        return INVENTORY_CACHE.read("inventory", _inventory_payload, empty=_INVENTORY_EMPTY)
+    try:
+        return INVENTORY_CACHE.compute_now("inventory", _inventory_payload)
+    except Exception as exc:
+        logger.exception("coverage inventory failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/db-summary")
