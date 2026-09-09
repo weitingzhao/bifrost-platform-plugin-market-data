@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException, Query
 from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
 from bifrost_market_data.scheduler.daily import load_research_universe
+from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
 
 logger = logging.getLogger(__name__)
@@ -262,7 +263,13 @@ def _denominators(conn: Any) -> dict[str, Any]:
     by_tier: dict[str, int] = {}
     for row in load_research_universe(conn) or []:
         by_tier[str(row.get("tier") or "?")] = by_tier.get(str(row.get("tier") or "?"), 0) + 1
-    bench = benchmark_scope(conn, _benchmarks(), statement_timeout=STATEMENT_TIMEOUT)
+    sched = resolve_scheduler_cfg()
+    bench = benchmark_scope(
+        conn,
+        _benchmarks(sched),
+        scheduler_cfg=sched,
+        statement_timeout=STATEMENT_TIMEOUT,
+    )
     return {
         "whole-market": len(active),
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
@@ -277,12 +284,10 @@ def _denominators(conn: Any) -> dict[str, Any]:
     }
 
 
-def _benchmarks() -> list[str]:
-    from bifrost_market_data.scheduler.daily import load_schedule
-
-    raw = load_schedule() or {}
-    sched = raw.get("scheduler") if isinstance(raw, dict) else {}
-    names = (sched or {}).get("iv_radar_benchmarks") or []
+def _benchmarks(scheduler_cfg: dict[str, Any]) -> list[str]:
+    names = scheduler_cfg.get("iv_radar_benchmarks") or []
+    if isinstance(names, str):
+        names = [s for s in names.split(",") if s.strip()]
     return [str(s) for s in names]
 
 

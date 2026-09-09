@@ -50,31 +50,46 @@ def universe_symbols(conn: Any, *, statement_timeout: str = "60s") -> set[str]:
 
 
 def benchmark_scope(
-    conn: Any, benchmarks: list[str], *, statement_timeout: str = "60s"
+    conn: Any,
+    benchmarks: list[str],
+    *,
+    scheduler_cfg: Any = None,
+    statement_timeout: str = "60s",
 ) -> set[str]:
     """The benchmark scope: the benchmarks plus the watchlist the slots rotate.
 
     The minute slots target that union, so dividing by the eleven benchmarks
-    alone reported 164% coverage.
+    alone reported 164% coverage. The watchlist half needs the real scheduler
+    block: with an empty one the loader takes the DB path to ``public.watchlist``,
+    which Golden Source does not have, and the union quietly shrinks back to the
+    benchmarks — measured 3/11 = 27% for stock_minute where the honest reading
+    against the 29-name union is lower.
     """
-    from bifrost_market_data.scheduler.daily import load_watchlist_symbols
+    from bifrost_market_data.scheduler.daily import load_watchlist_symbols, resolve_scheduler_cfg
 
     out = {str(b).strip().upper() for b in benchmarks if str(b).strip()}
     try:
-        out |= {str(s).strip().upper() for s in (load_watchlist_symbols(conn, {}) or [])}
+        cfg = scheduler_cfg if scheduler_cfg is not None else resolve_scheduler_cfg()
+        out |= {str(s).strip().upper() for s in (load_watchlist_symbols(conn, cfg) or [])}
     except Exception as exc:  # noqa: BLE001 — a missing watchlist narrows the scope, it does not break it
         logger.warning("watchlist unavailable for the benchmark scope: %s", exc)
     return out
 
 
-def scope_for(conn: Any, tier: Tier, *, benchmarks: list[str] | None = None) -> set[str]:
+def scope_for(
+    conn: Any,
+    tier: Tier,
+    *,
+    benchmarks: list[str] | None = None,
+    scheduler_cfg: Any = None,
+) -> set[str]:
     """The population a tier's datasets are measured against."""
     if tier == "whole-market":
         return active_tickers(conn)
     if tier == "universe":
         return universe_symbols(conn)
     if tier == "benchmark-only":
-        return benchmark_scope(conn, benchmarks or [])
+        return benchmark_scope(conn, benchmarks or [], scheduler_cfg=scheduler_cfg)
     return set()
 
 

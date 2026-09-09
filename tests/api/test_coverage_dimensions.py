@@ -104,7 +104,10 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(mod, "connect_db", fake_connect)
     monkeypatch.setattr(mod, "load_research_universe", lambda conn: state["universe"])
-    monkeypatch.setattr(mod, "_benchmarks", lambda: ["SPY", "QQQ", "IWM"])
+    monkeypatch.setattr(mod, "_benchmarks", lambda cfg: ["SPY", "QQQ", "IWM"])
+    # The benchmark scope needs the real scheduler block to reach the watchlist;
+    # the test supplies it instead of letting the loader read schedule.yaml.
+    monkeypatch.setattr(mod, "resolve_scheduler_cfg", lambda: {"iv_radar_benchmarks": ["SPY"]})
     monkeypatch.setattr(mod, "_today", lambda: TODAY)
     mod._CACHE.clear()
     return state

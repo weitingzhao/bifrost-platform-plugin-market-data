@@ -305,6 +305,21 @@ def is_trading_day(conn: Any, d: date) -> bool:
     return _is_trading_day(conn, d)
 
 
+def resolve_scheduler_cfg() -> dict[str, Any]:
+    """The scheduler block as the slots see it: schedule.yaml, then config overrides.
+
+    Callers that pass ``{}`` instead get the DB fallback path, which on Golden
+    Source means ``public.watchlist`` — a table that does not exist — so the
+    watchlist half of any scope they build comes back silently empty.
+    """
+    schedule = load_schedule() or {}
+    cfg = dict(schedule.get("scheduler") or {})
+    app = load_config() or {}
+    if isinstance(app.get("scheduler"), dict):
+        cfg.update(app["scheduler"])
+    return cfg
+
+
 def load_watchlist_symbols(
     conn: Any,
     scheduler_cfg: Mapping[str, Any],

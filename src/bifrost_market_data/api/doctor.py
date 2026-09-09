@@ -9,18 +9,14 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from bifrost_market_data.api.deps import connect_db, require_write_token, resolve_polygon_api_key
 from bifrost_market_data.config import load_config
 from bifrost_market_data.doctor import heal, probe_vendor, probe_worker_health, run_doctor
-from bifrost_market_data.scheduler.daily import load_schedule
+from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 
 router = APIRouter(prefix="/doctor", tags=["doctor"])
 
 
 def _scheduler_cfg() -> dict[str, Any]:
-    cfg = load_config()
-    schedule = load_schedule()
-    scheduler_cfg = dict(schedule.get("scheduler") or {})
-    if isinstance(cfg.get("scheduler"), dict):
-        scheduler_cfg.update(cfg["scheduler"])
-    scheduler_cfg["worker"] = dict(cfg.get("worker") or {})
+    scheduler_cfg = resolve_scheduler_cfg()
+    scheduler_cfg["worker"] = dict((load_config() or {}).get("worker") or {})
     return scheduler_cfg
 
 
