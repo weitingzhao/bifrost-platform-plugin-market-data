@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 Tier = Literal["whole-market", "universe", "benchmark-only", "global"]
+#: "session" — instruments present in the newest observation, which is what a
+#: daily feed should cover. "ever" — instruments ever seen, which is the honest
+#: numerator for a dataset that accumulates (a company files quarterly, not
+#: daily). Getting this wrong reads as 389% coverage: five years of symbols,
+#: including delisted ones, over a denominator of today's active tickers.
+BreadthWindow = Literal["session", "ever"]
 DepthKind = Literal[
     "rolling_days", "since", "sessions", "current_only", "forward_only", "catalogue"
 ]
@@ -60,6 +66,7 @@ class DatasetContract:
     #: against 152s for stock_daily (20,695 distinct), where a plain GROUP BY
     #: is 24s. The shape follows the cardinality, not a preference.
     low_cardinality: bool = False
+    breadth_window: BreadthWindow = "session"
 
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
@@ -107,15 +114,17 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("reference",),
         "symbol",
         None,
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.corporate_action",
         "whole-market",
-        DepthTarget("rolling_days", 67, "the market slot's window is -7 / +60 days"),
+        DepthTarget("catalogue", why="the slot's window looks forward (-7 / +60 days); it is not a history"),
         48.0,
         ("corporate",),
         "symbol",
         "ex_date",
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.income_statement",
@@ -125,6 +134,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("fundamentals-rotate",),
         "symbol",
         "period_date",
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.balance_sheet",
@@ -134,6 +144,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("fundamentals-rotate",),
         "symbol",
         "period_date",
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.cash_flow",
@@ -143,6 +154,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("fundamentals-rotate",),
         "symbol",
         "period_date",
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.ratios",
@@ -168,11 +180,12 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     DatasetContract(
         "raw_market.short_interest",
         "whole-market",
-        DepthTarget("rolling_days", 45, "settlements inside the 45-day lookback"),
+        DepthTarget("forward_only", why="published per settlement; the lookback is 45 days, not a history"),
         30.0,
         ("fundamentals-market",),
         "symbol",
         "period_date",
+        breadth_window="ever",
     ),
     # ── global: one series, no instruments ──
     DatasetContract(
@@ -192,6 +205,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("calendar",),
         None,
         None,
+        breadth_window="ever",
     ),
     # ── universe: per-symbol calls, so follow the Research rule ──
     DatasetContract(
@@ -207,14 +221,13 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     DatasetContract(
         "raw_market.option_contract",
         "universe",
-        DepthTarget(
-            "catalogue", why="contracts alive now, plus expired ones the vendor still lists"
-        ),
+        DepthTarget("catalogue", why="contracts alive now, plus expired ones the vendor still lists"),
         12.0,
         ("option-refresh",),
         "underlying",
         None,
         low_cardinality=True,
+        breadth_window="ever",
     ),
     DatasetContract(
         "raw_market.option_open_interest",
@@ -224,7 +237,6 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("eod-pipeline",),
         "underlying",
         "trade_date",
-        low_cardinality=True,
     ),
     DatasetContract(
         "raw_market.option_daily",

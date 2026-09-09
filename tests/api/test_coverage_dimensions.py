@@ -35,13 +35,13 @@ class _Cur:
             return
         self.conn.queries.append(q)
         if "raw_market.ticker WHERE active" in q:
-            self._rows = [(5317,)]
-        elif q.startswith("SELECT max("):
-            self._rows = [(self.conn.newest,)]
-        elif "count(DISTINCT" in q:
-            self._rows = [(len(self.conn.per_symbol),)]
+            self._rows = [(s,) for s in self.conn.active]
         elif self.conn.raise_on and self.conn.raise_on in q:
             raise RuntimeError("statement timeout")
+        elif q.startswith("SELECT max("):
+            self._rows = [(self.conn.newest,)]
+        elif q.startswith("SELECT DISTINCT"):
+            self._rows = [(s,) for s, _d in self.conn.per_symbol]
         else:
             self._rows = list(self.conn.per_symbol)
 
@@ -51,9 +51,14 @@ class _Cur:
 
 class _Conn:
     def __init__(
-        self, per_symbol: list[tuple[str, date]], newest: date, raise_on: str | None = None
+        self,
+        per_symbol: list[tuple[str, date]],
+        newest: date,
+        raise_on: str | None = None,
+        active: list[str] | None = None,
     ) -> None:
         self.per_symbol = per_symbol
+        self.active = active if active is not None else ["AAPL", "MSFT"]
         self.newest = newest
         self.raise_on = raise_on
         self.queries: list[str] = []
@@ -79,10 +84,12 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "newest": date(2026, 9, 8),
         "raise_on": None,
         "universe": [{"symbol": "AAPL", "tier": "resident"}, {"symbol": "XYZ", "tier": "core"}],
+        "active": ["AAPL", "MSFT"],
     }
+    monkeypatch.setattr(mod, "_watchlist", lambda conn: set())
 
     def fake_connect(**_kw: Any) -> _Conn:
-        return _Conn(state["per_symbol"], state["newest"], state["raise_on"])
+        return _Conn(state["per_symbol"], state["newest"], state["raise_on"], state["active"])
 
     monkeypatch.setattr(mod, "connect_db", fake_connect)
     monkeypatch.setattr(mod, "load_research_universe", lambda conn: state["universe"])
@@ -96,12 +103,13 @@ def test_every_contract_is_reported_against_its_declared_denominator(wired: dict
     body = mod.get_dimensions(tier=None, refresh=True)["data"]
 
     assert {d["dataset"] for d in body["datasets"]} == {c.dataset for c in CONTRACTS}
-    assert body["denominators"]["whole-market"] == 5317
+    assert body["denominators"]["whole-market"] == 2
+    assert "scopes" not in body["denominators"]  # symbol sets stay server-side
     assert body["denominators"]["universe"]["total"] == 2
     assert body["denominators"]["benchmark-only"] == 3
     by_ds = {d["dataset"]: d for d in body["datasets"]}
     # whole-market measures against the entitlement, universe against the rule.
-    assert by_ds["raw_market.stock_daily"]["breadth"]["of"] == 5317
+    assert by_ds["raw_market.stock_daily"]["breadth"]["of"] == 2
     assert by_ds["raw_market.option_daily"]["breadth"]["of"] == 2
 
 
@@ -110,10 +118,12 @@ def test_the_two_breadth_ratios_stay_apart(wired: dict[str, Any]) -> None:
     by_ds = {d["dataset"]: d for d in body["datasets"]}
 
     universe = by_ds["raw_market.option_daily"]["breadth"]
-    # Intent fulfilment: held ÷ what the rule asked for.
-    assert universe["pct"] == 100.0
+    # AAPL is in the universe, MSFT is not: held-in-scope is 1 of 2, and the
+    # symbol outside the scope is reported rather than inflating the ratio.
+    assert universe["held"] == 1 and universe["of"] == 2 and universe["pct"] == 50.0
+    assert universe["held_total"] == 2 and universe["outside_scope"] == 1
     # Entitlement utilisation: what the rule asked for ÷ what the plan allows.
-    assert universe["entitlement_pct"] == round(100.0 * 2 / 5317, 1)
+    assert universe["entitlement_pct"] == round(100.0 * 2 / 2, 1)
     # A whole-market dataset already is the entitlement; the second ratio is meaningless there.
     assert by_ds["raw_market.stock_daily"]["breadth"]["entitlement_pct"] is None
 
@@ -149,7 +159,7 @@ def test_one_unreadable_dataset_does_not_sink_the_page(wired: dict[str, Any]) ->
     by_ds = {d["dataset"]: d for d in body["datasets"]}
     assert by_ds["raw_market.option_daily"]["error"]
     assert by_ds["raw_market.option_daily"]["breadth"]["held"] == 0
-    assert by_ds["raw_market.option_snapshot"]["breadth"]["held"] == 2  # its neighbour is fine
+    assert by_ds["raw_market.option_snapshot"]["breadth"]["held"] == 1  # its neighbour is fine
 
 
 def test_the_query_shape_follows_the_cardinality(wired: dict[str, Any]) -> None:
@@ -191,10 +201,11 @@ def test_a_boundary_dataset_is_never_scanned_per_symbol(wired: dict[str, Any]) -
     """Measuring depth only to discard it was most of the cost: short_interest
     alone is 22,932 symbols, and its history can only accumulate forward."""
     conn = _Conn([("AAPL", date(2024, 1, 1))], date(2026, 9, 8))
-    mod._one(BY_DATASET["raw_market.ratios"], {"whole-market": 5317}, TODAY, conn)
+    scopes = {"whole-market": {"AAPL"}, "universe": set(), "benchmark-only": set(), "global": set()}
+    mod._one(BY_DATASET["raw_market.ratios"], {"whole-market": 1, "scopes": scopes}, TODAY, conn)
 
     assert not any("GROUP BY" in q for q in conn.queries)
-    assert any("count(DISTINCT" in q for q in conn.queries)
+    assert any(q.startswith("SELECT DISTINCT") for q in conn.queries)
 
 
 def test_a_cold_read_answers_at_once_and_refreshes_behind_itself(

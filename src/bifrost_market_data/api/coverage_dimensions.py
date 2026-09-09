@@ -73,6 +73,25 @@ def _rows(conn: Any, sql: str, params: Sequence[Any] | None = None) -> list[tupl
         return list(cur.fetchall() or [])
 
 
+def _held_symbols(conn: Any, c: DatasetContract) -> set[str]:
+    """The instruments this dataset holds, over the window its contract declares.
+
+    A numerator has to cover the same span as its denominator. Counting every
+    symbol ever seen against today's active tickers reported 389% for
+    stock_daily — five years of listings, delisted ones included, over a
+    denominator of what is listed now.
+    """
+    sym = c.symbol_column
+    if sym is None:
+        return set()
+    where = ""
+    if c.breadth_window == "session" and c.date_column:
+        d = _date_expr(c.date_column)
+        where = f"WHERE {d} = (SELECT max({d}) FROM {c.dataset})"
+    rows = _rows(conn, f"SELECT DISTINCT {sym} FROM {c.dataset} {where}")
+    return {str(r[0]) for r in rows if r and r[0] is not None}
+
+
 def _per_symbol_oldest(conn: Any, c: DatasetContract) -> list[tuple[str, date | None]]:
     """(symbol, oldest observation) for every instrument the dataset holds.
 
@@ -163,14 +182,17 @@ def _one(
         conn = connect_db(statement_timeout=STATEMENT_TIMEOUT)
     try:
         per_symbol: list[tuple[str, date | None]] = []
+        if c.symbol_column is None:
+            held_symbols: set[str] = set()
+            held_total = 1
+        else:
+            held_symbols = _held_symbols(conn, c)
+            held_total = len(held_symbols)
         # A dataset whose depth is a plan boundary has no target to measure
         # against, so the per-symbol scan would be work done only to discard.
         # That is most of the cost: short_interest alone is 22,932 symbols.
         if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
             per_symbol = _per_symbol_oldest(conn, c)
-            held = len(per_symbol)
-        else:
-            held = _breadth_only(conn, c)
         newest = _newest(conn, c)
         error = None
     except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
@@ -179,23 +201,29 @@ def _one(
             conn.rollback()
         except Exception:
             pass
-        per_symbol, held, newest, error = [], 0, None, str(exc)[:160]
+        per_symbol, held_symbols, held_total, newest, error = [], set(), 0, None, str(exc)[:160]
     finally:
         if own:
             _close_quietly(conn)
 
-    of = denominators.get(c.tier if c.tier != "universe" else "universe")
-    of_n = int(of["total"]) if isinstance(of, dict) else int(of or 0)
+    scope: set[str] = denominators["scopes"].get(c.tier) or set()
+    of_n = 1 if c.symbol_column is None else len(scope)
+    # The numerator is what we hold *of what this tier asked for*. Held rows
+    # outside that scope are reported separately rather than inflating a ratio.
+    in_scope = of_n if c.symbol_column is None else len(held_symbols & scope)
     return {
         "dataset": c.dataset,
         "tier": c.tier,
         "slots": list(c.slots),
+        "breadth_window": c.breadth_window,
         "error": error,
         "breadth": {
-            "held": held,
+            "held": in_scope,
+            "held_total": held_total,
+            "outside_scope": max(0, held_total - in_scope),
             "of": of_n or None,
             # Intent fulfilment: how much of what this tier asked for we hold.
-            "pct": round(100.0 * held / of_n, 1) if of_n else None,
+            "pct": round(100.0 * in_scope / of_n, 1) if of_n else None,
             # Entitlement utilisation: how much of what the plan allows the tier
             # even asks for. Only meaningful where the tier narrows the market.
             "entitlement_pct": (
@@ -222,18 +250,47 @@ def _freshness(c: DatasetContract, newest: date | None, today: date) -> dict[str
 
 
 def _denominators(conn: Any) -> dict[str, Any]:
-    """The four denominators, each from its declared source — never from a panel."""
-    active = int(_rows(conn, "SELECT count(*) FROM raw_market.ticker WHERE active")[0][0] or 0)
+    """The four denominators, each from its declared source — never from a panel.
+
+    Each carries its symbol set, because a percentage is only honest when the
+    numerator is drawn from the same set: "of the instruments this tier asked
+    for, how many do we hold". Without that, five years of stock symbols over
+    today's active tickers reads as 389% coverage.
+    """
+    active = {
+        str(r[0]) for r in _rows(conn, "SELECT symbol FROM raw_market.ticker WHERE active") if r[0]
+    }
     universe = load_research_universe(conn) or []
+    universe_syms = {str(u.get("symbol")) for u in universe if u.get("symbol")}
     by_tier: dict[str, int] = {}
     for row in universe:
         by_tier[str(row.get("tier") or "?")] = by_tier.get(str(row.get("tier") or "?"), 0) + 1
+    # The minute slots target the watchlist union, not the benchmarks alone —
+    # asking 18 held against 11 benchmarks reported 164%.
+    bench = set(_benchmarks()) | _watchlist(conn)
     return {
-        "whole-market": active,
-        "universe": {"total": len(universe), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
-        "benchmark-only": len(_benchmarks()),
+        "whole-market": len(active),
+        "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
+        "benchmark-only": len(bench),
         "global": 1,
+        "scopes": {
+            "whole-market": active,
+            "universe": universe_syms,
+            "benchmark-only": bench,
+            "global": set(),
+        },
     }
+
+
+def _watchlist(conn: Any) -> set[str]:
+    """The names the minute slots rotate through, alongside the benchmarks."""
+    try:
+        from bifrost_market_data.scheduler.daily import load_watchlist_symbols
+
+        return {str(s).strip().upper() for s in (load_watchlist_symbols(conn, {}) or [])}
+    except Exception as exc:  # noqa: BLE001 — a missing watchlist narrows the scope, it does not break it
+        logger.warning("watchlist for the benchmark scope unavailable: %s", exc)
+        return set()
 
 
 def _benchmarks() -> list[str]:
@@ -262,12 +319,13 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
                 rows = [f.result() for f in futures]
     finally:
         _close_quietly(probe)
+    public_denominators = {k: v for k, v in denominators.items() if k != "scopes"}
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "age_sec": 0.0,
         "computing": False,
         "computed_ms": int((monotonic() - started) * 1000),
-        "denominators": denominators,
+        "denominators": public_denominators,
         "datasets": rows,
     }
     _CACHE[key] = (monotonic(), payload)
