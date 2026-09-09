@@ -155,7 +155,10 @@ def measure(
     holes = thin_days(counts)
 
     absent: list[date] = []
-    if expected_days is not None:
+    # Only a dataset published every trading day can be judged against the
+    # trading calendar. short_interest settles twice a month; measured against
+    # sessions it reported 56 missing days that were never due.
+    if expected_days is not None and contract.cadence == "session":
         # Only sessions inside the observed span: a dataset that starts midway
         # through the window has not lost the days before it existed.
         first = min(present) if present else None
@@ -170,6 +173,7 @@ def measure(
         # Two numbers, never merged: one is "the day is missing", the other is
         # "the day is there and nearly empty". They have different causes.
         "days_absent": len(absent),
+        "cadence": contract.cadence,
         "days_thin": len(holes),
         "worst": [
             {"date": d.isoformat(), "rows": n, "neighbours": m}

@@ -131,3 +131,22 @@ def test_a_failed_read_does_not_sink_the_page() -> None:
     out = cont.measure(_Conn([], boom=True), contract_for("raw_market.stock_daily"))
     assert out["measured"] is False
     assert out["why"] == "read failed"
+
+
+def test_a_settlement_series_is_not_judged_against_trading_days() -> None:
+    """short_interest settles twice a month; against sessions it read as 56 gaps."""
+    days = [date(2026, 8, 3) + timedelta(days=i) for i in range(20)]
+    rows = [(date(2026, 8, 3), 5000), (date(2026, 8, 18), 5000)]
+    out = cont.measure(
+        _Conn(rows), contract_for("raw_market.short_interest"), expected_days=days
+    )
+    assert out["measured"] is True
+    assert out["cadence"] == "settlement"
+    assert out["days_absent"] == 0
+
+
+def test_a_daily_series_still_is() -> None:
+    """short_volume publishes every trading day, and had a 99-day hole."""
+    assert contract_for("raw_market.short_volume").cadence == "session"
+    assert contract_for("raw_market.ratios").cadence == "session"
+    assert contract_for("raw_market.stock_daily").cadence == "session"

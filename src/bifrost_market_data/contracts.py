@@ -67,6 +67,13 @@ class DatasetContract:
     #: is 24s. The shape follows the cardinality, not a preference.
     low_cardinality: bool = False
     breadth_window: BreadthWindow = "session"
+    #: How often a row set is published. "session" means every trading day, and
+    #: only those are compared against the trading calendar: short_interest
+    #: settles twice a month, so measured against sessions it read as 56 missing
+    #: days on the first live read of the continuity axis. A cadence is declared,
+    #: never inferred from the data it is meant to judge.
+    cadence: str = "session"
+
     #: The ops_jobs.ingest_freshness dimension that evidences this dataset,
     #: declared here so the doctor's staleness table and the quality gate stop
     #: keeping their own copies of the mapping.
@@ -214,6 +221,9 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         breadth_window="ever",
+        # Twice a month, on settlement dates. Measured 2026-09-09: median gap
+        # 15 days over the last 120, against 1 day for ratios and short_volume.
+        cadence="settlement",
         freshness_dimension="short_interest",
     ),
     # ── global: one series, no instruments ──
