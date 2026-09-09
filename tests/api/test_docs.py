@@ -13,7 +13,7 @@ from bifrost_market_data.api import docs
 from bifrost_market_data.api.app import create_app
 
 STATUS_GLYPHS = ("✅", "⚠️", "❌", "⏳")
-CONTRACT = re.compile(r"\| \*{0,2}(C-[BDFG]\d+)\*{0,2} \|")
+CONTRACT = re.compile(r"\| \*{0,2}(C-[BCDFG]\d+)\*{0,2} \|")
 
 
 def test_both_documents_are_served_with_front_matter_parsed() -> None:
@@ -28,10 +28,10 @@ def test_both_documents_are_served_with_front_matter_parsed() -> None:
         assert d["markdown"].lstrip().startswith(first_line), slug
 
 
-def test_the_blueprint_defines_the_three_axes_and_carries_no_status() -> None:
+def test_the_blueprint_defines_the_axes_and_carries_no_status() -> None:
     body = docs.read_doc("blueprint")["markdown"]
     for anchor in (
-        "## 2. 三个轴",
+        "## 2. 四个轴",
         "## 3. 数据集契约表",
         "whole-market",
         "universe",
@@ -46,7 +46,13 @@ def test_the_blueprint_defines_the_three_axes_and_carries_no_status() -> None:
 
 def test_every_axis_defines_at_least_one_contract() -> None:
     defined = set(CONTRACT.findall(docs.read_doc("blueprint")["markdown"]))
-    for prefix, axis in (("C-B", "广度"), ("C-D", "深度"), ("C-F", "新鲜度"), ("C-G", "治理")):
+    for prefix, axis in (
+        ("C-B", "广度"),
+        ("C-D", "深度"),
+        ("C-F", "新鲜度"),
+        ("C-C", "厚度"),
+        ("C-G", "治理"),
+    ):
         assert any(c.startswith(prefix) for c in defined), f"{axis} has no contract"
 
 
