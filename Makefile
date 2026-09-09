@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry apply-roles apply-ownership run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
+.PHONY: install-dev test lint db-init db-init-dry apply-roles apply-ownership rollback-ownership run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
 
 install-dev:
 	pip install -e ".[dev]"
@@ -26,6 +26,12 @@ apply-roles:
 apply-ownership:
 	psql "$${POSTGRES_ADMIN_URL:?set POSTGRES_ADMIN_URL to an elevated connection string}" \
 	  -v ON_ERROR_STOP=1 -f scripts/fix_object_ownership.sql
+
+# Undo the above. scripts/rollback_object_ownership.sql is a snapshot of who
+# owned what before; regenerate it first if the catalogue has moved since.
+rollback-ownership:
+	psql "$${POSTGRES_ADMIN_URL:?set POSTGRES_ADMIN_URL to an elevated connection string}" \
+	  -v ON_ERROR_STOP=1 -f scripts/rollback_object_ownership.sql
 
 run-api:
 	python scripts/run_api.py
