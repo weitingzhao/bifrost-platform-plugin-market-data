@@ -104,6 +104,10 @@ data:
           option_trades_keep_days: 30
           # One observation per session, so retention is counted in sessions.
           option_snapshot_keep_sessions: 90
+          # Intraday rows leave at about 1,550 a second (the New York time-of-day has
+          # to be evaluated per row); a session writes ~345,000 of them across its
+          # three fires, so one nightly run needs about four minutes to keep up.
+          snapshot_budget_sec: 300
           option_snapshot_intraday_keep_days: 30
         stock-snapshot:
           cron: "5 21 * * *"
