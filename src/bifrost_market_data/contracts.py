@@ -88,6 +88,10 @@ FINANCIALS_SINCE = "2009-01-01"
 # The Research universe's per-tier history requirement (research.option_universe).
 UNIVERSE_MONTHS = {"resident": 24, "core": 24, "edge": 12}
 
+#: How far back the vendor serves whole-market short volume by date. Measured
+#: 2026-09-09: 2024-09-16 returns that day's rows, 2023-09-15 returns none.
+SHORT_VOLUME_WINDOW_DAYS = 2 * 365
+
 #: Below this many symbols, the whole-market grouped pull did not happen for the
 #: session — whatever the job status says. One number because there were two:
 #: the doctor asked for 12,000 rows and the quality gate for 4,000 symbols, of
@@ -203,7 +207,15 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     DatasetContract(
         "raw_market.short_volume",
         "whole-market",
-        DepthTarget("forward_only", why="published the morning after the session"),
+        # Not forward_only. That is ratios' constraint — its endpoint ignores
+        # ?date and always returns the latest — and it was copied here without
+        # being checked. Measured 2026-09-09: short volume for 2026-06-15 comes
+        # back dated 2026-06-15, so its history is bought, not merely accrued.
+        DepthTarget(
+            "rolling_days",
+            SHORT_VOLUME_WINDOW_DAYS,
+            "vendor serves ?date about two years back; 2023-09-15 returns nothing",
+        ),
         30.0,
         ("fundamentals-market",),
         "symbol",
