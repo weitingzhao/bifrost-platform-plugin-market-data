@@ -1,7 +1,7 @@
 ---
-version: 2026-09-09.2
+version: 2026-09-09.3
 updated: 2026-09-09
-status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
+status: 口径已收敛到契约表 · 深度仍是唯一的大洞
 ---
 
 # Massive 校准
@@ -65,11 +65,11 @@ status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
 | C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。旧的 `StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代。 |
 | C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
 | C-D4 | ⚠️ | `option_daily` 一行现在就是进度条：45/575 广度、58/70 达标、中位 24 个月（§2b）。仍是 ⚠️：它答得出"买到了多少"，答不出"按当前速率还要多久"——那需要把队列消化速率接进来。 |
-| C-F1 | ❌ | **"当期 session" 有 4 个定义**：`doctor.py:244-261` `resolve_session`（19:30 NY）、`quality.py` `fetch_completed_trading_days`（排除今天）、`api/ingest_dashboard.py` 的 22:30 ET grace、`api/readiness_summary.py:39-40` `_STALE_DAYS=7`。 |
-| C-F2 | ⚠️ | Doctor 的 `STALENESS`（`doctor.py:69-75`）已按 slot 分别声明（calendar 48h、option-refresh 12h、corporate 168h、fundamentals-rotate 48h），是四套里最接近契约的一套；但它只覆盖 5 个 slot，其余数据集共用一个 24/72 小时。 |
-| C-F3 | ❌ | **4 套阈值并存**：`quality.py:14-16`（24h / 周末 72h）、`doctor.py:69-75`（12/48/168h）、platform-api 的 `freshnessWeekendMaxAgeH`、Console `dataVitalsModel.ts:9-10`（12h / 72h）。同一个数据集在不同面板上可以显示不同健康状态。 |
+| C-F1 | ✅ | `session.py` 是唯一定义（19:30 NY 锚点 + 交易日历），`doctor` 与 `quality` 都调用它，交易日探针可注入以保留既有测试接缝。`ingest_dashboard` 的 22:30 ET 是 **cron 宽限窗口**，回答"该点火了吗"，与"该持有哪个 session"是两个问题，刻意保留。 |
+| C-F2 | ✅ | 19 个数据集各自在契约里声明截止时间；`quality.check_freshness` 按维度取 `deadline_for_dimension()`，返回体里每个维度带自己的 `deadline_hours`，平铺的 `max_age_hours` 已为 `None`。线上实测：stock_daily / option_snapshot / option_open_interest 各 2h，calendar 48h。 |
+| C-F3 | ⚠️ | Plugin 侧已收敛：doctor 的 `STALENESS` 由 `contracts.staleness_by_slot()` 派生（一条测试断言两者逐条一致），`quality` 的 24h/72h 周末规则退役——问交易日历后周末例外根本不需要存在。仍是 ⚠️：**platform-api 的 `freshnessWeekendMaxAgeH` 与 Console `dataVitalsModel.ts:9-10` 还各有一份**。 |
 | C-F4 | ⚠️ | 0.18.1 起 `SESSION_ONCE_SLOTS` 的守卫改为按覆盖判定并排除盘中行（`scheduler/daily.py`），跳过不再等于成功。但 `_slot_adherence`（`api/ingest_dashboard.py:513-711`）仍以 job 证据判定 `on_plan/missed`，未对数据判定。 |
-| C-G1 | ❌ | 存在结构上永远等于 100% 的分母：`DataInventoryStrip.tsx:92` 用 `max(watchlist, 实际值)`、`OptionCoverageSection.tsx:191` 用"最大的那个 underlying"。这些不是覆盖率。 |
+| C-G1 | ⚠️ | `DataInventoryStrip` 的三个假分母已修：Option/Snapshots 用过 `max(watchlist, 实际值)`（不可能小于被测量的数），Stock Day 是"大于零即满格"的存在标志画成满条。现在都除以契约表的分母，且**没有分母时不画条**而是明说。**更正 2026-09-09.2 的一处误判**：`OptionCoverageSection.tsx:191` 的 `max(1, ...)` 是条形图的相对刻度（`contractCount / maxContracts`），不是覆盖率分母，不该被列为假分母。仍是 ⚠️：其余面板尚未逐一核对。 |
 | C-G2 | ⚠️ | 19 个数据集全部报出三个轴（`/market/coverage/dimensions`）。仍是 ⚠️：`stock_movers` 是 top-N 榜单，用全市场当分母得到 0.4%，是无意义的比率——它需要自己的档位。 |
 | C-G3 | ❌ | entitled 但未持有的 8 个数据面（§4）在任何界面上都不可见；`/market/capabilities` 只列 planned（需升级）与 unavailable（端点 404），不列"已付费但没在采"。 |
 
@@ -102,6 +102,16 @@ status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
 4. **新发现：分钟线只覆盖 11 个基准里的 3 个**（`stock_minute` 27.3%、`option_minute` 9.1%），而它持有的 18 个标的中 15 个在基准之外。`minute-bars` 轮转的是 watchlist，不是它声称的基准集。
 
 建模过程中被这次读数抓出并修正的四个错误（都在契约表侧，记录以免重犯）：分子分母窗口不一致（389%）、benchmark 分母只算基准漏了 watchlist（164%）、`corporate_action` 的窗口向前看导致"深度"为负、`option_open_interest` 在分区表上跳跃扫描超时。
+
+## 2c. 本轮收敛（2026-09-09，Plugin 0.19.0 / 0.19.1）
+
+**四套 session 定义 → 一套。** `session.py` 持有唯一定义与截止时间算术，从**收盘**起算而不是从午夜——一个 22:00 落库的数据集不该在次日早上显示成快一天旧。迟到需要同时满足两件事：**截止时间已过**，且**收盘后没有任何一次运行**。于是"周五晚的数据在周一早上"自然是待定而非陈旧，旧规则为此专门开的 72 小时周末例外**不再需要存在**。
+
+**四套阈值 → 契约表。** doctor 的 `STALENESS` 改为从 `contracts.staleness_by_slot()` 派生，一条测试断言两者逐条一致。**巡检范围仍由 doctor 显式声明**（`POLICED_SLOTS`）——派生表覆盖 16 个 slot，直接放开会把 verdict 从 healthy 变成 degraded，那是"什么该告警"的决定，不该夹带在收敛里。`corporate` 保持 168 小时：分红拆股本就稀疏，48 小时会去告警日历而不是告警数据源。
+
+**顺带修好一个既有脆弱点。** quality gate 的 `count(DISTINCT symbol) FROM stock_daily` 在回填负载下**超过 10 分钟**，整个 gate 返回 500。`stock_daily` 按年分区，跨分区 DISTINCT 无法提前收敛，加 `LIMIT` 也没用。改为问 doctor 一直在问的那个问题——**当期 session 的宽度**（单分区等值扫描，10 秒），读数 12,518 个标的对 4,000 的下限，verdict 不变，但在回填期间够得着了。
+
+线上验证（0.19.1）：doctor 19.8 秒五条 staleness 全 ok；quality-score 从 500 变为 23 秒，freshness 按维度给出各自截止时间（2h / 2h / 2h / 48h），平铺阈值为 `None`。
 
 ## 3. 已知差距与最小改动
 
@@ -152,5 +162,6 @@ status: 三维已可读 · 广度基本拉满 · 深度是唯一的大洞
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.3 | 2026-09-09 | 口径收敛：`session.py` 一套 session 定义，阈值全部派生自契约表；Console 的假分母改为除以真分母、无分母不画条；顺带修好 quality gate 在回填负载下的 500。契约状态 ✅ 5 / ⚠️ 8 / ❌ 1（上一轮 ✅ 3 / ⚠️ 5 / ❌ 6）。 |
 | 2026-09-09.2 | 2026-09-09 | 契约表代码化（`contracts.py`，19 个数据集）+ `/market/coverage/dimensions` + Console 三维表。三维首次可读（§2b）。契约状态 ✅ 3 / ⚠️ 5 / ❌ 6。 |
 | 2026-09-09.1 | 2026-09-09 | 基线。三维首次实测；14 条契约中 ✅ 0 / ⚠️ 4 / ❌ 10。深度维度确认为最大空白（575 个标的里 47 个有期权历史，零面板显示）。 |
