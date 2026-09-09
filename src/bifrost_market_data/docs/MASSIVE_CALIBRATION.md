@@ -1,5 +1,5 @@
 ---
-version: 2026-09-09.5
+version: 2026-09-09.6
 updated: 2026-09-09
 status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯一的大洞
 ---
@@ -128,6 +128,17 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 | `/coverage/contracts` 被两处不同 limit 打两次 | `DataVitalsStrip.tsx:105-110`（默认 100）与 `OptionCoverageSection.tsx:159`（500）——Vitals 卡上的 contracts 只是前 100 名之和，与 Coverage 页对不上 | 同一 limit 或同一 query |
 | 纯 alias 端点 | `coverage.py:701-707` `stock-day-quality-detail` = `bar-quality-detail` | 删一个 |
 
+### 3.1b 打不开的面（2026-09-09 实测）
+
+回填负载下，两个端点在 pod 里能算完，但都超过 platform-api 的 60 秒网关：
+
+| 端点 | pod 内耗时 | 经网关 | 后果 |
+|---|---|---|---|
+| `/market/coverage/inventory` | 141 秒 | 502 | Overview 的 Analytics demand 卡在 "Loading inventory…"，六个产品全判 blocked |
+| `/market/readiness/summary` | 81 秒 | 502 | Readiness 页拿不到数（`query_snapshot_coverage` 与 `query_vendor_gap` 单独跑各自超过 180 秒的语句超时，端点靠降级返回） |
+
+`/market/coverage/dimensions` 已经解决过同一形状的问题——后台算、带缓存、立刻回答并说明年龄。这两个端点是同一套做法的下一个应用点，**是目前最刺眼的一处**：面板本身是对的，取不到数而已。
+
 ### 3.2 深度的空白
 
 | 差距 | 原料在不在 | 最小改动 |
@@ -163,6 +174,7 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.6 | 2026-09-09 | 记下 §3.1b：`coverage/inventory`（141 秒）与 `readiness/summary`（81 秒）都超过 60 秒网关，Overview 与 Readiness 两页因此取不到数。 |
 | 2026-09-09.5 | 2026-09-09 | 收敛后的两次实测各抓到一个错：benchmark 档的分母把 watchlist 丢了（11 而非 26，`stock_minute` 因此报 3/11 而非 18/26）；`fundamentals_market` 拿纽约午夜当截止时间，夏令时每晚有半小时报假 critical。两条都是"新仪器照出自己的毛病"，不是新引入的缺陷。 |
 | 2026-09-09.4 | 2026-09-09 | 分母收敛完毕（C-B1 ✅）。Doctor 的巡检面从 28 个名字扩到 575，按采集方式分档判定；顺带发现并修掉第五处假分母（`analyticsDemandModel` 的四个），以及 `k8s/base` 钉在一个从未构建过的 tag 上。契约状态 ✅ 6 / ⚠️ 7 / ❌ 1。 |
 | 2026-09-09.3 | 2026-09-09 | 口径收敛：`session.py` 一套 session 定义，阈值全部派生自契约表；Console 的假分母改为除以真分母、无分母不画条；顺带修好 quality gate 在回填负载下的 500。契约状态 ✅ 5 / ⚠️ 8 / ❌ 1（上一轮 ✅ 3 / ⚠️ 5 / ❌ 6）。 |
