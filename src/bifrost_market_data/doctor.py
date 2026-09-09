@@ -353,6 +353,53 @@ def _presence_findings(
     ]
 
 
+def _failed_since(conn: Any, since: datetime) -> dict[str, int] | None:
+    """Failures per kind from ``ops_jobs.queue_sample``, or None when unreadable.
+
+    The job rows do not survive their own retention: the finished-row cap used
+    to be a count, and once throughput reached 2,700 a minute that count held
+    about fifteen minutes, so a check that said "in 24h" was reading a quarter
+    of an hour. The samples keep the counts. They do not keep job ids, which is
+    why the retry prescription still reads the queue — a failure whose row has
+    been trimmed cannot be retried anyway.
+
+    Counts before the sampler existed are missing rather than wrong; the window
+    fills in as it runs.
+
+    Not ``_counts``: that one upper-cases its keys because it was written for
+    symbols, and a job kind is lower-case.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT kind, sum(failed_delta)::bigint
+                FROM ops_jobs.queue_sample
+                WHERE sample_ts >= %s
+                GROUP BY 1 HAVING sum(failed_delta) > 0
+                """,
+                (since,),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — no samples means fall back to the rows
+        logger.warning("doctor failure-sample read failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    out: dict[str, int] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            values = list(row.values())
+            kind, n = values[0], values[1]
+        else:
+            kind, n = row[0], row[1]
+        if kind:
+            out[str(kind).strip()] = int(n or 0)
+    return out
+
+
 def _distinct(conn: Any, sql: str, params: tuple[Any, ...], key: str) -> list[str] | None:
     try:
         with conn.cursor() as cur:
@@ -675,7 +722,12 @@ def run_doctor(
         )
 
     # ── Queue: failed jobs in the last day, stuck running rows ──
-    failed_rows: list[Any] = []
+    # How many failed is history and comes from the samples; which ones can be
+    # retried is a fact about the queue right now and comes from the rows still
+    # on it. They are different numbers, and the finding says so when they are.
+    since_24h = now_utc - timedelta(hours=24)
+    failed_counts = _failed_since(conn, since_24h)
+    on_queue: dict[str, tuple[int, str, list[int]]] = {}
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -687,21 +739,35 @@ def run_doctor(
                 WHERE status = 'failed' AND finished_at >= %s
                 GROUP BY kind ORDER BY n DESC
                 """,
-                (now_utc - timedelta(hours=24),),
+                (since_24h,),
             )
-            failed_rows = list(cur.fetchall() or [])
+            for row in list(cur.fetchall() or []):
+                kind = str(row.get("kind") if isinstance(row, Mapping) else row[0])
+                on_queue[kind] = (
+                    int(row.get("n") if isinstance(row, Mapping) else row[1]),
+                    str((row.get("sample_error") if isinstance(row, Mapping) else row[2]) or ""),
+                    [int(i) for i in list((row.get("ids") if isinstance(row, Mapping) else row[3]) or [])[:50]],
+                )
     except Exception as exc:  # noqa: BLE001
         logger.warning("doctor failed-jobs read failed: %s", exc)
         try:
             conn.rollback()
         except Exception:
             pass
-    for row in failed_rows:
-        kind = str(row.get("kind") if isinstance(row, Mapping) else row[0])
-        n = int(row.get("n") if isinstance(row, Mapping) else row[1])
-        sample = str((row.get("sample_error") if isinstance(row, Mapping) else row[2]) or "")
-        ids = list((row.get("ids") if isinstance(row, Mapping) else row[3]) or [])[:50]
+
+    for kind in sorted(set(failed_counts or {}) | set(on_queue)):
+        present, sample, ids = on_queue.get(kind, (0, "", []))
+        recorded = (failed_counts or {}).get(kind)
+        n = recorded if recorded is not None else present
+        if n <= 0:
+            continue
         unentitled = "not entitled" in sample.lower() or "upgrade your plan" in sample.lower()
+        detail = f"{n} {kind} job(s) failed in 24h"
+        detail += f" — {sample[:160]}" if sample else " — the rows have been trimmed; no error kept"
+        if recorded is not None and present < n:
+            detail += f" — {present} still on the queue and retryable"
+        if unentitled:
+            detail += " — the plan does not cover this data; not retried."
         findings.append(
             Finding(
                 f"failed:{kind}",
@@ -710,14 +776,11 @@ def run_doctor(
                 f"Failed jobs: {kind}",
                 0,
                 n,
-                (
-                    f"{n} {kind} job(s) failed in 24h — {sample[:160]}"
-                    + (" — the plan does not cover this data; not retried." if unentitled else "")
-                ),
+                detail,
                 fix=None
-                if unentitled
-                else {"action": "retry-jobs", "kind": kind, "job_ids": [int(i) for i in ids]},
-                auto_fixable=not unentitled,
+                if unentitled or not ids
+                else {"action": "retry-jobs", "kind": kind, "job_ids": ids},
+                auto_fixable=not unentitled and bool(ids),
             )
         )
     stuck = _count(

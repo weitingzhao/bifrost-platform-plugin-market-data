@@ -53,6 +53,9 @@ class _Cur:
             self._rows = [{"count": d.get("short_volume", 0)}]
         elif "from ops_jobs.ingest_freshness" in q:
             self._rows = list(d.get("freshness", []))
+        elif "from ops_jobs.queue_sample" in q:
+            # The recorded failure counts, which outlive the job rows.
+            self._rows = list(d.get("failed_samples", []))
         elif "status = 'failed'" in q and "group by kind" in q:
             self._rows = list(d.get("failed", []))
         elif "status = 'failed'" in q:
@@ -492,3 +495,64 @@ def test_fundamentals_are_critical_once_the_deadline_passes() -> None:
     f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
     assert f["severity"] == "crit"
     assert f["auto_fixable"] is True
+
+
+# ── Failure counts come from the record; retries come from what is still there ──
+
+
+def _failing(**kw: Any) -> dict[str, Any]:
+    data = _healthy_data()
+    data.update(kw)
+    return data
+
+
+def test_failure_counts_come_from_the_samples_not_the_surviving_rows() -> None:
+    """40,000 finished rows was fifteen minutes at 2,700 jobs a minute.
+
+    Counting the rows still on the queue answered "how many failed today" with
+    however many happened to survive the trim.
+    """
+    rep = doc.run_doctor(
+        _Conn(
+            _failing(
+                failed_samples=[("option_daily", 1956)],
+                failed=[{"kind": "option_daily", "n": 12, "sample_error": "invalid ticker", "ids": [7, 8]}],
+            )
+        ),
+        now=NOW,
+        watchlist=UNIVERSE,
+    )
+    f = next(x for x in rep["findings"] if x["id"] == "failed:option_daily")
+    assert f["actual"] == 1956  # what the record says
+    assert "12 still on the queue and retryable" in f["detail"]
+    assert f["fix"] == {"action": "retry-jobs", "kind": "option_daily", "job_ids": [7, 8]}
+
+
+def test_a_kind_whose_rows_were_all_trimmed_still_reports_but_offers_no_retry() -> None:
+    rep = doc.run_doctor(
+        _Conn(_failing(failed_samples=[("stock_daily", 41)], failed=[])),
+        now=NOW,
+        watchlist=UNIVERSE,
+    )
+    f = next(x for x in rep["findings"] if x["id"] == "failed:stock_daily")
+    assert f["actual"] == 41
+    assert "no error kept" in f["detail"]
+    assert f["fix"] is None
+    assert f["auto_fixable"] is False
+
+
+def test_without_the_sample_table_the_queue_rows_still_answer() -> None:
+    """An older database has no samples; the check degrades, it does not vanish."""
+    rep = doc.run_doctor(
+        _Conn(
+            _failing(
+                failed_samples=[],
+                failed=[{"kind": "option_daily", "n": 6, "sample_error": "boom", "ids": [1]}],
+            )
+        ),
+        now=NOW,
+        watchlist=UNIVERSE,
+    )
+    f = next(x for x in rep["findings"] if x["id"] == "failed:option_daily")
+    assert f["actual"] == 6
+    assert "still on the queue" not in f["detail"]

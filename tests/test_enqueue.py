@@ -113,7 +113,7 @@ def test_insert_job_dedup_returns_none() -> None:
 def test_trim_old_jobs() -> None:
     """One age pass and one cap pass, each stopping on a short batch."""
     conn = _EnqueueConn(delete_rowcount=3)
-    n = trim_old_jobs(conn, keep_days=7, keep_max=5000, batch_size=20)
+    n = trim_old_jobs(conn, keep_hours=48, keep_max=5000, batch_size=20)
     assert n == 6  # a short batch ends each pass: 3 by age + 3 by the row cap
     deletes = [st for st in conn.statements if "DELETE FROM ops_jobs.job_ingest" in st[0]]
     assert len(deletes) == 2
@@ -147,11 +147,26 @@ def test_trim_keeps_deleting_until_a_batch_comes_up_short() -> None:
         return cur
 
     conn.cursor = counting_cursor  # type: ignore[method-assign]
-    n = trim_old_jobs(conn, keep_days=7, keep_max=5000, batch_size=20)
+    n = trim_old_jobs(conn, keep_hours=48, keep_max=5000, batch_size=20)
     # Three full batches, then a short one ends the age pass; the cap pass then
     # runs its own. The point is that one statement is not the limit.
     assert calls["n"] >= 4, "trim gave up after one statement"
     assert n == 20 + 20 + 20 + 7 + 7
+
+
+def test_retention_is_a_window_not_a_row_count() -> None:
+    """How far back the queue can be questioned must not depend on how busy it was.
+
+    40,000 finished rows was seven days at a normal day's volume and fifteen
+    minutes at 2,700 jobs a minute, so the doctor's "failed in 24h" was reading
+    a quarter of an hour.
+    """
+    conn = _EnqueueConn(delete_rowcount=0)
+    trim_old_jobs(conn, keep_hours=48, keep_max=5_000_000, batch_size=20)
+    age = [st for st in conn.statements if "finished_at < now()" in st[0]]
+    assert age, "no age pass ran"
+    assert "make_interval(secs =>" in age[0][0]
+    assert age[0][1][0] == 48 * 3600.0
 
 
 def test_trim_carries_its_own_statement_budget() -> None:
@@ -162,7 +177,7 @@ def test_trim_carries_its_own_statement_budget() -> None:
     time — which is exactly how the first attempt at this fix failed on DEV.
     """
     conn = _EnqueueConn(delete_rowcount=1)
-    trim_old_jobs(conn, keep_days=7, keep_max=100)
+    trim_old_jobs(conn, keep_hours=48, keep_max=100)
     budgets = [st[0] for st in conn.statements if "SET LOCAL statement_timeout" in st[0]]
     assert len(budgets) >= 2, "the cutoff and every delete batch must set their own budget"
 
@@ -170,7 +185,7 @@ def test_trim_carries_its_own_statement_budget() -> None:
 def test_trim_row_cap_orders_the_way_the_index_does() -> None:
     """`finished_at DESC NULLS LAST, id DESC` matched no index and seq-scanned."""
     conn = _EnqueueConn(delete_rowcount=0)
-    trim_old_jobs(conn, keep_days=7, keep_max=40000)
+    trim_old_jobs(conn, keep_hours=48, keep_max=40000)
     cutoff = [st[0] for st in conn.statements if "OFFSET" in st[0]]
     assert cutoff, "no cutoff query ran"
     assert "NULLS LAST" not in cutoff[0]

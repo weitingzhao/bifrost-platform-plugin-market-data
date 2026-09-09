@@ -154,8 +154,19 @@ def insert_jobs_bulk(
 TRIM_BATCH_ROWS = 20000
 #: Wall-clock budget for one trim. The API connection allows 60s; a trim that
 #: cannot finish must stop having made progress, not be cancelled having made
-#: none.
+#: none. The scheduler CLI has no gateway in front of it and passes a larger
+#: one, since a backfill day can leave millions of rows to clear.
 TRIM_BUDGET_SEC = 45.0
+#: How long finished rows are kept. A window, not a row count: the count was
+#: 40,000, which held about seven days of a normal day's jobs and about fifteen
+#: minutes once throughput reached 2,700 a minute — so every check that said
+#: "in the last day" was reading a quarter of an hour. Slot adherence needs the
+#: evidence to outlive roughly thirty hours, hence two days.
+TRIM_KEEP_HOURS = 48.0
+#: Absolute backstop, not a retention policy. It exists only so a runaway
+#: producer cannot grow the table without bound between two trims; at the
+#: measured 39,000 deletes a second it is a few minutes of clearing.
+TRIM_MAX_ROWS = 5_000_000
 #: Per-statement budget, set inside each batch's transaction. The function must
 #: not depend on how its caller opened the connection: the scheduler CLI takes
 #: the `bifrost` role's 2s default, under which a 20,000-row delete competing
@@ -194,12 +205,19 @@ def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
 def trim_old_jobs(
     conn: _Connection,
     *,
-    keep_days: int = 7,
-    keep_max: int = 5000,
+    keep_hours: float = TRIM_KEEP_HOURS,
+    keep_max: int = TRIM_MAX_ROWS,
     batch_size: int = TRIM_BATCH_ROWS,
     budget_sec: float = TRIM_BUDGET_SEC,
 ) -> int:
-    """Delete finished jobs older than ``keep_days``, then cap the finished rows.
+    """Delete finished jobs older than ``keep_hours``; ``keep_max`` is a backstop.
+
+    Retention is a window. It used to be a window *and* a row count, and the row
+    count did all the work: 40,000 finished rows is about seven days at a normal
+    day's volume and about fifteen minutes at 2,700 jobs a minute, so how far
+    back the queue could be questioned depended on how busy it had been. Now the
+    answer is the same on a quiet day and a backfill day, and ``keep_max`` fires
+    only if a producer outruns two trims.
 
     Both passes delete in bounded, committed batches. The single-statement form
     was fine while the queue was small and stopped working once it was not: the
@@ -231,11 +249,11 @@ def trim_old_jobs(
                     SELECT ctid FROM ops_jobs.job_ingest
                     WHERE status IN ('done', 'failed')
                       AND finished_at IS NOT NULL
-                      AND finished_at < now() - (%s || ' days')::interval
+                      AND finished_at < now() - make_interval(secs => %s)
                     LIMIT %s
                 )
                 """,
-                (int(keep_days), int(batch_size)),
+                (float(keep_hours) * 3600.0, int(batch_size)),
             )
             deleted += n
             if n < batch_size:

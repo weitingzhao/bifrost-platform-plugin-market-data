@@ -914,7 +914,7 @@ def test_enqueue_calendar_and_trim() -> None:
     trim = enqueue_slot(
         conn,
         "trim",
-        scheduler_cfg={"slots": {"trim": {"keep_days": 7, "keep_max": 100}}},
+        scheduler_cfg={"slots": {"trim": {"keep_hours": 48, "keep_max": 100}}},
     )
     # One age batch, short of batch_size, so that pass ends. The fake answers
     # the row-cap cutoff query with nothing, so the cap pass does not run.

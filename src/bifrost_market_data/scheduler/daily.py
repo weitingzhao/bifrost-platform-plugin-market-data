@@ -21,7 +21,12 @@ from bifrost_market_data.logging_setup import configure_logging
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.freshness import update_freshness
-from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk, trim_old_jobs
+from bifrost_market_data.scheduler.enqueue import (
+    TRIM_BUDGET_SEC,
+    TRIM_MAX_ROWS,
+    insert_jobs_bulk,
+    trim_old_jobs,
+)
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.symbol_void import load_voided_symbols
 
@@ -903,9 +908,20 @@ def enqueue_slot(
     day_s = day.isoformat()
 
     if slot_key == "trim":
-        keep_days = int(scfg.get("keep_days") or 7)
-        keep_max = int(scfg.get("keep_max") or 5000)
-        deleted = trim_old_jobs(conn, keep_days=keep_days, keep_max=keep_max)
+        # Retention is a window. `keep_days` is still read so an older config
+        # keeps working, but the row cap is now only a runaway backstop.
+        keep_hours = float(
+            scfg.get("keep_hours") or (float(scfg.get("keep_days") or 2) * 24.0)
+        )
+        keep_max = int(scfg.get("keep_max") or TRIM_MAX_ROWS)
+        deleted = trim_old_jobs(
+            conn,
+            keep_hours=keep_hours,
+            keep_max=keep_max,
+            # No gateway in front of the CLI Dagster fires, and a backfill day
+            # can leave millions of rows; the API path keeps the shorter default.
+            budget_sec=float(scfg.get("budget_sec") or TRIM_BUDGET_SEC),
+        )
         # The job rows go; the record of what they did stays for the retention
         # window, because that series is the only history the queue has.
         try:
