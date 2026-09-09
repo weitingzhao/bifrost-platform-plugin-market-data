@@ -936,6 +936,25 @@ def test_trim_does_not_manage_partitions_for_a_retired_data_face() -> None:
     assert out["option_trades_retention"].startswith("retired")
 
 
+def test_an_ownership_refusal_is_not_a_nightly_alarm() -> None:
+    """Only the owner can drop a partition, and that will not change tonight.
+
+    Retention still happens by deleting the rows, so a warning every night would
+    be crying wolf; a real fault still is one.
+    """
+    from bifrost_market_data.scheduler.daily import _is_not_owner
+
+    class _Diag:
+        sqlstate = "42501"
+
+    class _Refused(Exception):
+        diag = _Diag()
+
+    assert _is_not_owner(_Refused("must be owner of table option_snapshot_y2025m09"))
+    assert _is_not_owner(Exception("must be owner of table x"))
+    assert not _is_not_owner(Exception("canceling statement due to statement timeout"))
+
+
 def test_unknown_slot() -> None:
     with pytest.raises(ValueError, match="unknown slot"):
         enqueue_slot(_DailyConn(), "nope")

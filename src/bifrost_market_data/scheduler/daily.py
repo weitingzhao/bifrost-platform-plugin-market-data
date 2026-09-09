@@ -291,6 +291,17 @@ def _read_watchlist_cache(conn: Any) -> list[str]:
     return _rows_to_symbols(rows)
 
 
+def _is_not_owner(exc: BaseException) -> bool:
+    """True when Postgres refused for want of ownership rather than a real fault.
+
+    ``insufficient_privilege`` is 42501; the message check covers drivers that
+    do not surface a sqlstate.
+    """
+    if getattr(getattr(exc, "diag", None), "sqlstate", None) == "42501":
+        return True
+    return "must be owner of" in str(exc)
+
+
 def resolve_target_date(value: str | date | None = None) -> date:
     """Resolve target trading date. Default: latest weekday on NY calendar (today if weekday)."""
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -996,7 +1007,19 @@ def enqueue_slot(
             if hasattr(conn, "commit"):
                 conn.commit()
         except Exception as exc:  # noqa: BLE001 — retention best-effort
-            logger.warning("option_snapshot partition retention failed: %s", exc)
+            if _is_not_owner(exc):
+                # Not a fault to raise every night: the partitions predate the
+                # plugin's role and only their owner can drop them. The row
+                # delete below does the retention regardless. To get the cheaper
+                # path back, an elevated session runs:
+                #   ALTER TABLE raw_market.option_snapshot_yYYYYmMM OWNER TO bifrost;
+                logger.info(
+                    "option_snapshot partitions are owned by another role, so they are "
+                    "not dropped; rows past the window are deleted instead (%s)",
+                    str(exc).splitlines()[0],
+                )
+            else:
+                logger.warning("option_snapshot partition retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
         # Whether or not the month could be dropped, the rows past the window go.
