@@ -6,6 +6,9 @@ metadata:
   labels:
     app.kubernetes.io/name: market-data
 data:
+  # This is the runtime copy. `config/schedule.yaml` in the repo holds the same
+  # block for local runs and tests; the two are edited together, and a drift
+  # between them is a slot behaving differently in the cluster than it reads.
   schedule.yaml: |
     scheduler:
       watchlist_source: platform-api
@@ -86,8 +89,18 @@ data:
           batch_size: 40
         trim:
           cron: "15 2 * * *"
-          keep_days: 7
-          keep_max: 40000  # ~7 days at 5000 financials/day; adherence evidence must outlive the trim
+          # Retention is a window, so how far back the queue can be questioned
+          # does not depend on how busy it was. Slot adherence looks back ~30h.
+          keep_hours: 48
+          # Backstop only, not a policy: a runaway producer must not grow the
+          # table without bound between two trims.
+          keep_max: 5000000
+          # No gateway in front of the CLI Dagster fires; a backfill day can
+          # leave millions of rows and one nightly run should clear them.
+          budget_sec: 240
+          # The job rows are a work queue, not a record. ops_jobs.queue_sample
+          # keeps the throughput series once they are gone.
+          queue_sample_keep_days: 90
           option_trades_keep_days: 30
           # One observation per session, so retention is counted in sessions.
           option_snapshot_keep_sessions: 90

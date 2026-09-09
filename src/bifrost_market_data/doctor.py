@@ -763,9 +763,12 @@ def run_doctor(
             continue
         unentitled = "not entitled" in sample.lower() or "upgrade your plan" in sample.lower()
         detail = f"{n} {kind} job(s) failed in 24h"
-        detail += f" — {sample[:160]}" if sample else " — the rows have been trimmed; no error kept"
-        if recorded is not None and present < n:
-            detail += f" — {present} still on the queue and retryable"
+        if sample:
+            detail += f" — {sample[:160]}"
+            if recorded is not None and present < n:
+                detail += f" — {present} still on the queue and retryable"
+        else:
+            detail += " — the rows have been trimmed, so no error text or retry survives"
         if unentitled:
             detail += " — the plan does not cover this data; not retried."
         findings.append(

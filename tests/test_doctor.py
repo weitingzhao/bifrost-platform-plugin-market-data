@@ -536,7 +536,7 @@ def test_a_kind_whose_rows_were_all_trimmed_still_reports_but_offers_no_retry() 
     )
     f = next(x for x in rep["findings"] if x["id"] == "failed:stock_daily")
     assert f["actual"] == 41
-    assert "no error kept" in f["detail"]
+    assert "no error text or retry survives" in f["detail"]
     assert f["fix"] is None
     assert f["auto_fixable"] is False
 
