@@ -40,9 +40,28 @@ def freshness_age_limit_hours(now: datetime) -> float:
     return FRESHNESS_MAX_AGE_HOURS
 
 
-def fetch_stock_daily_symbol_count(conn: Any) -> int:
+def fetch_stock_daily_symbol_count(conn: Any, *, session: date | None = None) -> int:
+    """Distinct symbols in one session — how wide today's whole-market pull was.
+
+    It used to count distinct symbols across all of ``stock_daily``. That is a
+    different question (how many names have we ever seen, delisted included),
+    and by 2026-09-09 it could not be answered at all: the table is partitioned
+    by year, so a global DISTINCT cannot stop early, and under backfill load the
+    count ran past ten minutes and took the whole quality gate down with a 500.
+    One session is an equality scan of one partition — the shape the doctor has
+    always used for the same question.
+    """
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(DISTINCT symbol) FROM raw_market.stock_daily")
+        if session is None:
+            cur.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM raw_market.stock_daily "
+                "WHERE bar_date = (SELECT max(bar_date) FROM raw_market.stock_daily)"
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM raw_market.stock_daily WHERE bar_date = %s",
+                (session,),
+            )
         row = cur.fetchone()
     if row is None:
         return 0
@@ -121,8 +140,13 @@ def check_stock_daily_coverage(
     lookback_days: int = STOCK_DAILY_GAP_LOOKBACK_DAYS,
     watchlist_symbols: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Check symbol count and date gaps for watchlist over recent trading days."""
-    symbol_count = fetch_stock_daily_symbol_count(conn)
+    """Check symbol count and date gaps for watchlist over recent trading days.
+
+    The count is the session's width, not the table's lifetime — see
+    ``fetch_stock_daily_symbol_count``.
+    """
+    session_day, _is_today = resolve_session(conn, datetime.now(timezone.utc))
+    symbol_count = fetch_stock_daily_symbol_count(conn, session=session_day)
     symbols = (
         list(watchlist_symbols)
         if watchlist_symbols is not None
