@@ -1,7 +1,7 @@
 ---
-version: 2026-09-09.8
+version: 2026-09-09.9
 updated: 2026-09-09
-status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯一的大洞
+status: 分母已收敛 · Doctor 巡检 575 个名字 · 队列有了历史曲线 · 深度仍是唯一的大洞
 ---
 
 # Massive 校准
@@ -64,7 +64,7 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 | C-D1 | ✅ | 每个数据集在 `contracts.py` 的 `DepthTarget` 里声明窗口，取自订阅口径（stocks 5 年 / options 2 年 / financials 2009）或 tier 要求（24/12 个月），并带上"为什么是这个数"。旧的散落常量（`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`）仍在各自的调用点，但不再是深度的事实源。 |
 | C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。`StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代——**更正**：它的 `Math.max(rows.length, 1)` 是 `ScoreRing` 的分区总数（ready + thin + blocked 三块加起来就是取回的行数），不是覆盖率分母，不该被当成假分母；真正的问题是页面没说这 80 个是 20,695 个里的抽样。 |
 | C-D3 | ⚠️ | `doctor.py:389-395` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90`（`doctor.py:54`）也正确记录了"95% 结构上不可达"。但 **ratios 端点忽略 `date` 参数、历史只能向前累积**这条边界没有写进任何地方。 |
-| C-D4 | ⚠️ | `option_daily` 一行现在就是进度条：45/575 广度、58/70 达标、中位 24 个月（§2b）。仍是 ⚠️：它答得出"买到了多少"，答不出"按当前速率还要多久"——那需要把队列消化速率接进来。 |
+| C-D4 | ✅ | `option_daily` 一行是进度条（广度、达标数、深度中位数，§2b），而"按当前速率还要多久"由 `ops_jobs.queue_sample` 回答：每 5 分钟一行，记深度、入队量、消化量、最老待跑年龄与 handler 的 p50/p95，Console 的 Queue history 面板画成曲线（6h/24h/3d/7d）。这也补上了此前唯一的历史来源——`job_ingest` 的 trim 把已完成行压到 40,000 条，按现在的速率只有约 15 分钟。 |
 | C-F1 | ✅ | `session.py` 是唯一定义（19:30 NY 锚点 + 交易日历），`doctor` 与 `quality` 都调用它，交易日探针可注入以保留既有测试接缝。`ingest_dashboard` 的 22:30 ET 是 **cron 宽限窗口**，回答"该点火了吗"，与"该持有哪个 session"是两个问题，刻意保留。 |
 | C-F2 | ✅ | 19 个数据集各自在契约里声明截止时间；`quality.check_freshness` 按维度取 `deadline_for_dimension()`，返回体里每个维度带自己的 `deadline_hours`，平铺的 `max_age_hours` 已为 `None`。线上实测：stock_daily / option_snapshot / option_open_interest 各 2h，calendar 48h。**0.19.5 修掉一处遗漏**：`fundamentals_market` 用 `session_is_today` 当截止时间的替身，而它在纽约午夜翻面——夏令时是 04:00 UTC，比 04:30 UTC 发布槽早半小时。2026-09-09 04:10 UTC 实测到这条假 critical，现按契约声明的 30h 判定。 |
 | C-F3 | ⚠️ | Plugin 侧已收敛：doctor 的 `STALENESS` 由 `contracts.staleness_by_slot()` 派生（一条测试断言两者逐条一致），`quality` 的 24h/72h 周末规则退役——问交易日历后周末例外根本不需要存在。仍是 ⚠️：**platform-api 的 `freshnessWeekendMaxAgeH` 与 Console `dataVitalsModel.ts:9-10` 还各有一份**。 |
@@ -147,6 +147,23 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 配套改了 Console 一处判断：**"还在数"不等于"数完了是零"**。之前 inventory 取不到数时六个产品全判 blocked，
 现在 `computing` 期间判 unknown 并保持加载态，拿到数后照常评级，卡片上带年龄标签。
 
+### 3.1c 队列的吞吐（2026-09-09 实测与修复）
+
+| 项 | 修之前 | 修之后 |
+|---|---|---|
+| worker 有效并发 | 3.8 / 40 槽位 | 20–38 |
+| 消化速率 | 666/分 | 2,200–2,700/分 |
+| 240 万回填 ETA | 60 小时 | 约 15 小时 |
+| trim | 自 2026-09-08 02:15 起从未跑完 | 分批，单轮 66 万行 |
+
+根因三条，都是先量后改：
+
+1. **满负荷被当成空闲**。worker 循环在 `len(in_flight) >= max_concurrency` 时跳出取任务，此时 `claimed_any` 仍是 False，于是走到空闲分支 sleep 满 5 秒的轮询间隔——恰恰是最该继续取任务的时刻。每个 pod 跑 5 个、睡 5 秒、循环。**claim 本身从不是瓶颈**：在真实竞争下连测 240 次，次次取到，耗时 1 毫秒。
+2. **trim 的行数上限排序无索引可用**。`ORDER BY finished_at DESC NULLS LAST, id DESC` 与 `job_ingest_finished_at`（`finished_at DESC`，而 DESC 本就是 NULLS FIRST）不匹配，顺序扫 127 万行并溢出 32MB 外部排序，14 秒还没删到一行，然后要在 60 秒预算里一次删掉 123 万行。现在游标查询 60 毫秒，两遍都按 20,000 行分批提交。
+3. **trim 不带自己的语句预算**。批次是按 API 连接的 60 秒设计的，而 Dagster 触发的 CLI 用的是 `bifrost` 角色默认的 2 秒。现在每批和游标查询都在自己的事务里 `SET LOCAL`。
+
+**一个需要留意的副作用**：trim 的上限是按**行数**（40,000 条已完成）而不是按时间。吞吐涨了 4 倍之后，这 40,000 条只覆盖约 15 分钟，所以 doctor 的"24 小时内失败任务数"实际只能看到十几分钟。失败计数在 `queue_sample.failed_delta` 里按 5 分钟永久留存，但 doctor 那条查询会低报。这是既有策略在新吞吐下暴露出来的，不是本次引入的。
+
 ### 3.2 深度的空白
 
 | 差距 | 原料在不在 | 最小改动 |
@@ -182,6 +199,7 @@ status: 分母已全部收敛 · Doctor 巡检 575 个名字 · 深度仍是唯�
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-09.9 | 2026-09-09 | 队列吞吐 666→2,400/分（满负荷被当成空闲）；trim 分批后恢复；新增 `ops_jobs.queue_sample` 与 Console 的 Queue history 曲线，C-D4 转 ✅（✅ 7 / ⚠️ 6 / ❌ 1）。详见 §3.1c。 |
 | 2026-09-09.8 | 2026-09-09 | Console 实测复核：Stock daily 的表把"有史以来的标的"除以"今天活跃的 ticker"，改为同源读数 5,182/5,317；无条的表现在会说清缺的是口径还是数字。Overview 从"blocked 6"变为"ready 6"。 |
 | 2026-09-09.7 | 2026-09-09 | §3.1b 的两个端点改成后台算 + 缓存（共用 `api/slow_cache.py`，dimensions 一并迁过去）。Console 区分"还在数"与"数完是零"。 |
 | 2026-09-09.6 | 2026-09-09 | 记下 §3.1b：`coverage/inventory`（141 秒）与 `readiness/summary`（81 秒）都超过 60 秒网关，Overview 与 Readiness 两页因此取不到数。 |
