@@ -460,3 +460,35 @@ def test_presence_checks_do_not_gate_the_research_batch() -> None:
     assert rep["verdict"] == "critical"
     assert rep["eod_critical"]["verdict"] == "healthy"
     assert not [i for i in rep["eod_critical"]["findings"] if "windowed" in i]
+
+
+# ── C-F2: overdue is the contract's deadline, not a calendar rollover ──
+
+
+def _no_fundamentals() -> dict[str, Any]:
+    data = _healthy_data()
+    data["ratios"] = 0
+    data["short_volume"] = 0
+    return data
+
+
+def test_fundamentals_are_not_critical_before_their_deadline() -> None:
+    """New York midnight is 04:00 UTC in daylight time; the slot publishes at 04:30.
+
+    The old rule escalated on `session_is_today`, so every summer night had a
+    half-hour window where the whole session read critical for data not yet due.
+    """
+    just_after_ny_midnight = datetime(2026, 9, 5, 4, 10, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(_no_fundamentals()), now=just_after_ny_midnight, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "warn"
+    assert f["auto_fixable"] is False
+    assert "due" in f["detail"]
+
+
+def test_fundamentals_are_critical_once_the_deadline_passes() -> None:
+    past_the_deadline = datetime(2026, 9, 6, 3, 0, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(_no_fundamentals()), now=past_the_deadline, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "crit"
+    assert f["auto_fixable"] is True

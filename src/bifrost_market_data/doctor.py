@@ -36,6 +36,7 @@ from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 
 from bifrost_market_data.contracts import STOCK_DAILY_MIN_SESSION_SYMBOLS, staleness_by_slot
 from bifrost_market_data.session import EOD_EXPECTED_BY_NY as _EOD_BY_NY
+from bifrost_market_data.session import deadline
 from bifrost_market_data.session import resolve_session as _resolve_session
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ EOD_CRITICAL_CHECKS = (
 )
 RATIOS_MIN_ROWS = 2000
 SHORT_VOLUME_MIN_ROWS = 4000
+#: Hours after the close by which the whole-market ratio and short-volume pull
+#: is due — the tightest of the contracts the `fundamentals-market` slot owns.
+FUNDAMENTALS_MARKET_DEADLINE_H = staleness_by_slot()["fundamentals-market"][1]
 
 # The slots whose staleness the doctor polices. The list is deliberate — widening
 # it is a decision about what raises a warning, not a consequence of declaring a
@@ -619,23 +623,30 @@ def run_doctor(
         conn, "SELECT count(*) FROM raw_market.short_volume WHERE period_date = %s", (session,)
     )
     fund_ok = n_ratios >= RATIOS_MIN_ROWS and n_sv >= SHORT_VOLUME_MIN_ROWS
+    # C-F2: overdue is measured against the deadline the contract declares, not
+    # against a calendar rollover. This read `session_is_today`, which flips at
+    # New York midnight — 04:00 UTC in daylight time, half an hour before the
+    # 04:30 UTC slot publishes — so on 2026-09-09 at 04:10 UTC the doctor called
+    # the whole session critical for data that was not yet due.
+    fund_due = deadline(session, FUNDAMENTALS_MARKET_DEADLINE_H)
+    fund_overdue = now_utc >= fund_due
     findings.append(
         Finding(
             f"fundamentals_market:{session_s}",
             "fundamentals-market",
-            "ok" if fund_ok else ("warn" if session_is_today else "crit"),
+            "ok" if fund_ok else ("crit" if fund_overdue else "warn"),
             "Ratios + short volume (whole market)",
             f"ratios >= {RATIOS_MIN_ROWS}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
             {"ratios": n_ratios, "short_volume": n_sv},
             f"ratios={n_ratios}, short_volume={n_sv} rows for {session_s}."
             + (
-                " Published the morning after the session (04:30 UTC slot)."
-                if session_is_today and not fund_ok
+                f" Published the morning after the session; due {fund_due:%Y-%m-%d %H:%M} UTC."
+                if not fund_ok and not fund_overdue
                 else ""
             ),
             session=session_s,
             fix=None if fund_ok else _slot_fix("fundamentals-market", session, force=False),
-            auto_fixable=not fund_ok and not session_is_today,
+            auto_fixable=not fund_ok and fund_overdue,
         )
     )
 
