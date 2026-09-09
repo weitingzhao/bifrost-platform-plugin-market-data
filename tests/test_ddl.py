@@ -79,7 +79,12 @@ def test_apply_ddl_emits_schemas_tables_and_helpers() -> None:
     assert "DROP VIEW IF EXISTS data_ops.ingest_freshness" in blob
     assert "DROP SCHEMA IF EXISTS data_ops CASCADE" in blob
     assert "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_open_interest'" in blob
-    assert "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades'" in blob
+    # option_trades is retired: option trades are not in Options Starter, the
+    # slot went in 0.10.3, and the table holds zero rows. Provisioning day
+    # partitions for it every night bought nothing.
+    assert "ensure_day_partitions('raw_market', 'option_trades'" not in blob
+    for name in ("stock_minute", "option_daily", "option_minute", "option_snapshot"):
+        assert f"ensure_month_partitions('raw_market', '{name}'" in blob
     assert "job_ingest_dedup" in blob
     assert "DROP TABLE IF EXISTS ops_jobs.us_trading_calendar" in blob
     assert "SELECT FOR UPDATE" not in blob  # claim logic is P3, not DDL
@@ -213,3 +218,21 @@ def test_filing_date_migration_not_on_bifrost_role_path() -> None:
         ddl_mod.apply_wave8_migrations
     )
     assert "add_financials_filing_date(cur)" in inspect.getsource(ddl_mod.apply_ddl)
+
+
+def test_partition_provisioning_has_one_list_and_two_callers() -> None:
+    """It lived only in apply_ddl, which nothing re-runs, so the forward window
+    never advanced: four tables sat 83 days from having nowhere to insert."""
+    import inspect
+
+    from bifrost_market_data.schema.ddl import ensure_partitions
+    from bifrost_market_data.scheduler import daily
+
+    conn = _FakeConn()
+    ensure_partitions(conn)
+    blob = "\n".join(conn.cur.statements)
+    assert "ensure_year_partitions('raw_market', 'stock_daily'" in blob
+    assert blob.count("ensure_month_partitions") == 5
+    assert conn.committed
+    # The scheduler calls the shared one rather than keeping its own list.
+    assert "ensure_partitions(conn)" in inspect.getsource(daily.enqueue_slot)

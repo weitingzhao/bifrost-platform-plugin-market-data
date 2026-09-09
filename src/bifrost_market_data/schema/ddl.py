@@ -1050,8 +1050,23 @@ def _ensure_partitions(cur: _Cursor) -> None:
     cur.execute(
         "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_open_interest', 12, 3)"
     )
-    # Tape: day partitions + ~35d window; trim drops partitions older than 30d.
-    cur.execute("SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)")
+    # option_trades is retired — option trades are not in Options Starter, the
+    # slot went in 0.10.3 and the table holds zero rows. Rotating day partitions
+    # for a table nothing writes to buys nothing. Restore with the slot.
+
+
+def ensure_partitions(conn: _Connection) -> None:
+    """Extend every partitioned table's forward window.
+
+    Called by ``apply_ddl`` and, nightly, by the trim slot. It used to run only
+    inside the DDL, which nothing re-runs on a schedule, so the forward window
+    never advanced: on 2026-09-09 four tables had partitions to 2026-12-01 and
+    83 days left before inserts would have had nowhere to land. One list, two
+    callers — a second copy in the scheduler would be a list that drifts.
+    """
+    with conn.cursor() as cur:
+        _ensure_partitions(cur)
+    conn.commit()
 
 
 # Expected table names for tests / docs

@@ -1022,6 +1022,20 @@ def enqueue_slot(
                 logger.warning("option_snapshot partition retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
+        # Extend every partitioned table's forward window. This lived only in
+        # apply_ddl, which nothing re-runs on a schedule, so four tables sat 83
+        # days from having nowhere to put the next insert.
+        partitions_ensured = False
+        try:
+            from bifrost_market_data.schema.ddl import ensure_partitions
+
+            ensure_partitions(conn)
+            partitions_ensured = True
+        except Exception as exc:  # noqa: BLE001 — retention must not fail on provisioning
+            logger.warning("partition provisioning failed: %s", exc)
+            if hasattr(conn, "rollback"):
+                conn.rollback()
+
         # Whether or not the month could be dropped, the rows past the window go.
         # Dropping is cheaper and the plugin's role cannot do it — all eighteen
         # partitions are owned by `postgres` — so retention must not depend on
@@ -1047,6 +1061,7 @@ def enqueue_slot(
             "option_snapshot_keep_sessions": snapshot_keep_sessions,
             "option_snapshot_intraday_deleted": intraday_deleted,
             "option_snapshot_past_window_deleted": past_window_deleted,
+            "partitions_ensured": partitions_ensured,
             "enqueued": 0,
             "deduped": 0,
         }
