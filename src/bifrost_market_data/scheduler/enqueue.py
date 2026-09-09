@@ -156,6 +156,11 @@ TRIM_BATCH_ROWS = 20000
 #: cannot finish must stop having made progress, not be cancelled having made
 #: none.
 TRIM_BUDGET_SEC = 45.0
+#: Per-statement budget, set inside each batch's transaction. The function must
+#: not depend on how its caller opened the connection: the scheduler CLI takes
+#: the `bifrost` role's 2s default, under which a 20,000-row delete competing
+#: with the workers' writes is cancelled every time.
+TRIM_STATEMENT_TIMEOUT = "30s"
 
 
 def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
@@ -168,6 +173,7 @@ def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
     seconds before deleting a single row. This answers in 60ms.
     """
     with conn.cursor() as cur:
+        cur.execute(f"SET LOCAL statement_timeout = '{TRIM_STATEMENT_TIMEOUT}'")
         cur.execute(
             """
             SELECT finished_at
@@ -210,6 +216,7 @@ def trim_old_jobs(
 
     def _delete(sql: str, params: tuple[Any, ...]) -> int:
         with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{TRIM_STATEMENT_TIMEOUT}'")
             cur.execute(sql, params)
             n = int(getattr(cur, "rowcount", 0) or 0)
         conn.commit()

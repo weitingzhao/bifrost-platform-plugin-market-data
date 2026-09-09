@@ -154,6 +154,19 @@ def test_trim_keeps_deleting_until_a_batch_comes_up_short() -> None:
     assert n == 20 + 20 + 20 + 7 + 7
 
 
+def test_trim_carries_its_own_statement_budget() -> None:
+    """The caller's connection is not the budget.
+
+    The scheduler CLI opens with the `bifrost` role's 2s default, under which a
+    20,000-row delete competing with the workers' writes is cancelled every
+    time — which is exactly how the first attempt at this fix failed on DEV.
+    """
+    conn = _EnqueueConn(delete_rowcount=1)
+    trim_old_jobs(conn, keep_days=7, keep_max=100)
+    budgets = [st[0] for st in conn.statements if "SET LOCAL statement_timeout" in st[0]]
+    assert len(budgets) >= 2, "the cutoff and every delete batch must set their own budget"
+
+
 def test_trim_row_cap_orders_the_way_the_index_does() -> None:
     """`finished_at DESC NULLS LAST, id DESC` matched no index and seq-scanned."""
     conn = _EnqueueConn(delete_rowcount=0)
