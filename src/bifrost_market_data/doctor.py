@@ -33,13 +33,16 @@ from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 
+from bifrost_market_data.contracts import staleness_by_slot
+from bifrost_market_data.session import EOD_EXPECTED_BY_NY as _EOD_BY_NY
+from bifrost_market_data.session import resolve_session as _resolve_session
+
 logger = logging.getLogger(__name__)
 
 _NY = ZoneInfo("America/New_York")
 
-# The EOD chain fires at 22:00 UTC (18:00 EDT / 17:00 EST) and drains in
-# minutes; by this wall-clock time in New York the session's rows must exist.
-EOD_EXPECTED_BY_NY = time(19, 30)
+#: Re-exported from ``session`` for the callers that read it here.
+EOD_EXPECTED_BY_NY = _EOD_BY_NY
 
 # Whole-market floors: below these the pull did not happen, whatever the count.
 # A normal session lands ~12.5k stock_daily and ~13k stock_snapshot rows.
@@ -65,15 +68,20 @@ EOD_CRITICAL_CHECKS = (
 RATIOS_MIN_ROWS = 2000
 SHORT_VOLUME_MIN_ROWS = 4000
 
-# Slot → freshness dimension and the age (hours) after which it is stale.
+# The slots whose staleness the doctor polices. The list is deliberate — widening
+# it is a decision about what raises a warning, not a consequence of declaring a
+# deadline — but the numbers are no longer kept here: a deadline written in two
+# places is a dataset that reads healthy on one panel and stale on the next.
+POLICED_SLOTS: tuple[str, ...] = (
+    "calendar",
+    "reference",
+    "option-refresh",
+    "corporate",
+    "fundamentals-rotate",
+)
 STALENESS: dict[str, tuple[str, float]] = {
-    "calendar": ("calendar", 48.0),
-    "reference": ("ticker_sync", 48.0),
-    "option-refresh": ("option_contract", 12.0),
-    "corporate": ("dividends", 7 * 24.0),
-    "fundamentals-rotate": ("financials", 48.0),
+    slot: entry for slot, entry in staleness_by_slot().items() if slot in POLICED_SLOTS
 }
-
 # Above this the worker loop is wedged behind synchronous batch writes.
 WORKER_LOOP_LAG_WARN_SEC = 60.0
 
@@ -242,23 +250,17 @@ def _freshness(conn: Any) -> dict[str, datetime]:
 
 
 def resolve_session(conn: Any, now: datetime) -> tuple[date, bool]:
-    """The session the tables should hold by now, and whether that is today.
+    """The session the tables should hold by now — see ``session.resolve_session``.
 
-    Today counts once its EOD batch should have drained (19:30 New York on a
-    trading day); before that, or on a weekend, the last completed session.
+    Re-exported so the doctor's callers keep their import; the definition lives
+    in one module because there used to be four of it.
     """
-    now_ny = now.astimezone(_NY)
-    today_ny = now_ny.date()
-    try:
-        trading_today = is_trading_day(conn, today_ny)
-    except Exception:
-        trading_today = today_ny.weekday() < 5
-    if trading_today and now_ny.time() >= EOD_EXPECTED_BY_NY:
-        return today_ny, True
-    completed = fetch_completed_trading_days(conn, 1, as_of=today_ny)
-    if completed:
-        return completed[-1], False
-    return today_ny, trading_today
+    return _resolve_session(
+        conn,
+        now,
+        is_trading_day=is_trading_day,
+        fetch_completed_trading_days=fetch_completed_trading_days,
+    )
 
 
 def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[str, Any]:
@@ -328,31 +330,50 @@ def run_doctor(
         if live is None or snap is None or oi is None:
             findings.append(
                 Finding(
-                    f"option_chain:{session_s}", "eod-pipeline", "warn", "Option chain coverage",
-                    len(optionable), None, "coverage query failed — see API log", session=session_s
+                    f"option_chain:{session_s}",
+                    "eod-pipeline",
+                    "warn",
+                    "Option chain coverage",
+                    len(optionable),
+                    None,
+                    "coverage query failed — see API log",
+                    session=session_s,
                 )
             )
         else:
             findings.append(
                 _coverage_finding(
-                    "option_snapshot", "Option chain snapshot", live, snap,
-                    session=session, fixable=fixable,
+                    "option_snapshot",
+                    "Option chain snapshot",
+                    live,
+                    snap,
+                    session=session,
+                    fixable=fixable,
                 )
             )
             findings.append(
                 _coverage_finding(
-                    "option_open_interest", "Open interest", live, oi,
-                    session=session, fixable=fixable,
+                    "option_open_interest",
+                    "Open interest",
+                    live,
+                    oi,
+                    session=session,
+                    fixable=fixable,
                 )
             )
 
     # ── Stock EOD: whole market + watchlist for the session ──
-    n_daily = _count(conn, "SELECT count(*) FROM raw_market.stock_daily WHERE bar_date = %s", (session,))
+    n_daily = _count(
+        conn, "SELECT count(*) FROM raw_market.stock_daily WHERE bar_date = %s", (session,)
+    )
     findings.append(
         Finding(
-            f"stock_daily:{session_s}", "universe-daily",
+            f"stock_daily:{session_s}",
+            "universe-daily",
             "ok" if n_daily >= STOCK_DAILY_MIN_ROWS else "crit",
-            "Stock daily bars (whole market)", f">= {STOCK_DAILY_MIN_ROWS}", n_daily,
+            "Stock daily bars (whole market)",
+            f">= {STOCK_DAILY_MIN_ROWS}",
+            n_daily,
             f"{n_daily} stock_daily rows for {session_s}.",
             session=session_s,
             fix=None if n_daily >= STOCK_DAILY_MIN_ROWS else _slot_fix("universe-daily", session),
@@ -370,9 +391,12 @@ def run_doctor(
             missing = [s for s in symbols if s not in set(have)]
             findings.append(
                 Finding(
-                    f"stock_daily_watchlist:{session_s}", "stock-eod",
+                    f"stock_daily_watchlist:{session_s}",
+                    "stock-eod",
                     "ok" if not missing else "warn",
-                    "Stock daily bars (watchlist)", len(symbols), len(have),
+                    "Stock daily bars (watchlist)",
+                    len(symbols),
+                    len(have),
                     f"{len(have)}/{len(symbols)} watchlist symbols have a {session_s} bar.",
                     session=session_s,
                     fix=_slot_fix("stock-eod", session) if missing else None,
@@ -381,15 +405,23 @@ def run_doctor(
                 )
             )
 
-    n_snap = _count(conn, "SELECT count(*) FROM raw_market.stock_snapshot WHERE session_date = %s", (session,))
+    n_snap = _count(
+        conn, "SELECT count(*) FROM raw_market.stock_snapshot WHERE session_date = %s", (session,)
+    )
     findings.append(
         Finding(
-            f"stock_snapshot:{session_s}", "stock-snapshot",
+            f"stock_snapshot:{session_s}",
+            "stock-snapshot",
             "ok" if n_snap >= STOCK_SNAPSHOT_MIN_ROWS else "warn",
-            "Stock snapshot (whole market)", f">= {STOCK_SNAPSHOT_MIN_ROWS}", n_snap,
+            "Stock snapshot (whole market)",
+            f">= {STOCK_SNAPSHOT_MIN_ROWS}",
+            n_snap,
             f"{n_snap} stock_snapshot rows for {session_s}."
-            + ("" if n_snap >= STOCK_SNAPSHOT_MIN_ROWS or session_is_today else
-               " The vendor snapshot is point-in-time; a catch-up lands under today's date."),
+            + (
+                ""
+                if n_snap >= STOCK_SNAPSHOT_MIN_ROWS or session_is_today
+                else " The vendor snapshot is point-in-time; a catch-up lands under today's date."
+            ),
             session=session_s,
             fix=None if n_snap >= STOCK_SNAPSHOT_MIN_ROWS else _slot_fix("stock-snapshot", session),
             auto_fixable=n_snap < STOCK_SNAPSHOT_MIN_ROWS and session_is_today,
@@ -397,18 +429,27 @@ def run_doctor(
     )
 
     # ── Financials & Ratios by date (published the morning after) ──
-    n_ratios = _count(conn, "SELECT count(*) FROM raw_market.ratios WHERE period_date = %s", (session,))
-    n_sv = _count(conn, "SELECT count(*) FROM raw_market.short_volume WHERE period_date = %s", (session,))
+    n_ratios = _count(
+        conn, "SELECT count(*) FROM raw_market.ratios WHERE period_date = %s", (session,)
+    )
+    n_sv = _count(
+        conn, "SELECT count(*) FROM raw_market.short_volume WHERE period_date = %s", (session,)
+    )
     fund_ok = n_ratios >= RATIOS_MIN_ROWS and n_sv >= SHORT_VOLUME_MIN_ROWS
     findings.append(
         Finding(
-            f"fundamentals_market:{session_s}", "fundamentals-market",
+            f"fundamentals_market:{session_s}",
+            "fundamentals-market",
             "ok" if fund_ok else ("warn" if session_is_today else "crit"),
             "Ratios + short volume (whole market)",
             f"ratios >= {RATIOS_MIN_ROWS}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
             {"ratios": n_ratios, "short_volume": n_sv},
             f"ratios={n_ratios}, short_volume={n_sv} rows for {session_s}."
-            + (" Published the morning after the session (04:30 UTC slot)." if session_is_today and not fund_ok else ""),
+            + (
+                " Published the morning after the session (04:30 UTC slot)."
+                if session_is_today and not fund_ok
+                else ""
+            ),
             session=session_s,
             fix=None if fund_ok else _slot_fix("fundamentals-market", session, force=False),
             auto_fixable=not fund_ok and not session_is_today,
@@ -423,10 +464,17 @@ def run_doctor(
         stale = age_h is None or age_h > max_age_h
         findings.append(
             Finding(
-                f"stale:{slot}", slot, "warn" if stale else "ok",
-                f"{slot} freshness", f"< {max_age_h:g}h", None if age_h is None else round(age_h, 1),
-                (f"freshness.{dim} is {age_h:.1f}h old (limit {max_age_h:g}h)." if age_h is not None
-                 else f"freshness.{dim} has never been written."),
+                f"stale:{slot}",
+                slot,
+                "warn" if stale else "ok",
+                f"{slot} freshness",
+                f"< {max_age_h:g}h",
+                None if age_h is None else round(age_h, 1),
+                (
+                    f"freshness.{dim} is {age_h:.1f}h old (limit {max_age_h:g}h)."
+                    if age_h is not None
+                    else f"freshness.{dim} has never been written."
+                ),
                 fix=_slot_fix(slot, None) if stale else None,
                 auto_fixable=stale,
             )
@@ -462,10 +510,19 @@ def run_doctor(
         unentitled = "not entitled" in sample.lower() or "upgrade your plan" in sample.lower()
         findings.append(
             Finding(
-                f"failed:{kind}", "queue", "warn", f"Failed jobs: {kind}", 0, n,
-                (f"{n} {kind} job(s) failed in 24h — {sample[:160]}"
-                 + (" — the plan does not cover this data; not retried." if unentitled else "")),
-                fix=None if unentitled else {"action": "retry-jobs", "kind": kind, "job_ids": [int(i) for i in ids]},
+                f"failed:{kind}",
+                "queue",
+                "warn",
+                f"Failed jobs: {kind}",
+                0,
+                n,
+                (
+                    f"{n} {kind} job(s) failed in 24h — {sample[:160]}"
+                    + (" — the plan does not cover this data; not retried." if unentitled else "")
+                ),
+                fix=None
+                if unentitled
+                else {"action": "retry-jobs", "kind": kind, "job_ids": [int(i) for i in ids]},
                 auto_fixable=not unentitled,
             )
         )
@@ -479,17 +536,32 @@ def run_doctor(
     )
     if stuck > 0:
         findings.append(
-            Finding("stuck_running", "queue", "warn", "Stuck running jobs", 0, stuck,
-                    f"{stuck} job(s) have been running past the stale limit; the workers reclaim them on their next tick.")
+            Finding(
+                "stuck_running",
+                "queue",
+                "warn",
+                "Stuck running jobs",
+                0,
+                stuck,
+                f"{stuck} job(s) have been running past the stale limit; the workers reclaim them on their next tick.",
+            )
         )
 
     # ── Workers and vendor (informational: fixes live outside the plugin) ──
     for pool, health in (worker_health or {}).items():
         if health is None:
             findings.append(
-                Finding(f"worker:{pool}", "workers", "crit", f"{pool} workers", "reachable", "unreachable",
-                        f"/health for the {pool} pool did not answer.",
-                        fix={"action": "rollout-restart", "deployment": f"polygon-worker-{pool}"}, auto_fixable=False)
+                Finding(
+                    f"worker:{pool}",
+                    "workers",
+                    "crit",
+                    f"{pool} workers",
+                    "reachable",
+                    "unreachable",
+                    f"/health for the {pool} pool did not answer.",
+                    fix={"action": "rollout-restart", "deployment": f"polygon-worker-{pool}"},
+                    auto_fixable=False,
+                )
             )
             continue
         last_claim = health.get("last_claim_at")
@@ -499,8 +571,12 @@ def run_doctor(
         busy = isinstance(lag, (int, float)) and lag > WORKER_LOOP_LAG_WARN_SEC
         findings.append(
             Finding(
-                f"worker:{pool}", "workers", "warn" if busy else "ok", f"{pool} workers",
-                f"loop lag < {WORKER_LOOP_LAG_WARN_SEC:g}s", "reachable" if not busy else f"lag {lag}s",
+                f"worker:{pool}",
+                "workers",
+                "warn" if busy else "ok",
+                f"{pool} workers",
+                f"loop lag < {WORKER_LOOP_LAG_WARN_SEC:g}s",
+                "reachable" if not busy else f"lag {lag}s",
                 f"done={health.get('jobs_done')} failed={health.get('jobs_failed')} "
                 f"last_claim={last_claim or '—'} uptime={health.get('uptime_sec')}s lag={lag}s"
                 + (" — the pool is saturated, not down." if busy else ""),
@@ -511,9 +587,18 @@ def run_doctor(
         code = vendor.get("status_code")
         sev = "ok" if reach and code == 200 else ("crit" if not reach else "warn")
         findings.append(
-            Finding("vendor", "vendor", sev, "Vendor API", "HTTP 200", code if reach else "unreachable",
-                    vendor.get("detail") or ("marketstatus/now answered" if sev == "ok" else "vendor probe failed"),
-                    fix=None if sev == "ok" else {"action": "check-vendor-key"}, auto_fixable=False)
+            Finding(
+                "vendor",
+                "vendor",
+                sev,
+                "Vendor API",
+                "HTTP 200",
+                code if reach else "unreachable",
+                vendor.get("detail")
+                or ("marketstatus/now answered" if sev == "ok" else "vendor probe failed"),
+                fix=None if sev == "ok" else {"action": "check-vendor-key"},
+                auto_fixable=False,
+            )
         )
 
     # ── Prescriptions: one per distinct fix ──
@@ -526,7 +611,9 @@ def run_doctor(
         if key in seen:
             continue
         seen.add(key)
-        prescriptions.append({"finding_ids": [g.id for g in findings if g.fix == f.fix and g.auto_fixable], **f.fix})
+        prescriptions.append(
+            {"finding_ids": [g.id for g in findings if g.fix == f.fix and g.auto_fixable], **f.fix}
+        )
 
     crit = [f for f in findings if f.severity == "crit"]
     warn = [f for f in findings if f.severity == "warn"]
@@ -541,7 +628,11 @@ def run_doctor(
         "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "session": session_s,
         "session_is_today": session_is_today,
-        "universe": {"watchlist": len(symbols), "underlyings": len(universe), "optionable": len(optionable)},
+        "universe": {
+            "watchlist": len(symbols),
+            "underlyings": len(universe),
+            "optionable": len(optionable),
+        },
         "verdict": verdict,
         "summary": f"{len(crit)} critical · {len(warn)} warning · {sum(1 for f in findings if f.severity == 'ok')} ok",
         "eod_critical": {
@@ -572,7 +663,9 @@ def probe_worker_health(
     return out
 
 
-def probe_vendor(api_key: str, *, rest_base: str = "https://api.polygon.io", timeout: float = 5.0) -> dict[str, Any]:
+def probe_vendor(
+    api_key: str, *, rest_base: str = "https://api.polygon.io", timeout: float = 5.0
+) -> dict[str, Any]:
     """One cheap authenticated GET: reachable? key accepted?"""
     if not api_key:
         return {"reachable": False, "status_code": None, "detail": "no API key configured"}
@@ -582,9 +675,17 @@ def probe_vendor(api_key: str, *, rest_base: str = "https://api.polygon.io", tim
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return {"reachable": True, "status_code": resp.status, "detail": "marketstatus/now answered"}
+            return {
+                "reachable": True,
+                "status_code": resp.status,
+                "detail": "marketstatus/now answered",
+            }
     except urllib.error.HTTPError as exc:
-        return {"reachable": True, "status_code": exc.code, "detail": f"vendor answered HTTP {exc.code}"}
+        return {
+            "reachable": True,
+            "status_code": exc.code,
+            "detail": f"vendor answered HTTP {exc.code}",
+        }
     except (urllib.error.URLError, OSError) as exc:
         return {"reachable": False, "status_code": None, "detail": f"vendor unreachable: {exc}"}
 
@@ -622,7 +723,10 @@ def heal(
                     scheduler_cfg=cfg,
                     force=bool(pres.get("force")),
                 )
-                entry["result"] = {k: res.get(k) for k in ("enqueued", "deduped", "skipped", "reason", "target_date")}
+                entry["result"] = {
+                    k: res.get(k)
+                    for k in ("enqueued", "deduped", "skipped", "reason", "target_date")
+                }
             elif pres["action"] == "retry-jobs":
                 entry["result"] = _retry_jobs(conn, [int(i) for i in pres.get("job_ids", [])])
             else:
@@ -638,7 +742,9 @@ def heal(
         "verdict_before": rep.get("verdict"),
         "actions": actions,
         "enqueued": sum(
-            int(a["result"].get("enqueued") or 0) for a in actions if isinstance(a.get("result"), dict)
+            int(a["result"].get("enqueued") or 0)
+            for a in actions
+            if isinstance(a.get("result"), dict)
         ),
     }
 
@@ -662,4 +768,7 @@ def _retry_jobs(conn: Any, job_ids: Sequence[int]) -> dict[str, Any]:
             payload = json.loads(payload)
         specs.append((str(kind), payload or {}, int(priority or 0), 3))
     ids = insert_jobs_bulk(conn, specs)
-    return {"enqueued": sum(1 for i in ids if i is not None), "deduped": sum(1 for i in ids if i is None)}
+    return {
+        "enqueued": sum(1 for i in ids if i is not None),
+        "deduped": sum(1 for i in ids if i is None),
+    }

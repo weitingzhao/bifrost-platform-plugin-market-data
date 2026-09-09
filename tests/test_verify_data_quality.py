@@ -74,9 +74,7 @@ class _QConn:
         self.closed_holidays: list[date] = []
         # Default fixture window: three completed sessions ending 2024-06-20.
         self.fixture_as_of = date(2024, 6, 20)
-        self.trading_days = fetch_completed_trading_days(
-            self, 3, as_of=self.fixture_as_of
-        )
+        self.trading_days = fetch_completed_trading_days(self, 3, as_of=self.fixture_as_of)
         self.stock_daily_rows: list[tuple[str, date]] = [
             (sym, d) for sym in ("AAPL", "MSFT") for d in self.trading_days
         ]
@@ -225,27 +223,50 @@ def test_freshness_pass() -> None:
 
 
 def test_freshness_stale() -> None:
+    """Late means the session's deadline passed with nothing run since its close."""
     conn = _QConn()
-    # Mid-week noon so weekend allowance does not apply.
-    now = datetime(2026, 8, 26, 15, 0, tzinfo=timezone.utc)  # Wednesday
-    old = now - timedelta(hours=48)
+    # Wednesday night, past the deadline for the session the tables should hold.
+    now = datetime(2026, 8, 26, 23, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=4)
     conn.freshness_rows = [
         ("stock_daily", old, 10, "ok", old),
         ("option_snapshot", old, 5, "ok", old),
         ("option_open_interest", old, 5, "ok", old),
         ("calendar", old, 1, "ok", old),
     ]
-    result = check_freshness(conn, max_age_hours=24, now=now)
+    result = check_freshness(conn, now=now)
     assert result["ok"] is False
     assert len(result["failures"]) > 0
+    # The failure names the deadline it missed and the session it missed it for.
+    assert "deadline=" in result["failures"][0] and "session=" in result["failures"][0]
 
 
-def test_freshness_monday_pre_eod_allows_weekend_gap() -> None:
-    """Fri night ~33h age on Monday morning must PASS under 72h allowance."""
-    from bifrost_market_data.quality import freshness_age_limit_hours
+def test_a_feed_inside_its_own_deadline_is_not_late() -> None:
+    """The flat rule failed a dataset at 25 hours whatever the calendar said.
 
+    A run four hours before this session's close has not covered it yet, but its
+    deadline has not passed either — that is pending, not stale.
+    """
+    conn = _QConn()
+    now = datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+    recent = now - timedelta(hours=26)
+    conn.freshness_rows = [
+        ("stock_daily", recent, 10, "ok", recent),
+        ("option_snapshot", recent, 5, "ok", recent),
+        ("option_open_interest", recent, 5, "ok", recent),
+        ("calendar", recent, 1, "ok", recent),
+    ]
+    assert check_freshness(conn, now=now)["ok"] is True
+
+
+def test_the_weekend_needs_no_exception_any_more() -> None:
+    """Friday night's data on Monday morning is 33 hours old and perfectly fine.
+
+    The flat rule had to carve out a 72-hour weekend allowance to avoid failing
+    every Friday; asking the trading calendar makes that exception unnecessary,
+    because Monday morning's session is not due yet.
+    """
     now = datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc)  # Monday
-    assert freshness_age_limit_hours(now) == 72.0
     conn = _QConn()
     last = now - timedelta(hours=33)
     conn.freshness_rows = [
@@ -256,7 +277,9 @@ def test_freshness_monday_pre_eod_allows_weekend_gap() -> None:
     ]
     result = check_freshness(conn, now=now)
     assert result["ok"] is True
-    assert result["max_age_hours"] == 72.0
+    # No blanket number is reported: each dimension carries its own deadline.
+    assert result["max_age_hours"] is None
+    assert {d["deadline_hours"] for d in result["dimensions"] if d.get("ok") is not None}
 
 
 def test_run_all_checks() -> None:

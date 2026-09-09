@@ -5,14 +5,16 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from bifrost_market_data.contracts import deadline_for_dimension
+from bifrost_market_data.session import is_late, resolve_session
 from bifrost_market_data.scheduler.daily import resolve_watchlist_symbols_for_coverage
 
 # Acceptance thresholds (program YAML)
 STOCK_DAILY_MIN_SYMBOLS = 4000
 STOCK_DAILY_GAP_LOOKBACK_DAYS = 30
+# Kept for callers that still pass an explicit override; the gate itself now
+# measures against the session and each dataset's own contract deadline.
 FRESHNESS_MAX_AGE_HOURS = 24.0
-# Align with platform-api marketdata freshnessWeekendMaxAgeH: Sat/Sun and
-# Monday before UTC 22:00 (next EOD window) — Fri night snapshot must not FAIL.
 FRESHNESS_WEEKEND_MAX_AGE_HOURS = 72.0
 
 # Dimensions expected to be actively refreshed by daily CronJobs.
@@ -25,7 +27,13 @@ EXPECTED_FRESHNESS_DIMENSIONS = (
 
 
 def freshness_age_limit_hours(now: datetime) -> float:
-    """Session-bound EOD dimensions: weekend / Mon-pre-EOD allowance."""
+    """Deprecated: a weekday rule standing in for a trading calendar.
+
+    It answered "is this stale" with 24 hours, or 72 across a weekend so a
+    Friday night snapshot would not fail on Monday morning — an approximation
+    of the session that ``session.resolve_session`` knows exactly. Kept only
+    for callers that have not moved; ``check_freshness`` no longer uses it.
+    """
     wd = now.weekday()  # Mon=0 … Sun=6
     if wd >= 5 or (wd == 0 and now.hour < 22):
         return FRESHNESS_WEEKEND_MAX_AGE_HOURS
@@ -336,19 +344,18 @@ def check_freshness(
     expected_dimensions: Sequence[str] = EXPECTED_FRESHNESS_DIMENSIONS,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """All expected dimensions must be present, status=ok, and age < limit.
+    """All expected dimensions must be present, status=ok, and not late.
 
-    When ``max_age_hours`` is omitted, use ``freshness_age_limit_hours(now)``
-    (24h weekday / 72h weekend & Monday before UTC 22:00).
+    Late is measured against the session the tables should hold and each
+    dataset's own contract deadline, not against a flat age: a feed published
+    the morning after its session is not missing on the night of it, which is
+    why the flat rule needed a weekend exception to stop failing every Friday.
+    ``max_age_hours`` still forces the old behaviour for callers that pass it.
     """
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
-    age_limit = (
-        float(max_age_hours)
-        if max_age_hours is not None
-        else freshness_age_limit_hours(now_utc)
-    )
+    session_day, _is_today = resolve_session(conn, now_utc)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -376,7 +383,9 @@ def check_freshness(
         age_hours: float | None = None
         if isinstance(last, datetime):
             last_utc = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
-            age_hours = max(0.0, (now_utc - last_utc.astimezone(timezone.utc)).total_seconds() / 3600.0)
+            age_hours = max(
+                0.0, (now_utc - last_utc.astimezone(timezone.utc)).total_seconds() / 3600.0
+            )
         by_dim[dim] = {
             "dimension": dim,
             "last_run_at": last.isoformat() if isinstance(last, datetime) else None,
@@ -395,16 +404,23 @@ def check_freshness(
             continue
         age = info.get("age_hours")
         status = str(info.get("status") or "")
-        ok_dim = status == "ok" and age is not None and float(age) < float(age_limit)
+        hours = (
+            float(max_age_hours)
+            if max_age_hours is not None
+            else (deadline_for_dimension(dim) or FRESHNESS_MAX_AGE_HOURS)
+        )
+        last_run = info.get("last_run_at")
+        last_dt = datetime.fromisoformat(last_run) if isinstance(last_run, str) else None
+        ok_dim = status == "ok" and not is_late(last_dt, session_day, hours, now_utc)
         if not ok_dim:
             failures.append(
-                f"{dim}: status={status} age_hours={age}"
+                f"{dim}: status={status} age_hours={age} deadline={hours}h session={session_day}"
             )
         details.append(
             {
                 **info,
                 "ok": ok_dim,
-                "max_age_hours": age_limit,
+                "deadline_hours": hours,
             }
         )
 
@@ -412,7 +428,9 @@ def check_freshness(
     return {
         "check": "freshness",
         "ok": ok,
-        "max_age_hours": age_limit,
+        "session": session_day.isoformat(),
+        # Per dimension now — one flat number was the thing being removed.
+        "max_age_hours": float(max_age_hours) if max_age_hours is not None else None,
         "dimensions": details,
         "failures": failures,
         "detail": "ok" if ok else "; ".join(failures),

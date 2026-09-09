@@ -265,3 +265,20 @@ def test_only_one_refresh_runs_per_key(wired: dict[str, Any]) -> None:
         mod.threading.Thread = original  # type: ignore[assignment]
         assert real_threading is mod.threading
         mod._REFRESHING.clear()
+
+
+def test_the_doctor_and_the_contracts_agree_on_every_deadline() -> None:
+    """A deadline written in two places is a dataset that reads healthy on one
+    panel and stale on the next — the doctor's staleness table is derived."""
+    from bifrost_market_data.contracts import deadline_for_dimension, staleness_by_slot
+    from bifrost_market_data.doctor import POLICED_SLOTS, STALENESS
+
+    assert set(STALENESS) == set(POLICED_SLOTS)
+    for slot, (dimension, hours) in STALENESS.items():
+        assert staleness_by_slot()[slot] == (dimension, hours), slot
+        assert deadline_for_dimension(dimension) == hours, dimension
+
+
+def test_every_dataset_declares_the_dimension_that_evidences_it() -> None:
+    for c in CONTRACTS:
+        assert c.freshness_dimension, c.dataset

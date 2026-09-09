@@ -67,6 +67,10 @@ class DatasetContract:
     #: is 24s. The shape follows the cardinality, not a preference.
     low_cardinality: bool = False
     breadth_window: BreadthWindow = "session"
+    #: The ops_jobs.ingest_freshness dimension that evidences this dataset,
+    #: declared here so the doctor's staleness table and the quality gate stop
+    #: keeping their own copies of the mapping.
+    freshness_dimension: str | None = None
 
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
@@ -87,6 +91,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("universe-daily", "stock-eod"),
         "symbol",
         "bar_date",
+        freshness_dimension="stock_daily",
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -96,6 +101,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("stock-snapshot",),
         "symbol",
         "session_date",
+        freshness_dimension="stock_snapshot",
     ),
     DatasetContract(
         "raw_market.stock_movers",
@@ -105,6 +111,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("stock-movers",),
         "symbol",
         "session_date",
+        freshness_dimension="stock_movers",
     ),
     DatasetContract(
         "raw_market.ticker",
@@ -115,16 +122,22 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         None,
         breadth_window="ever",
+        freshness_dimension="ticker_sync",
     ),
     DatasetContract(
         "raw_market.corporate_action",
         "whole-market",
-        DepthTarget("catalogue", why="the slot's window looks forward (-7 / +60 days); it is not a history"),
-        48.0,
+        DepthTarget(
+            "catalogue", why="the slot's window looks forward (-7 / +60 days); it is not a history"
+        ),
+        # Dividends and splits are sparse: a week without one is normal, and the
+        # doctor has always allowed that. 48h would flag the calendar, not the feed.
+        168.0,
         ("corporate",),
         "symbol",
         "ex_date",
         breadth_window="ever",
+        freshness_dimension="dividends",
     ),
     DatasetContract(
         "raw_market.income_statement",
@@ -135,6 +148,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         breadth_window="ever",
+        freshness_dimension="financials",
     ),
     DatasetContract(
         "raw_market.balance_sheet",
@@ -145,6 +159,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         breadth_window="ever",
+        freshness_dimension="financials",
     ),
     DatasetContract(
         "raw_market.cash_flow",
@@ -155,6 +170,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         breadth_window="ever",
+        freshness_dimension="financials",
     ),
     DatasetContract(
         "raw_market.ratios",
@@ -167,6 +183,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("fundamentals-market",),
         "symbol",
         "period_date",
+        freshness_dimension="ratios",
     ),
     DatasetContract(
         "raw_market.short_volume",
@@ -176,16 +193,20 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("fundamentals-market",),
         "symbol",
         "period_date",
+        freshness_dimension="short_volume",
     ),
     DatasetContract(
         "raw_market.short_interest",
         "whole-market",
-        DepthTarget("forward_only", why="published per settlement; the lookback is 45 days, not a history"),
+        DepthTarget(
+            "forward_only", why="published per settlement; the lookback is 45 days, not a history"
+        ),
         30.0,
         ("fundamentals-market",),
         "symbol",
         "period_date",
         breadth_window="ever",
+        freshness_dimension="short_interest",
     ),
     # ── global: one series, no instruments ──
     DatasetContract(
@@ -196,6 +217,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("treasury",),
         None,
         "yield_date",
+        freshness_dimension="treasury_yields",
     ),
     DatasetContract(
         "raw_market.us_market_holiday",
@@ -206,6 +228,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         None,
         None,
         breadth_window="ever",
+        freshness_dimension="calendar",
     ),
     # ── universe: per-symbol calls, so follow the Research rule ──
     DatasetContract(
@@ -217,17 +240,21 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "underlying",
         "snapshot_ts",
         low_cardinality=True,
+        freshness_dimension="option_snapshot",
     ),
     DatasetContract(
         "raw_market.option_contract",
         "universe",
-        DepthTarget("catalogue", why="contracts alive now, plus expired ones the vendor still lists"),
+        DepthTarget(
+            "catalogue", why="contracts alive now, plus expired ones the vendor still lists"
+        ),
         12.0,
         ("option-refresh",),
         "underlying",
         None,
         low_cardinality=True,
         breadth_window="ever",
+        freshness_dimension="option_contract",
     ),
     DatasetContract(
         "raw_market.option_open_interest",
@@ -237,6 +264,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         ("eod-pipeline",),
         "underlying",
         "trade_date",
+        freshness_dimension="option_open_interest",
     ),
     DatasetContract(
         "raw_market.option_daily",
@@ -251,6 +279,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "underlying",
         "bar_date",
         low_cardinality=True,
+        freshness_dimension="option_daily",
     ),
     # ── benchmark-only: too big to be worth more than a few names ──
     DatasetContract(
@@ -262,6 +291,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "bar_time",
         low_cardinality=True,
+        freshness_dimension="stock_minute",
     ),
     DatasetContract(
         "raw_market.option_minute",
@@ -272,6 +302,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "underlying",
         "bar_time",
         low_cardinality=True,
+        freshness_dimension="option_minute",
     ),
 )
 
@@ -287,6 +318,34 @@ def datasets_in_tier(tier: Tier) -> tuple[DatasetContract, ...]:
     return tuple(c for c in CONTRACTS if c.tier == tier)
 
 
+def deadline_for_dimension(dimension: str) -> float | None:
+    """Hours after the session close by which this freshness dimension is due.
+
+    The tightest contract wins when several datasets share a dimension — the
+    three statement tables all land from one financials job, and a lag that is
+    late for any of them is late.
+    """
+    hours = [c.freshness_hours for c in CONTRACTS if c.freshness_dimension == dimension]
+    return min(hours) if hours else None
+
+
+def staleness_by_slot() -> dict[str, tuple[str, float]]:
+    """slot → (freshness dimension, deadline hours), derived rather than kept.
+
+    The doctor used to hold its own copy of this table; a dataset's deadline
+    now has one home.
+    """
+    out: dict[str, tuple[str, float]] = {}
+    for c in CONTRACTS:
+        if not c.freshness_dimension:
+            continue
+        for slot in c.slots:
+            current = out.get(slot)
+            if current is None or c.freshness_hours < current[1]:
+                out[slot] = (c.freshness_dimension, c.freshness_hours)
+    return out
+
+
 __all__ = [
     "CONTRACTS",
     "BY_DATASET",
@@ -296,4 +355,6 @@ __all__ = [
     "UNIVERSE_MONTHS",
     "contract_for",
     "datasets_in_tier",
+    "deadline_for_dimension",
+    "staleness_by_slot",
 ]
