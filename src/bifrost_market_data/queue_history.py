@@ -37,19 +37,34 @@ WHERE status IN ('pending', 'running')
 GROUP BY 1
 """
 
+#: Half-open [since, until) so consecutive windows neither overlap nor gap. A
+#: fixed "last 300 seconds" looked right until the sampler drifted off the grid:
+#: two samples 200 seconds apart each counted a full five minutes, and the
+#: hundred seconds they shared were counted twice.
 _DELTA_SQL = """
 SELECT kind,
-       count(*) FILTER (WHERE created_at >= %(since)s)::bigint AS created_delta,
-       count(*) FILTER (WHERE status = 'done' AND finished_at >= %(since)s)::bigint AS done_delta,
-       count(*) FILTER (WHERE status = 'failed' AND finished_at >= %(since)s)::bigint AS failed_delta,
+       count(*) FILTER (
+           WHERE created_at >= %(since)s AND created_at < %(until)s
+       )::bigint AS created_delta,
+       count(*) FILTER (
+           WHERE status = 'done' AND finished_at >= %(since)s AND finished_at < %(until)s
+       )::bigint AS done_delta,
+       count(*) FILTER (
+           WHERE status = 'failed' AND finished_at >= %(since)s AND finished_at < %(until)s
+       )::bigint AS failed_delta,
        percentile_cont(0.5) WITHIN GROUP (
            ORDER BY extract(epoch FROM (finished_at - started_at))
-       ) FILTER (WHERE finished_at >= %(since)s AND started_at IS NOT NULL) AS p50_sec,
+       ) FILTER (
+           WHERE finished_at >= %(since)s AND finished_at < %(until)s AND started_at IS NOT NULL
+       ) AS p50_sec,
        percentile_cont(0.95) WITHIN GROUP (
            ORDER BY extract(epoch FROM (finished_at - started_at))
-       ) FILTER (WHERE finished_at >= %(since)s AND started_at IS NOT NULL) AS p95_sec
+       ) FILTER (
+           WHERE finished_at >= %(since)s AND finished_at < %(until)s AND started_at IS NOT NULL
+       ) AS p95_sec
 FROM ops_jobs.job_ingest
-WHERE created_at >= %(since)s OR finished_at >= %(since)s
+WHERE (created_at >= %(since)s AND created_at < %(until)s)
+   OR (finished_at >= %(since)s AND finished_at < %(until)s)
 GROUP BY 1
 """
 
@@ -72,7 +87,14 @@ def take_sample(
     against the previous row, so a missed sample leaves a gap in the series
     instead of a spike in the next point.
     """
-    at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    read_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # Snap to the interval grid, so live rows share one grid with the ones
+    # reconstructed from finished jobs and every window is disjoint. The row is
+    # stamped with the boundary that just closed; the deltas cover the interval
+    # before it, which is wholly in the past. Depth is read now, a moment after
+    # that boundary — the one approximation here, and it is a small one.
+    epoch = read_at.timestamp()
+    at = datetime.fromtimestamp(epoch - (epoch % int(interval_sec)), tz=timezone.utc)
     since = at - timedelta(seconds=int(interval_sec))
     depth: dict[str, tuple[Any, Any, Any]] = {}
     deltas: dict[str, tuple[Any, ...]] = {}
@@ -82,7 +104,7 @@ def take_sample(
             cur.execute(_STATUS_SQL)
             for kind, pending, running, oldest in _rows(cur):
                 depth[str(kind)] = (pending, running, oldest)
-            cur.execute(_DELTA_SQL, {"since": since})
+            cur.execute(_DELTA_SQL, {"since": since, "until": at})
             for row in _rows(cur):
                 deltas[str(row[0])] = row[1:]
         conn.commit()

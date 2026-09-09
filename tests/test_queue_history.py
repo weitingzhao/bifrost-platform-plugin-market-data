@@ -8,6 +8,7 @@ from typing import Any
 from bifrost_market_data import queue_history as qh
 
 AT = datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc)
+OFF_GRID = datetime(2026, 9, 9, 15, 3, 27, tzinfo=timezone.utc)
 
 
 class _Cur:
@@ -75,6 +76,17 @@ def test_a_sample_carries_depth_and_what_moved() -> None:
     assert (pending, running) == (2396642, 4)
     assert (created, done, failed) == (120, 3300, 2)
     assert (oldest, p50, p95) == (82247.0, 0.263, 0.939)
+
+
+def test_samples_land_on_the_interval_grid() -> None:
+    """Two samples 200s apart each counting 300s counted the overlap twice."""
+    conn = _Conn(depth=[("option_daily", 5, 1, 3.0)], deltas=[("option_daily", 0, 9, 0, 0.2, 0.3)])
+    qh.take_sample(conn, now=OFF_GRID, interval_sec=300)
+    (row,) = conn.written
+    assert row[0] == AT  # stamped with the boundary that just closed, not 15:03:27
+    window = [p for q, p in conn.statements if isinstance(p, dict) and "until" in p][0]
+    assert window["until"] == AT
+    assert window["since"] == datetime(2026, 9, 9, 14, 55, tzinfo=timezone.utc)
 
 
 def test_a_kind_that_only_finished_work_still_gets_a_row() -> None:

@@ -55,13 +55,17 @@ def start_sampler(interval_sec: int = SAMPLE_INTERVAL_SEC) -> bool:
             return False
         _sampler_started = True
 
+    step = max(30, int(interval_sec))
+
     def run() -> None:
         while True:
+            # Wake just after an interval boundary, so each sample closes the
+            # window the last one opened rather than drifting across the grid.
+            time.sleep(max(1.0, step - (time.time() % step)) + 1.0)
             try:
                 _sample_once()
             except Exception:  # noqa: BLE001 — the sampler outlives any one failure
                 logger.exception("queue sampler tick failed")
-            time.sleep(max(30, int(interval_sec)))
 
     threading.Thread(target=run, name="queue-sampler", daemon=True).start()
     logger.info("queue sampler started, every %ss", interval_sec)
