@@ -25,6 +25,7 @@ from bifrost_market_data.scheduler.enqueue import (
     TRIM_BUDGET_SEC,
     TRIM_MAX_ROWS,
     insert_jobs_bulk,
+    trim_option_snapshots,
     trim_old_jobs,
 )
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
@@ -956,47 +957,25 @@ def enqueue_slot(
         partitions_dropped = 0
         snapshot_partitions_dropped = 0
         intraday_deleted = 0
+        past_window_deleted = 0
+        # option_trades is retired: option trades are not in Options Starter, the
+        # slot has been gone since 0.10.3, and the table holds zero rows. Its 42
+        # day partitions are owned by `postgres`, so the plugin's role cannot
+        # drop them, and every nightly trim logged a failure it could never fix.
+        # Rotating partitions for a table nothing writes to buys nothing either.
+        # If the plan is ever upgraded, restore both calls with the slot.
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT ops_jobs.drop_day_partitions_older_than('raw_market', 'option_trades', %s)",
-                    (trades_keep,),
-                )
-                row = cur.fetchone() if hasattr(cur, "fetchone") else None
-            if row is not None:
-                partitions_dropped = int(
-                    row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
-                )
-            if hasattr(conn, "commit"):
-                conn.commit()
-            # Re-create near-term day partitions after drops.
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT ops_jobs.ensure_day_partitions('raw_market', 'option_trades', 35, 2)"
-                )
-            if hasattr(conn, "commit"):
-                conn.commit()
-        except Exception as exc:  # noqa: BLE001 — retention best-effort
-            logger.warning("option_trades partition retention failed: %s", exc)
-            if hasattr(conn, "rollback"):
-                conn.rollback()
-        try:
-            # Intraday rows are the current regime's shape, not history: they
-            # are ~3x the EOD volume, so they leave on their own shorter clock.
-            # EOD rows sit exactly at 16:00 NY, which is what tells them apart.
             intraday_keep = int(scfg.get("option_snapshot_intraday_keep_days") or 30)
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM raw_market.option_snapshot
-                    WHERE snapshot_ts < now() - make_interval(days => %s)
-                      AND (snapshot_ts AT TIME ZONE 'America/New_York')::time <> time '16:00'
-                    """,
-                    (intraday_keep,),
-                )
-                intraday_deleted = int(getattr(cur, "rowcount", 0) or 0)
-            if hasattr(conn, "commit"):
-                conn.commit()
+            # Bounded and committed per batch. One unbounded statement took 22
+            # seconds across eighteen partitions to delete nothing, so under the
+            # scheduler CLI's two-second default this had never once completed.
+            snapshot_budget = float(scfg.get("snapshot_budget_sec") or 60.0)
+            intraday_deleted = trim_option_snapshots(
+                conn,
+                keep_days=intraday_keep,
+                intraday_only=True,
+                budget_sec=snapshot_budget,
+            )
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ops_jobs.drop_month_partitions_older_than"
@@ -1020,15 +999,31 @@ def enqueue_slot(
             logger.warning("option_snapshot partition retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
+        # Whether or not the month could be dropped, the rows past the window go.
+        # Dropping is cheaper and the plugin's role cannot do it — all eighteen
+        # partitions are owned by `postgres` — so retention must not depend on
+        # it. Deleting needs only the DML grant the role has.
+        try:
+            past_window_deleted = trim_option_snapshots(
+                conn,
+                keep_days=snapshot_keep,
+                budget_sec=float(scfg.get("snapshot_budget_sec") or 60.0),
+            )
+        except Exception as exc:  # noqa: BLE001 — retention best-effort
+            logger.warning("option_snapshot row retention failed: %s", exc)
+            if hasattr(conn, "rollback"):
+                conn.rollback()
         return {
             "slot": slot_key,
             "trimmed": deleted,
             "option_trades_partitions_dropped": partitions_dropped,
             "option_trades_keep_days": trades_keep,
+            "option_trades_retention": "retired — the data face is not collected",
             "option_snapshot_partitions_dropped": snapshot_partitions_dropped,
             "option_snapshot_keep_days": snapshot_keep,
             "option_snapshot_keep_sessions": snapshot_keep_sessions,
             "option_snapshot_intraday_deleted": intraday_deleted,
+            "option_snapshot_past_window_deleted": past_window_deleted,
             "enqueued": 0,
             "deduped": 0,
         }

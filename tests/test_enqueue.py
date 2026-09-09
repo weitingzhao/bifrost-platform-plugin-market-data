@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from bifrost_market_data.scheduler.enqueue import insert_job, insert_jobs_bulk, payload_hash, trim_old_jobs
+from bifrost_market_data.scheduler.enqueue import (
+    insert_job,
+    insert_jobs_bulk,
+    payload_hash,
+    trim_option_snapshots,
+    trim_old_jobs,
+)
 
 
 class _EnqueueCursor:
@@ -210,3 +216,53 @@ def test_insert_jobs_bulk_one_statement_one_commit() -> None:
     again = insert_jobs_bulk(conn, [("stock_daily", {"symbol": "MSFT"}, 5, 3), ("calendar", {}, 1, 3)])
     assert again == [None, 3]
     assert insert_jobs_bulk(conn, []) == []
+
+
+# ── Intraday snapshot retention ──
+
+
+def test_intraday_snapshot_trim_batches_on_the_primary_key_not_ctid() -> None:
+    """option_snapshot is partitioned, so a ctid names a row only within one partition.
+
+    462,252 ctid values are shared by more than one row in this table; batching
+    on them would delete rows nobody selected. job_ingest is an ordinary table,
+    which is why its trim can use ctid.
+    """
+    conn = _EnqueueConn(delete_rowcount=1)
+    trim_option_snapshots(conn, keep_days=30, intraday_only=True, batch_size=5000)
+    deletes = [st[0] for st in conn.statements if "DELETE FROM raw_market.option_snapshot" in st[0]]
+    assert deletes, "no delete ran"
+    assert "ctid" not in deletes[0]
+    assert "(t.option_ticker, t.snapshot_ts) IN (" in deletes[0]
+
+
+def test_intraday_snapshot_trim_is_bounded_and_carries_its_budget() -> None:
+    """One unbounded statement took 22s over eighteen partitions and deleted nothing."""
+    conn = _EnqueueConn(delete_rowcount=1)
+    n = trim_option_snapshots(conn, keep_days=30, intraday_only=True, batch_size=5000)
+    assert n == 1  # a short batch ends the pass
+    assert any("LIMIT %s" in st[0] for st in conn.statements)
+    assert any("SET LOCAL statement_timeout" in st[0] for st in conn.statements)
+    assert conn.committed >= 1
+
+
+def test_intraday_snapshot_trim_keeps_the_eod_anchor() -> None:
+    """16:00 New York is the observation; everything else is the intraday shape."""
+    conn = _EnqueueConn(delete_rowcount=0)
+    trim_option_snapshots(conn, keep_days=30, intraday_only=True)
+    sql = [st[0] for st in conn.statements if "option_snapshot" in st[0]][0]
+    assert "America/New_York" in sql
+    assert "<> time '16:00'" in sql
+
+
+def test_snapshot_retention_does_not_depend_on_dropping_a_partition() -> None:
+    """All eighteen partitions are owned by postgres; the plugin's role has DML only.
+
+    Dropping the month is cheaper, so it is still attempted — but retention has
+    to happen without it, or it never happens at all.
+    """
+    conn = _EnqueueConn(delete_rowcount=1)
+    trim_option_snapshots(conn, keep_days=90)
+    sql = [st[0] for st in conn.statements if "option_snapshot" in st[0]][0]
+    assert "DROP TABLE" not in sql
+    assert "16:00" not in sql  # the long window takes the EOD rows too

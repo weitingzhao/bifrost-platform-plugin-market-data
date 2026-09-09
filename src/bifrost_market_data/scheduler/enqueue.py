@@ -202,6 +202,88 @@ def _finished_cutoff(conn: _Connection, keep_max: int) -> Any:
     return row[0] if not isinstance(row, Mapping) else next(iter(row.values()), None)
 
 
+#: Two fixed statements rather than one assembled at call time: the difference
+#: is a whole predicate, and a query that reads the same in the source as it does
+#: in the log is worth two constants.
+_SNAPSHOT_DELETE_ALL = """
+DELETE FROM raw_market.option_snapshot t
+WHERE (t.option_ticker, t.snapshot_ts) IN (
+    SELECT option_ticker, snapshot_ts
+    FROM raw_market.option_snapshot
+    WHERE snapshot_ts < now() - make_interval(days => %s)
+    LIMIT %s
+)
+"""
+
+_SNAPSHOT_DELETE_INTRADAY = """
+DELETE FROM raw_market.option_snapshot t
+WHERE (t.option_ticker, t.snapshot_ts) IN (
+    SELECT option_ticker, snapshot_ts
+    FROM raw_market.option_snapshot
+    WHERE snapshot_ts < now() - make_interval(days => %s)
+      AND (snapshot_ts AT TIME ZONE 'America/New_York')::time <> time '16:00'
+    LIMIT %s
+)
+"""
+
+#: Rows per intraday-snapshot delete statement. Smaller than the job batch: each
+#: row is wider and the predicate has to read the whole candidate range.
+SNAPSHOT_BATCH_ROWS = 5000
+
+
+def trim_option_snapshots(
+    conn: _Connection,
+    *,
+    keep_days: int,
+    intraday_only: bool = False,
+    batch_size: int = SNAPSHOT_BATCH_ROWS,
+    budget_sec: float = 60.0,
+    statement_timeout: str = TRIM_STATEMENT_TIMEOUT,
+) -> int:
+    """Delete option snapshots past ``keep_days``; ``intraday_only`` spares the EOD anchor.
+
+    Two windows use this. Intraday rows are the current regime's shape, not
+    history — about three times the EOD volume — so they leave on a shorter
+    clock; EOD rows sit exactly at 16:00 New York, which is what tells them
+    apart, and evaluating that on every candidate row is why one unbounded
+    statement took 22 seconds across eighteen partitions and deleted nothing,
+    failing under the scheduler CLI's two-second default every night since it
+    was written. The longer window then takes everything past retention.
+
+    Deleting rows is not how a partitioned table would prefer to be trimmed;
+    dropping the month is. The plugin's role cannot: all eighteen partitions are
+    owned by `postgres`. Deleting needs only the DML grant it has, so retention
+    happens either way, and the empty partitions left behind are catalogue
+    clutter rather than data.
+
+    Bounded and committed per batch, like the job trim, so it makes progress
+    within whatever budget it is given. Batches are keyed on the primary key,
+    not on ``ctid``: this table is partitioned by month and a ctid identifies a
+    row only within one partition — 462,252 of them are shared by more than one
+    row here, so a ctid batch would delete rows nobody selected. ``job_ingest``
+    is an ordinary table, which is why its trim can use ctid.
+    """
+    deleted = 0
+    started = monotonic()
+    try:
+        while monotonic() - started < budget_sec:
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+                cur.execute(
+                    _SNAPSHOT_DELETE_INTRADAY if intraday_only else _SNAPSHOT_DELETE_ALL,
+                    (int(keep_days), int(batch_size)),
+                )
+                n = int(getattr(cur, "rowcount", 0) or 0)
+            conn.commit()
+            deleted += n
+            if n < batch_size:
+                break
+    except Exception:
+        conn.rollback()
+        raise
+    return deleted
+
+
 def trim_old_jobs(
     conn: _Connection,
     *,

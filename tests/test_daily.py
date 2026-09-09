@@ -922,6 +922,20 @@ def test_enqueue_calendar_and_trim() -> None:
     assert trim["enqueued"] == 0
 
 
+def test_trim_does_not_manage_partitions_for_a_retired_data_face() -> None:
+    """option_trades is not collected, holds zero rows, and its 42 partitions are
+    owned by postgres — so every nightly trim logged a drop it could never do."""
+    conn = _DailyConn([])
+    out = enqueue_slot(
+        conn,
+        "trim",
+        scheduler_cfg={"slots": {"trim": {"keep_hours": 48, "keep_max": 100}}},
+    )
+    statements = " ".join(str(st) for st in getattr(conn, "statements", []))
+    assert "option_trades" not in statements
+    assert out["option_trades_retention"].startswith("retired")
+
+
 def test_unknown_slot() -> None:
     with pytest.raises(ValueError, match="unknown slot"):
         enqueue_slot(_DailyConn(), "nope")
