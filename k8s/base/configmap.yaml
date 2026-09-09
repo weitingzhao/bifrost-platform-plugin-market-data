@@ -42,7 +42,11 @@ data:
       password: ""
     worker:
       pool: stocks
-      concurrency: 8
+      # Sized against max_connections, not CPU. Each worker keeps a pool of
+      # concurrency+1 connections; at 12 pods a concurrency of 8 put the
+      # cluster at 184 of 200 connections, which Research shares. In flight
+      # sits near 35, so 5 x 12 = 60 slots is headroom, not a ceiling.
+      concurrency: 5
       poll_interval_sec: 5
       # With the 5/min self-throttle gone an SPX chain (115 pages) takes about a
       # minute; 1200s leaves room for vendor slowness without hiding a hang.
