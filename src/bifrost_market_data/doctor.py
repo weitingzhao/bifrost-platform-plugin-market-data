@@ -66,6 +66,11 @@ SNAPSHOT_COVERAGE_MIN = 0.90
 # ahead, and only the owner of the parent may create one.
 PARTITION_RUNWAY_MIN_DAYS = 45
 
+# Partitioned tables nothing writes to any more. Their runway ran out and it does
+# not matter; a critical finding for a retired table is the false alarm this
+# check exists to avoid making. Explicit, because retiring one is a decision.
+RETIRED_PARTITIONED_TABLES: tuple[str, ...] = ("option_trades",)
+
 # The tiers the EOD slot collects with the near-the-money window. Their rows are
 # a deliberate slice of the chain, so they are checked for presence, not share.
 WINDOWED_TIERS = ("core", "edge")
@@ -852,8 +857,12 @@ def run_doctor(
             )
         )
     # ── Partition runway: a row with nowhere to land is rejected, not degraded ──
-    runway = _partition_runway(conn)
-    for parent, reaches, owned in runway or []:
+    runway = [
+        row
+        for row in (_partition_runway(conn) or [])
+        if row[0] not in RETIRED_PARTITIONED_TABLES
+    ]
+    for parent, reaches, owned in runway:
         if reaches is None:
             continue
         days_left = (reaches - session).days
@@ -878,6 +887,27 @@ def run_doctor(
                 f">= {PARTITION_RUNWAY_MIN_DAYS} days",
                 f"{days_left} days",
                 detail,
+                session=session_s,
+            )
+        )
+    # Ownership is a standing condition, not a countdown: it guarantees the
+    # runway will one day run out with no way to extend it. Reported once, now,
+    # rather than as a surprise the month it starts to matter.
+    unowned = sorted(parent for parent, _reaches, owned in runway if not owned)
+    if unowned:
+        findings.append(
+            Finding(
+                "partition_ownership",
+                "trim",
+                "warn",
+                "Partition ownership",
+                0,
+                len(unowned),
+                f"{len(unowned)} partitioned table(s) in raw_market are owned by another "
+                f"role, so the plugin can neither drop nor create their partitions: "
+                f"{', '.join(unowned)}. Retention deletes rows instead, but the next "
+                f"partition cannot be built — run scripts/fix_object_ownership.sql from "
+                f"an elevated session.",
                 session=session_s,
             )
         )

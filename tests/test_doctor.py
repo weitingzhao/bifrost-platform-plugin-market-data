@@ -616,3 +616,31 @@ def test_the_furthest_partition_is_the_one_that_counts() -> None:
     ]
     rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
     assert not [x for x in rep["findings"] if x["id"].startswith("partition_runway:")]
+
+
+def test_a_retired_table_running_out_is_not_an_alarm() -> None:
+    """option_trades is not collected; its runway ran out and nothing writes there."""
+    data = _healthy_data()
+    data["partitions"] = [("option_trades", False, _bound("2026-08-27"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert not [x for x in rep["findings"] if x["id"].startswith("partition_runway:")]
+    assert not [x for x in rep["findings"] if x["id"] == "partition_ownership"]
+
+
+def test_ownership_is_reported_before_the_runway_matters() -> None:
+    """It guarantees the runway will one day run out unfixably; do not wait for that."""
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", False, _bound("2027-06-01"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert not [x for x in rep["findings"] if x["id"].startswith("partition_runway:")]
+    f = next(x for x in rep["findings"] if x["id"] == "partition_ownership")
+    assert f["actual"] == 1
+    assert "option_snapshot" in f["detail"]
+    assert "fix_object_ownership.sql" in f["detail"]
+
+
+def test_owning_every_table_raises_nothing() -> None:
+    data = _healthy_data()
+    data["partitions"] = [("option_snapshot", True, _bound("2027-06-01"))]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert not [x for x in rep["findings"] if x["id"] == "partition_ownership"]
