@@ -276,21 +276,57 @@ def _one(
             ),
         },
         "depth": _depth(c, per_symbol, today),
-        "freshness": _freshness(c, newest, today),
+        "freshness": _freshness(
+            c, newest, today, interval_days=continuity.get("median_interval_days")
+        ),
         "continuity": continuity,
     }
 
 
-def _freshness(c: DatasetContract, newest: date | None, today: date) -> dict[str, Any]:
+#: How many of a dataset's own publication intervals may pass before the
+#: newest row counts as late. One interval means "the next one is not due yet";
+#: two means one was skipped. Blunt on purpose — the vendor's publication lag
+#: is not observable from here, so the line is drawn where a *missed* release
+#: is unambiguous rather than where a late one might be.
+OVERDUE_INTERVALS = 2
+
+
+def _freshness(
+    c: DatasetContract,
+    newest: date | None,
+    today: date,
+    *,
+    interval_days: int | None = None,
+) -> dict[str, Any]:
+    """How late the newest row is, judged on the dataset's own cadence.
+
+    A deadline in hours only means something for a feed that publishes every
+    session. short_interest settles twice a month and FINRA publishes about ten
+    days later, so measured 2026-09-10 it read 27 days behind a 30-hour
+    deadline while holding every settlement the vendor had released — the same
+    mistake the fourth axis made before cadence was declared, repeated on this
+    axis because it never learned to read the field.
+    """
     if c.date_column is None:
         return {"newest": None, "deadline_hours": c.freshness_hours, "measured": False}
     behind = (today - newest).days if newest else None
-    return {
+    out: dict[str, Any] = {
         "newest": newest.isoformat() if newest else None,
         "deadline_hours": c.freshness_hours,
         "measured": True,
         "days_behind": behind,
+        "cadence": c.cadence,
+        "expected_interval_days": None,
+        "overdue": None,
     }
+    if c.cadence == "session":
+        # A session feed keeps its hour deadline; the doctor owns that verdict
+        # and this axis must not answer it differently.
+        return out
+    out["expected_interval_days"] = interval_days
+    if behind is not None and interval_days:
+        out["overdue"] = behind > interval_days * OVERDUE_INTERVALS
+    return out
 
 
 def _denominators(conn: Any) -> dict[str, Any]:

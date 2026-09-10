@@ -283,3 +283,42 @@ def test_the_doctor_and_the_contracts_agree_on_every_deadline() -> None:
 def test_every_dataset_declares_the_dimension_that_evidences_it() -> None:
     for c in CONTRACTS:
         assert c.freshness_dimension, c.dataset
+
+
+def test_freshness_reads_the_cadence_it_was_given() -> None:
+    """A deadline in hours only means something for a feed published every session.
+
+    short_interest settles twice a month and FINRA publishes about ten days
+    after; measured 2026-09-10 the axis called it 27 days behind a 30-hour
+    deadline while the database held every settlement the vendor had released —
+    2026-08-14 / 07-31 / 07-15 / 06-30 / 06-15, no gap. The fourth axis learned
+    this when cadence was declared; this one had not.
+    """
+    si = BY_DATASET["raw_market.short_interest"]
+    assert si.cadence == "settlement"
+
+    routine = mod._freshness(si, date(2026, 8, 14), date(2026, 9, 10), interval_days=15)
+    assert routine["days_behind"] == 27
+    assert routine["expected_interval_days"] == 15
+    assert routine["overdue"] is False, "27 days is one interval plus the publication lag"
+
+    missed = mod._freshness(si, date(2026, 8, 14), date(2026, 10, 1), interval_days=15)
+    assert missed["overdue"] is True, "a whole settlement has now gone missing"
+
+
+def test_freshness_leaves_a_session_feed_to_its_deadline() -> None:
+    """The doctor owns the session verdict; this axis must not answer differently."""
+    sd = BY_DATASET["raw_market.stock_daily"]
+    assert sd.cadence == "session"
+    out = mod._freshness(sd, date(2026, 9, 9), date(2026, 9, 10), interval_days=1)
+    assert out["days_behind"] == 1
+    assert out["cadence"] == "session"
+    assert out["overdue"] is None
+    assert out["expected_interval_days"] is None
+
+
+def test_freshness_without_an_observed_interval_does_not_guess() -> None:
+    """A dataset too sparse to measure an interval is not therefore late."""
+    si = BY_DATASET["raw_market.short_interest"]
+    out = mod._freshness(si, date(2026, 8, 14), date(2026, 12, 1), interval_days=None)
+    assert out["overdue"] is None

@@ -172,6 +172,16 @@ def measure(
     present = {d for d, _ in judged}
     holes = thin_days(judged)
 
+    # How often this dataset actually publishes, measured rather than assumed.
+    # A settlement series reads 15; a daily one reads 1. Freshness needs it:
+    # "27 days since the newest row" is late for a daily feed and routine for
+    # short_interest, whose 2026-08-14 settlement was the newest FINRA had
+    # published — measured 2026-09-10, with 08-14 / 07-31 / 07-15 / 06-30 /
+    # 06-15 all held and no gap between them.
+    days_sorted = sorted(present)
+    gaps = [(b - a).days for a, b in zip(days_sorted, days_sorted[1:])]
+    interval = int(statistics.median(gaps)) if gaps else None
+
     absent: list[date] = []
     if sessions is not None:
         # Only sessions inside the observed span: a dataset that starts midway
@@ -194,6 +204,7 @@ def measure(
         "days_thin": len(holes),
         # Rows dated on a day the market was shut. Not a hole — the opposite —
         # but nothing else in the system would say so.
+        "median_interval_days": interval,
         "days_off_calendar": len(off_calendar),
         "off_calendar_sample": [d.isoformat() for d in sorted(off_calendar)[:5]],
         "worst": [
