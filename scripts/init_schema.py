@@ -120,7 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = load_config(args.config)
-    kw = postgres_connect_kwargs(cfg)
+    # DDL is inherently slow and the ``bifrost`` role carries statement_timeout=2s.
+    # Building (underlying, updated_at DESC) on a 734k-row option_contract was
+    # cancelled at 2s on 2026-09-10 — the same one-line cause that had already
+    # bitten the scheduler CLI, at a second entry point that never got the fix.
+    kw = postgres_connect_kwargs(cfg, statement_timeout="600s")
     target = f"{kw['user']}@{kw['host']}:{kw['port']}/{kw['dbname']}"
     print(f"Target: {target}")
     print(f"market tables: {', '.join(MARKET_TABLES)}")
