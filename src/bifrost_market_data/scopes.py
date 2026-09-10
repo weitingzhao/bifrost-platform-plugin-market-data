@@ -24,6 +24,46 @@ from bifrost_market_data.contracts import Tier
 logger = logging.getLogger(__name__)
 
 
+#: What each tier's denominator actually is. A number with no definition is
+#: what the console showed — "Whole market 5,317" reads as the market and is in
+#: fact the vendor's active common-stock list, and "Universe 575" says nothing
+#: at all. Declared next to the scopes so the two cannot drift.
+TIER_DEFINITIONS: dict[str, dict[str, str]] = {
+    "whole-market": {
+        "label": "Active US common stock",
+        "rule": (
+            "raw_market.ticker WHERE active — the reference slot's own output, "
+            "which is what the vendor lists as active. Measured 2026-09-10 every "
+            "one of the 5,317 is instrument_type CS on market stocks. Not a "
+            "screen: no size, liquidity or SEPA filter is applied."
+        ),
+    },
+    "universe": {
+        "label": "Option universe",
+        "rule": (
+            "research.option_universe — Research's rule, not the plugin's. "
+            "resident = holdings, the watchlist and the IV-radar benchmarks, "
+            "which never leave; core = common stock whose 20-session average "
+            "dollar volume clears $200M, leaving only below $120M; edge = the "
+            "SEPA stock screen's SETUP/PIVOT survivors scoring 70 or better. "
+            "Dollar volume, not market value."
+        ),
+    },
+    "benchmark-only": {
+        "label": "Watchlist + IV benchmarks",
+        "rule": (
+            "The Owner's watchlist unioned with the IV-radar benchmarks "
+            "(SPY, QQQ, IWM, SPX and the mega-cap names). The tier exists "
+            "because intraday data is too big to be worth more than a few."
+        ),
+    },
+    "global": {
+        "label": "Single series",
+        "rule": "One series, not one per instrument — the treasury curve, the calendar.",
+    },
+}
+
+
 def active_tickers(conn: Any, *, statement_timeout: str = "60s") -> set[str]:
     """The whole-market scope: what the vendor lists as active today.
 

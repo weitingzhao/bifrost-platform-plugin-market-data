@@ -26,7 +26,12 @@ from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetCon
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
-from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
+from bifrost_market_data.scopes import (
+    TIER_DEFINITIONS,
+    active_tickers,
+    benchmark_scope,
+    universe_symbols,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market/coverage", tags=["market-coverage"])
@@ -462,6 +467,10 @@ def _denominators(conn: Any) -> dict[str, Any]:
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
         "benchmark-only": len(bench),
         "global": 1,
+        # What each of those numbers *is*. A denominator with no definition is
+        # how "Whole market 5,317" came to read as the market when it is the
+        # vendor's active common-stock list.
+        "definitions": TIER_DEFINITIONS,
         "scopes": {
             "whole-market": active,
             "universe": universe_syms,

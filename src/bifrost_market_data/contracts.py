@@ -289,6 +289,18 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="ratios",
         grain="daily",
         refill=Refill("unrecoverable", why="the endpoint ignores ?date and always answers with the latest values, so this history only accrues"),
+        # The vendor's ratio population and our active-ticker list are two
+        # different sets that happen to overlap. Measured 2026-09-10: each pull
+        # takes 6 pages and 5,010 rows with truncated=False — everything the
+        # vendor gives — landing 4,791 distinct symbols, of which 816 are not on
+        # our active list at all, while 1,342 of ours get no ratio computed. The
+        # program doc says the same in words: the shortfall is micro caps and
+        # recent listings the vendor computes no ratios for, not a bug.
+        breadth_unjudged=(
+            "the vendor computes ratios for its own ~5,000-symbol set, which "
+            "overlaps this tier rather than covering it; every row it offers is "
+            "collected"
+        ),
     ),
     DatasetContract(
         "raw_market.short_volume",

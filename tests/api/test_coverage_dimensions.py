@@ -638,3 +638,34 @@ def test_a_rotation_is_not_measured_by_one_session() -> None:
     assert BY_DATASET["raw_market.option_minute"].breadth_window == "ever"
     # stock_minute enqueues every symbol every day, so the session is right there.
     assert BY_DATASET["raw_market.stock_minute"].breadth_window == "session"
+
+
+def test_every_tier_says_what_its_number_is() -> None:
+    """A denominator with no definition is how "Whole market 5,317" came to read
+    as the market, when it is the vendor's active common-stock list — and
+    "Universe 575" said nothing at all."""
+    from bifrost_market_data.scopes import TIER_DEFINITIONS
+
+    tiers = {c.tier for c in CONTRACTS}
+    assert tiers <= set(TIER_DEFINITIONS), "a tier with no definition"
+    for tier, dfn in TIER_DEFINITIONS.items():
+        assert dfn["label"] and dfn["rule"], tier
+
+    # The two that were actually misread, in the words that correct them.
+    assert "common stock" in TIER_DEFINITIONS["whole-market"]["label"].lower()
+    assert "Not a screen" in TIER_DEFINITIONS["whole-market"]["rule"]
+    universe = TIER_DEFINITIONS["universe"]["rule"]
+    assert "dollar volume" in universe and "not market value" in universe.lower()
+
+
+def test_ratios_breadth_is_not_a_coverage_question() -> None:
+    """Measured 2026-09-10: each pull takes 6 pages and 5,010 rows with
+    truncated=False — everything the vendor gives — landing 4,791 distinct
+    symbols, 816 of which are not on our active list while 1,342 of ours get no
+    ratio computed. Two populations that overlap, not a gap in collection.
+    """
+    c = BY_DATASET["raw_market.ratios"]
+    assert c.breadth_unjudged
+    assert "overlaps this tier rather than covering it" in c.breadth_unjudged
+    # short_volume covers nearly all of the same tier, so it stays judged.
+    assert BY_DATASET["raw_market.short_volume"].breadth_unjudged is None
