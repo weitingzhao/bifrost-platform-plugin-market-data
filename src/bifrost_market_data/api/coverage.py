@@ -13,7 +13,9 @@ from bifrost_market_data.api.deps import (
     connect_db,
     iso_value,
     normalize_symbol,
+    estimated_rows,
     require_db,
+    resolve_market_schema,
     row_dict,
     safe_count,
     table_exists,
@@ -211,8 +213,24 @@ def query_inventory(conn: Any) -> dict[str, Any]:
     }
 
 
+#: Tables too large to count. ``option_daily`` measured 37.3M rows on
+#: 2026-09-10 and its ``COUNT(*)`` did not finish inside 180s; the retired
+#: sepa-stats panel had been timing out on exactly that and reporting the
+#: timeout as a null the console painted red.
+_ESTIMATED_COUNTS: tuple[str, ...] = ("option_daily",)
+
+
 def query_db_summary(conn: Any) -> dict[str, Any]:
-    """Aggregate row counts and ingest freshness dimensions."""
+    """Aggregate row counts and ingest freshness dimensions.
+
+    The four tables at the end arrived when ``coverage/sepa-stats`` was retired
+    in 0.31.0. That endpoint had asked the same question against the ``market``
+    schema, which has been an alias for ``raw_market`` since the wave relocate:
+    its guard resolved the alias and its query did not, so every one of its ten
+    tables raised ``UndefinedTable`` into a bare ``except`` and came back null.
+    Ten tables with data read as ten empty ones, and the panel rendered
+    "0/10 today" in red. There is one table list here now, not two.
+    """
     counts: dict[str, int | None] = {
         "tickers": safe_count(conn, "market.ticker"),
         "ticker_related": safe_count(conn, "market.ticker_related"),
@@ -222,6 +240,11 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
         "option_snapshot": safe_count(conn, "market.option_snapshot"),
         "option_open_interest": safe_count(conn, "market.option_open_interest"),
         "corporate_action": safe_count(conn, "market.corporate_action"),
+        "stock_minute": safe_count(conn, "market.stock_minute"),
+        "stock_snapshot": safe_count(conn, "market.stock_snapshot"),
+        # Estimated, and named as such below — never silently mixed in with
+        # the exact ones.
+        "option_daily": estimated_rows(conn, "market.option_daily"),
     }
     freshness: list[dict[str, Any]] = []
     if table_exists(conn, "ops_jobs", "ingest_freshness"):
@@ -243,6 +266,10 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
         "ok": True,
         "source": "db",
         "counts": counts,
+        # Which of the counts are planner estimates rather than COUNT(*). A
+        # reader who cannot tell the two apart has been handed a number with no
+        # error bar and no way to ask for one.
+        "estimated": list(_ESTIMATED_COUNTS),
         "freshness": freshness,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -820,6 +847,119 @@ def coverage_watchlist(limit: int = Query(80, ge=1, le=200)) -> dict[str, Any]:
         conn.close()
 
 
+#: The option chain panel's own headline, over the *whole* population rather
+#: than the page the detail table shows. Measured 2026-09-10: the console asked
+#: for 500 underlyings and drew a ring reading "301/500" while the estate held
+#: 570 and 379 of them were at target — the numerator was truncated by the same
+#: limit as the denominator, so both halves of the ratio were wrong. A headline
+#: has no page.
+#:
+#: Cached because aggregating does not make it cheap: rolled up to a single row
+#: the greeks pass still measured 40.5s and the contract pass 9.9s. The cost is
+#: the DISTINCT ON over 2M snapshot rows, not the rows returned.
+CHAIN_CACHE = BackgroundCache("chain-headline")
+CHAIN_STATEMENT_TIMEOUT = "600s"
+
+#: Same shape, no figures — "still counting" must be distinguishable from
+#: "counted, and it is zero".
+_CHAIN_EMPTY: dict[str, Any] = {"ok": True, "contracts": None, "greeks": None}
+
+
+def query_chain_headline(conn: Any) -> dict[str, Any]:
+    """One row per question: how big the catalogue is, and how much of the live
+    chain carries a full set of greeks.
+
+    Greeks fill is not one of the four axes and cannot be derived from them: a
+    row can be present, fresh and continuous while its delta is null, which is
+    what the vendor returns for a contract nothing has quoted. It belongs to
+    this panel, so this panel gets to state it — for every underlying, not the
+    first five hundred.
+    """
+    out: dict[str, Any] = {"ok": True, "contracts": None, "greeks": None}
+    if table_exists(conn, "market", "option_contract"):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT UPPER(TRIM(underlying)))::int,
+                       COUNT(*)::bigint,
+                       MIN(expiry), MAX(expiry)
+                FROM raw_market.option_contract
+                """
+            )
+            row = cur.fetchone()
+        if row:
+            out["contracts"] = {
+                "underlyings": int(row[0] or 0),
+                "contracts": int(row[1] or 0),
+                "min_expiry": iso_value(row[2]),
+                "max_expiry": iso_value(row[3]),
+            }
+    if table_exists(conn, "market", "option_snapshot"):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH latest AS (
+                    SELECT DISTINCT ON (option_ticker)
+                        UPPER(TRIM(underlying)) AS symbol, delta, gamma, theta, vega
+                    FROM raw_market.option_snapshot
+                    ORDER BY option_ticker, snapshot_ts DESC
+                ),
+                per AS (
+                    SELECT symbol, COUNT(*) AS n,
+                           COUNT(CASE WHEN delta IS NOT NULL AND gamma IS NOT NULL
+                                       AND theta IS NOT NULL AND vega IS NOT NULL
+                                 THEN 1 END) AS complete
+                    FROM latest GROUP BY symbol
+                )
+                SELECT COUNT(*)::int,
+                       SUM(n)::bigint,
+                       SUM(complete)::bigint,
+                       COUNT(*) FILTER (WHERE complete::numeric / NULLIF(n, 0) >= 0.9)::int,
+                       COUNT(*) FILTER (WHERE complete::numeric / NULLIF(n, 0) >= 0.7
+                                          AND complete::numeric / NULLIF(n, 0) < 0.9)::int
+                FROM per
+                """
+            )
+            row = cur.fetchone()
+        if row:
+            n = int(row[1] or 0)
+            complete = int(row[2] or 0)
+            out["greeks"] = {
+                "underlyings": int(row[0] or 0),
+                "contracts": n,
+                "with_full_greeks": complete,
+                "pct_full": round(100.0 * complete / n, 1) if n else None,
+                "at_90": int(row[3] or 0),
+                "at_70": int(row[4] or 0),
+            }
+    return out
+
+
+def _chain_payload() -> dict[str, Any]:
+    conn = connect_db(statement_timeout=CHAIN_STATEMENT_TIMEOUT)
+    try:
+        return query_chain_headline(conn)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — a close that fails must not lose the answer
+            pass
+
+
+@router.get("/chain-headline")
+def coverage_chain_headline(
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Catalogue size and greeks fill for the whole chain — the panel's header."""
+    if not refresh:
+        return CHAIN_CACHE.read("chain-headline", _chain_payload, empty=_CHAIN_EMPTY)
+    try:
+        return CHAIN_CACHE.compute_now("chain-headline", _chain_payload)
+    except Exception as exc:
+        logger.exception("coverage chain headline failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/greeks")
 def coverage_greeks(
     symbol: str | None = Query(None, description="Optional underlying filter"),
@@ -947,42 +1087,8 @@ def coverage_stock_day_quality_detail(
 
 
 # ---------------------------------------------------------------------------
-# SEPA / Data Readiness coverage (W2-P3)
+# Per-symbol distributions
 # ---------------------------------------------------------------------------
-
-_SEPA_COVERAGE_TABLES: list[tuple[str, str, str]] = [
-    ("market", "stock_daily", "bar_date"),
-    ("market", "stock_minute", "bar_time"),
-    ("market", "stock_snapshot", "session_date"),
-    ("market", "option_contract", "updated_at"),
-    ("market", "option_snapshot", "snapshot_ts"),
-    ("market", "option_open_interest", "trade_date"),
-    ("market", "option_daily", "bar_date"),
-    ("market", "ticker", "updated_at"),
-    ("market", "stock_financials", "updated_at"),
-    ("market", "corporate_action", "updated_at"),
-]
-
-
-def query_sepa_stats(conn: Any) -> dict[str, Any]:
-    """Row counts and latest date for each market.* table used by SEPA."""
-    tables: list[dict[str, Any]] = []
-    for schema, table, date_col in _SEPA_COVERAGE_TABLES:
-        if not table_exists(conn, schema, table):
-            tables.append({"table": f"{schema}.{table}", "row_count": None, "latest": None})
-            continue
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT COUNT(*)::bigint, MAX({date_col}) FROM {schema}.{table}"
-                )
-                row = cur.fetchone()
-            cnt = int(row[0] or 0) if row else 0
-            latest = iso_value(row[1]) if row and row[1] else None
-            tables.append({"table": f"{schema}.{table}", "row_count": cnt, "latest": latest})
-        except Exception:
-            tables.append({"table": f"{schema}.{table}", "row_count": None, "latest": None})
-    return {"ok": True, "tables": tables}
 
 
 def query_distributions(
@@ -1005,9 +1111,16 @@ def query_distributions(
         return {"ok": False, "error": f"Invalid table; choose from: {list(valid_tables.keys())}"}
 
     schema, sym_col = valid_tables[table]
-    qualified = f"{schema}.{table}"
-    if not table_exists(conn, schema, table):
-        return {"ok": True, "table": qualified, "distributions": [], "count": 0}
+    # Resolve the ``market`` → ``raw_market`` alias for the *query*, not only for
+    # the guard. Checking with the resolver and then reading the literal schema
+    # is how the retired sepa-stats endpoint answered nulls for ten tables that
+    # all had data; here it would have been a 500, because this one does not
+    # catch. The name in the response stays the resolved one, so a reader is
+    # never told a schema that does not exist.
+    resolved = resolve_market_schema(conn, schema, table)
+    if not resolved:
+        return {"ok": True, "table": f"{schema}.{table}", "distributions": [], "count": 0}
+    qualified = f"{resolved}.{table}"
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1029,14 +1142,6 @@ def query_distributions(
     return {"ok": True, "table": qualified, "distributions": distributions, "count": len(distributions)}
 
 
-@router.get("/sepa-stats")
-def coverage_sepa_stats() -> dict[str, Any]:
-    """Row counts and latest timestamps for all market.* tables used by SEPA."""
-    conn = require_db()
-    try:
-        return query_sepa_stats(conn)
-    finally:
-        conn.close()
 
 
 @router.get("/distributions")

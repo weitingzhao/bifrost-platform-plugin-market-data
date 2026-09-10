@@ -1,7 +1,7 @@
 ---
-version: 2026-09-10.9
+version: 2026-09-10.10
 updated: 2026-09-10
-status: 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」
+status: 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过）
 ---
 
 # Massive 校准
@@ -448,6 +448,46 @@ Owner 读到「Whole market 5,317」问的是：这是什么？Stock？SEPA 的 
 ### 变化画在哪里
 
 不加第四种颜色。矩阵已经有两把尺子（颜色=等级，填充=有没有判定），「这个动过」是一个关于**时间**的事实，不是关于健康度的，所以给它一个**形状**——标记右上角一个缺口，颜色继承标记自己的前景色。往哪个方向动，用**词**写在有地方写的三处：tooltip、点开后的详情条、以及矩阵头部那行（`2 worse · 1 better since 09-11`）。
+
+## 2j. 一个从来没工作过的面板（0.31.0）
+
+### SEPA table stats：10 张表全部读失败，画成红色的 0/10
+
+`coverage/sepa-stats` 把 schema 写死成 `market.`。自 wave relocate 起 `market` 只是 `raw_market` 的**别名**，而 `resolve_market_schema` 只在**守卫**里被调用：
+
+```python
+if not table_exists(conn, schema, table):     # ← 解析别名 → True
+    ...
+cur.execute(f"SELECT COUNT(*) … FROM {schema}.{table}")   # ← 不解析 → UndefinedTable
+except Exception:                              # ← 裸 except
+    tables.append({"row_count": None, "latest": None})
+```
+
+实测 10 张全部抛 `UndefinedTable`。持有 1,373 万行的 `stock_daily`、239 万行的 `option_open_interest`、200 万行的 `option_snapshot`，在这个面板上读成十张空表，头部标签写 **`0/10 today`** 并且是红的。
+
+**「守卫解析、查询不解析」这个形状值得单独记住**——它不会报错，它会让一个坏读法看起来像一次成功的坏结果。同一个 bug 在 `query_distributions` 里也在，而且更糟：那里没有 catch，直接 500（该端点 Console 零消费，所以没人撞到）。
+
+### 为什么是退役而不是修
+
+就算把 schema 解析上，**10 张里还有 3 张仍然坏**：
+
+| 表 | 修好 schema 之后 |
+|---|---|
+| `option_daily` | `COUNT(*)` 超时——实测 3,731 万行，180s 预算不够 |
+| `stock_financials` | `updated_at` 列不存在（wave 8 拆表后它是三张表上的兼容视图） |
+| `corporate_action` | 同上 |
+
+也就是说**表清单和列清单都是过时的**，是两处独立的腐烂。而 `db-summary` 一直在用 `safe_count`（它**会**解析别名）回答同一个问题，Coverage Matrix 已经在四个轴上覆盖这些表。留着它等于在 db-summary 旁边并存**第二份手写表清单**和**第二个「今天算新鲜」的规则**——正是 C-G1 禁止的东西，也是新鲜度「被 7 个面板回答」里的一个。
+
+`stock_minute`（0.4s / 315,891）与 `stock_snapshot`（0.3s / 288,982）并入 `db-summary`；`option_daily` 以 `pg_class.reltuples` **估算**并入（0.0s / ~3,731 万），payload 用 `estimated` 数组点名，UI 前面加 `~`——**估算值和精确值不能长得一样**。`stock_financials` 没有并入：COUNT 要 30.3s，而它是三张已在矩阵里单列的表上的视图，并入等于给同一批行第四个名字。
+
+### 静止的表头（同版）
+
+Option chain coverage 与 Stock historical depth 的裁决**被关在细节后面**：前者 21s + 52s、后者每个 watchlist 标的一次请求，都只在展开时才跑，所以折叠状态下表头是空的——恰恰是最想知道结论的时候。
+
+- **Option chain**：新增 `coverage/chain-headline`，后台缓存。汇总**不会**让它变便宜——卷成一行的 greeks 仍要 40.5s，成本在 200 万行快照上的 `DISTINCT ON`，不在返回的行数——所以走 `BackgroundCache`，和四轴页、quality score 同一个模式。
+- **顺带修掉一个假比率**：Console 按 `limit=500` 取，环上写 `301/500`；实际是 **379/570**。分子和分母被同一个分页上限截断，**两半都是错的**。headline 不分页。
+- **Stock depth**：不新增端点。`quality-score` 的 `stock_daily_coverage` 已经在同一个窗口、同一份 watchlist 上算过 `gap_count`，且已经缓存、已经在页面上以 4/4 卡片显示。表头读它——不多打一次请求，也**不多一个「什么算缺口」的定义**。
 
 ## 3. 已知差距与最小改动
 

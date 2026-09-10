@@ -134,29 +134,30 @@ class TestOptionDailyEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# Coverage extensions (sepa-stats, distributions)
+# Coverage extensions (distributions)
 # ---------------------------------------------------------------------------
 
 
-class TestCoverageSepaStats:
-    def test_returns_table_stats(self, monkeypatch) -> None:
-        sample = {
-            "ok": True,
-            "tables": [
-                {"table": "market.stock_daily", "row_count": 500000, "latest": "2026-08-14"},
-                {"table": "market.option_contract", "row_count": 12000, "latest": "2026-08-14T12:00:00+00:00"},
-            ],
-        }
-        monkeypatch.setattr(coverage_mod, "query_sepa_stats", lambda *_a, **_k: sample)
+class TestCoverageSepaStatsIsGone:
+    def test_the_endpoint_is_retired(self, monkeypatch) -> None:
+        """Retired in 0.31.0, not fixed.
+
+        It asked db-summary's question against the ``market`` schema, which has
+        been an alias for ``raw_market`` since the wave relocate: its guard
+        resolved the alias, its query did not, and a bare ``except`` turned
+        every ``UndefinedTable`` into a null. Ten tables holding 13.7M, 2.4M,
+        2.0M rows read as ten empty ones and the panel drew "0/10 today" in red.
+
+        Fixing the schema would still have left three broken — option_daily's
+        COUNT(*) does not finish (37.3M rows), and stock_financials and
+        corporate_action have no ``updated_at`` since wave 8 split them — and a
+        second hand-written table list beside db-summary's is what C-G1 forbids
+        in the first place.
+        """
         _patch_require_db(monkeypatch)
         client = TestClient(create_app())
-
-        resp = client.get("/market/coverage/sepa-stats")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is True
-        assert len(data["tables"]) == 2
-        assert data["tables"][0]["row_count"] == 500000
+        assert client.get("/market/coverage/sepa-stats").status_code == 404
+        assert not hasattr(coverage_mod, "query_sepa_stats")
 
 
 class TestCoverageDistributions:

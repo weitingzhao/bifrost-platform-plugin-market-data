@@ -147,6 +147,54 @@ def table_exists(conn: Any, schema: str, table: str) -> bool:
     return resolve_market_schema(conn, schema, table) is not None
 
 
+def estimated_rows(conn: Any, qualified_table: str) -> int | None:
+    """Planner row estimate for a table, summed across its partitions.
+
+    For the tables where ``COUNT(*)`` is not affordable. Measured 2026-09-10:
+    counting ``raw_market.option_daily`` exceeded a 180s budget, while this
+    answered 37,317,672 in under a millisecond — the retired sepa-stats panel
+    had been timing out on exactly that count and reporting the failure as a
+    null the console painted red.
+
+    An estimate, and callers must say so. ``reltuples`` is whatever the last
+    ANALYZE saw; on a table taking 70,000 rows a night it drifts between runs.
+    """
+    schema, _, name = qualified_table.partition(".")
+    if not schema or not name:
+        return None
+    resolved = resolve_market_schema(conn, schema, name)
+    if not resolved:
+        return None
+    try:
+        with conn.cursor() as cur:
+            # Partitioned parents hold no rows of their own, so sum the leaves.
+            # LIKE on relname rather than pg_inherits: the partition naming is
+            # the plugin's own (`option_daily_2026_09`), and a stray table that
+            # merely starts with the name would have to be one we created.
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(c.reltuples), 0)::bigint
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s
+                  AND (c.relname = %s OR c.relname LIKE %s)
+                  AND c.relkind = 'r'
+                """,
+                (resolved, name, name + r"\_%"),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        value = row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+        return max(0, int(value or 0))
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def safe_count(conn: Any, qualified_table: str) -> int | None:
     """``COUNT(*)`` on a table; return None when missing or on error."""
     schema, _, name = qualified_table.partition(".")
