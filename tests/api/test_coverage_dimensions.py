@@ -397,3 +397,105 @@ def test_a_boundary_skips_the_per_symbol_scan() -> None:
         c = BY_DATASET[name]
         assert c.symbol_column and c.date_column
         assert c.depth.kind in mod.BOUNDARY_KINDS, "so _one() skips _per_symbol_oldest"
+
+
+def test_breadth_is_bounded_by_the_session_not_by_max_date() -> None:
+    """Two slots write option_snapshot at different scopes on the same day.
+
+    The EOD pipeline covers all 575 underlyings at 22:00 UTC; the intraday chain
+    covers the 26-name benchmark union at 14:30. Reading max(date) made breadth
+    divide the intraday numerator by the universe denominator for seven and a
+    half hours a day — measured 2026-09-10, the same endpoint on unchanged data
+    reported 99.1% at 05:22 and 4.5% at 16:14.
+    """
+    c = BY_DATASET["raw_market.option_snapshot"]
+    assert c.breadth_window == "session"
+
+    seen: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split())
+            if not q.startswith("SET LOCAL"):
+                seen.append(q)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    mod._held_symbols(_Conn(), c, date(2026, 9, 9))
+    q = seen[-1]
+    assert "<= %s" in q, "the newest delivery no later than the session"
+    assert "max(" in q, "still the newest one, not every row on that day"
+
+
+def test_a_dataset_that_is_behind_keeps_its_breadth() -> None:
+    """Lateness is freshness's answer, not breadth's.
+
+    treasury_yield was two days back on 2026-09-10. Filtering *to* the session
+    rather than bounding *by* it would read nothing held and paint red for
+    something freshness already says. The shape of the predicate is what
+    guarantees it: max(date <= session), never date = session.
+    """
+    c = BY_DATASET["raw_market.option_daily"]
+    seen: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split())
+            if not q.startswith("SET LOCAL"):
+                seen.append(q)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    mod._held_symbols(_Conn(), c, date(2026, 9, 9))
+    assert "= (SELECT max(" in seen[-1], "bounded, not filtered"
+
+
+def test_an_unresolved_session_falls_back_rather_than_reporting_nothing() -> None:
+    """None means "do not bound", not "hold nothing"."""
+    c = BY_DATASET["raw_market.option_snapshot"]
+    seen: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split())
+            if not q.startswith("SET LOCAL"):
+                seen.append(q)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    mod._held_symbols(_Conn(), c, None)
+    assert "<= %s" not in seen[-1]
+    assert "max(" in seen[-1]

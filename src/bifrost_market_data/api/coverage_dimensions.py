@@ -74,22 +74,40 @@ def _rows(conn: Any, sql: str, params: Sequence[Any] | None = None) -> list[tupl
         return list(cur.fetchall() or [])
 
 
-def _held_symbols(conn: Any, c: DatasetContract) -> set[str]:
+def _held_symbols(conn: Any, c: DatasetContract, session: date | None = None) -> set[str]:
     """The instruments this dataset holds, over the window its contract declares.
 
     A numerator has to cover the same span as its denominator. Counting every
     symbol ever seen against today's active tickers reported 389% for
     stock_daily — five years of listings, delisted ones included, over a
     denominator of what is listed now.
+
+    For a session window that means the most recent *complete* delivery, not
+    simply the newest date present. Two slots write option_snapshot: the EOD
+    pipeline covers all 575 underlyings at 22:00 UTC, and the intraday chain
+    covers the 26-name benchmark union at 14:30. Reading max(date) therefore
+    made breadth swing 570 → 26 → 570 every weekday, and between 14:30 and
+    22:00 it divided the intraday numerator by the universe denominator —
+    exactly the mismatch C-B1 exists to prevent. Measured 2026-09-10: 99.1% at
+    05:22 and 07:55, 4.5% at 16:14 and 16:33, on unchanged data.
+
+    Bounded by the session rather than filtered to it. A dataset that is behind
+    — treasury_yield was two days back — still holds a most-recent delivery, and
+    lateness is freshness's answer to give, not breadth's.
     """
     sym = c.symbol_column
     if sym is None:
         return set()
     where = ""
+    params: tuple[Any, ...] = ()
     if c.breadth_window == "session" and c.date_column:
         d = _date_expr(c.date_column)
-        where = f"WHERE {d} = (SELECT max({d}) FROM {c.dataset})"
-    rows = _rows(conn, f"SELECT DISTINCT {sym} FROM {c.dataset} {where}")
+        if session is None:
+            where = f"WHERE {d} = (SELECT max({d}) FROM {c.dataset})"
+        else:
+            where = f"WHERE {d} = (SELECT max({d}) FROM {c.dataset} WHERE {d} <= %s)"
+            params = (session,)
+    rows = _rows(conn, f"SELECT DISTINCT {sym} FROM {c.dataset} {where}", params)
     return {str(r[0]) for r in rows if r and r[0] is not None}
 
 
@@ -175,6 +193,25 @@ def _depth(
     }
 
 
+def _session(conn: Any) -> date | None:
+    """The session the tables should hold, or None when it cannot be resolved.
+
+    None means "do not bound", which restores the old max(date) reading rather
+    than silently reporting nothing held.
+    """
+    from bifrost_market_data.session import resolve_session
+
+    try:
+        return resolve_session(conn, datetime.now(timezone.utc))[0]
+    except Exception as exc:  # noqa: BLE001 — breadth still has an answer without it
+        logger.warning("dimensions: session unresolved, breadth reads max(date): %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def _expected_days(conn: Any, today: date) -> list[date]:
     """Trading days in the continuity window, or [] when the calendar is unreadable.
 
@@ -201,6 +238,7 @@ def _one(
     today: date,
     conn: Any = None,
     expected_days: Sequence[date] | None = None,
+    session: date | None = None,
 ) -> dict[str, Any]:
     own = conn is None
     if own:
@@ -212,7 +250,7 @@ def _one(
                 held_symbols: set[str] = set()
                 held_total = 1
             else:
-                held_symbols = _held_symbols(conn, c)
+                held_symbols = _held_symbols(conn, c, session)
                 held_total = len(held_symbols)
             # A dataset whose depth is a plan boundary has no target to measure
             # against, so the per-symbol scan would be work done only to discard.
@@ -382,16 +420,23 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
         # One calendar read for the whole page: an absent session can only be
         # named against the days the market was actually open.
         expected_days = _expected_days(probe, today)
+        # The one definition of "the session the tables should hold" (C-F1).
+        # Breadth is bounded by it so a half-written session — the intraday
+        # chain's 26 names at 14:30, before the EOD pipeline's 575 at 22:00 —
+        # cannot be divided by the universe denominator.
+        session = _session(probe)
         workers = min(MAX_WORKERS, len(wanted))
         if workers == 1:
-            rows = [_one(wanted[0], denominators, today, probe, expected_days)]
+            rows = [_one(wanted[0], denominators, today, probe, expected_days, session)]
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dimensions") as pool:
                 futures = [
-                    pool.submit(_one, wanted[0], denominators, today, probe, expected_days)
+                    pool.submit(
+                        _one, wanted[0], denominators, today, probe, expected_days, session
+                    )
                 ]
                 futures += [
-                    pool.submit(_one, c, denominators, today, None, expected_days)
+                    pool.submit(_one, c, denominators, today, None, expected_days, session)
                     for c in wanted[1:]
                 ]
                 rows = [f.result() for f in futures]
