@@ -56,6 +56,31 @@ WHERE length(option_ticker) > {_TICKER_TAIL + _TICKER_PREFIX}
 """.strip()
 
 
+#: Roots the catalogue files under two different underlyings. Measured
+#: 2026-09-10: ECHO → {ECHO, SATS} and VMRK → {EQR, VMRK}, both mid-rename. A
+#: root like that cannot be rewritten from the pair alone — which contract it
+#: is decides the answer, and only the per-contract EXISTS knows.
+_AMBIGUOUS_ROOTS = """
+WITH r AS (
+    SELECT substring(option_ticker FROM 3 FOR length(option_ticker) - 17) AS root,
+           underlying
+    FROM raw_market.option_contract
+    WHERE length(option_ticker) > 17
+)
+SELECT root FROM r GROUP BY root HAVING count(DISTINCT underlying) > 1
+""".strip()
+
+#: Roots that are also a real equity symbol. ECHO, VMRK and IA all are, and a
+#: root that names a live instrument is the one case where rewriting on the
+#: catalogue's mapping could clobber something real.
+_ROOTS_THAT_ARE_SYMBOLS = "SELECT symbol FROM raw_market.ticker WHERE symbol = ANY(%s)"
+
+#: Rows per statement when rewriting without the per-contract guard. SPXW alone
+#: is 2.8M rows; one UPDATE for it would not finish inside any statement budget
+#: worth setting, so it goes in bites that each commit.
+CHUNK_ROWS = 50_000
+
+
 class _Cursor(Protocol):
     rowcount: int
 
@@ -89,6 +114,42 @@ def mismatched_roots(cur: _Cursor) -> list[tuple[str, str]]:
 #: schema-migration Job, and a deploy that waits ten minutes on a data fix is a
 #: deploy nobody runs.
 DEFAULT_BUDGET_SEC = 90.0
+
+
+def unguarded_pairs(cur: _Cursor, pairs: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Pairs safe to rewrite from the catalogue's mapping, without asking per row.
+
+    Two independent checks, both per pair rather than per contract:
+
+    * the catalogue maps the root to exactly one underlying, and
+    * the root is not itself an equity symbol.
+
+    That is what the per-contract EXISTS was buying, and measurement says where
+    it is actually needed. Of the five roots holding mis-filed rows on
+    2026-09-10, ``SPXW`` (2,799,555 rows — the weekly SPX option root, not an
+    adjusted contract at all) and ``BRKB`` (158,123 — OCC drops the dot from
+    BRK.B) pass both. ``ECHO``, ``VMRK`` and ``IA`` fail: each is a live symbol,
+    and two of them are mid-rename in the catalogue itself. They keep the guard
+    and their 6,476 rows stay as they are.
+
+    A first pass looked for roots shaped ``canonical + digit`` — the OCC
+    adjusted-contract convention this module was written for. Twenty-six pairs
+    match it and they hold **no rows at all**; the backlog is three other
+    phenomena wearing the same symptom. Recorded because the rule sounded right
+    and covered nothing.
+    """
+    if not pairs:
+        return []
+    cur.execute(_AMBIGUOUS_ROOTS)
+    ambiguous = {str(r[0]).strip().upper() for r in _rows(cur) if r and r[0]}
+    roots = sorted({r for r, _ in pairs})
+    cur.execute(_ROOTS_THAT_ARE_SYMBOLS, (roots,))
+    real_symbols = {str(r[0]).strip().upper() for r in _rows(cur) if r and r[0]}
+    return [
+        (root, canonical)
+        for root, canonical in pairs
+        if root not in ambiguous and root not in real_symbols
+    ]
 
 
 def repair_adjusted_underlyings(
@@ -139,8 +200,9 @@ def repair_adjusted_underlyings(
 
     with conn.cursor() as cur:
         pairs = mismatched_roots(cur)
-    if not pairs:
-        return {t: 0 for t in tables}
+        if not pairs:
+            return {t: 0 for t in tables}
+        unguarded = {root for root, _ in unguarded_pairs(cur, pairs)}
 
     repaired: dict[str, int] = {t: 0 for t in tables}
     for table in tables:
@@ -153,23 +215,16 @@ def repair_adjusted_underlyings(
                 )
                 return repaired
             try:
-                with conn.cursor() as cur:
-                    cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
-                    cur.execute(
-                        f"""
-                        UPDATE raw_market.{table} d
-                        SET underlying = %s
-                        WHERE d.underlying = %s
-                          AND EXISTS (
-                                SELECT 1 FROM raw_market.option_contract c
-                                WHERE c.option_ticker = d.option_ticker
-                                  AND c.underlying = %s
-                          )
-                        """,
-                        (canonical, root, canonical),
-                    )
-                    n = int(getattr(cur, "rowcount", 0) or 0)
-                conn.commit()
+                n = _rewrite_root(
+                    conn,
+                    table,
+                    root,
+                    canonical,
+                    guarded=root not in unguarded,
+                    statement_timeout=statement_timeout,
+                    clock=clock,
+                    deadline=deadline,
+                )
             except Exception as exc:  # noqa: BLE001 — one slow family is not a failed deploy
                 logger.warning("adjusted-root repair skipped %s.%s: %s", table, root, exc)
                 try:
@@ -181,6 +236,71 @@ def repair_adjusted_underlyings(
                 repaired[table] += n
                 logger.info("repaired %s rows in %s: %s -> %s", n, table, root, canonical)
     return repaired
+
+
+#: The guarded form: rewrite a row only where the catalogue confirms *that*
+#: contract belongs to *that* underlying. Correct, and unable to touch a bar
+#: whose contract has expired out of the catalogue — which is 99.995% of them.
+_GUARDED = """
+UPDATE raw_market.{table} d
+SET underlying = %s
+WHERE d.underlying = %s
+  AND EXISTS (
+        SELECT 1 FROM raw_market.option_contract c
+        WHERE c.option_ticker = d.option_ticker
+          AND c.underlying = %s
+  )
+"""
+
+#: The unguarded form, for pairs ``unguarded_pairs`` has cleared. Chunked by
+#: ctid: SPXW is 2.8M rows and a single statement for it finishes inside no
+#: budget worth setting. Each chunk is its own statement and its own commit, so
+#: the work survives a timeout and a deploy leaves behind what it managed.
+_UNGUARDED_CHUNK = """
+UPDATE raw_market.{table} d
+SET underlying = %s
+WHERE d.ctid = ANY(ARRAY(
+    SELECT ctid FROM raw_market.{table}
+    WHERE underlying = %s
+    LIMIT {chunk}
+))
+"""
+
+
+def _rewrite_root(
+    conn: Any,
+    table: str,
+    root: str,
+    canonical: str,
+    *,
+    guarded: bool,
+    statement_timeout: str,
+    clock: Any,
+    deadline: float,
+) -> int:
+    """Rewrite one root in one table, committing as it goes. Returns rows moved."""
+    if guarded:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+            cur.execute(_GUARDED.format(table=table), (canonical, root, canonical))
+            n = int(getattr(cur, "rowcount", 0) or 0)
+        conn.commit()
+        return n
+
+    moved = 0
+    while clock() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+            cur.execute(
+                _UNGUARDED_CHUNK.format(table=table, chunk=int(CHUNK_ROWS)),
+                (canonical, root),
+            )
+            n = int(getattr(cur, "rowcount", 0) or 0)
+        conn.commit()
+        moved += n
+        if n == 0:
+            break
+    return moved
 
 
 __all__ = [

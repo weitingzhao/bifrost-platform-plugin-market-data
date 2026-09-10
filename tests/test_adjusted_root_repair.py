@@ -13,15 +13,28 @@ from bifrost_market_data.schema.adjusted_root_repair import (
     BAR_TABLES,
     mismatched_roots,
     repair_adjusted_underlyings,
+    unguarded_pairs,
 )
 
 
 class _Cur:
     """Answers the roots query from a catalogue, and counts what updates match."""
 
-    def __init__(self, catalogue: Sequence[tuple[str, str]], hits: dict[tuple[str, str], int]):
+    def __init__(
+        self,
+        catalogue: Sequence[tuple[str, str]],
+        hits: dict[tuple[str, str], int],
+        *,
+        ambiguous: Sequence[str] = (),
+        real_symbols: Sequence[str] = (),
+    ):
         self.catalogue = catalogue
         self.hits = hits
+        # A pair is cleared unless something flags it, which is the real
+        # function's rule too — so a test that wants the guarded path has to
+        # say why the pair is not clear.
+        self.ambiguous = list(ambiguous)
+        self.real_symbols = list(real_symbols)
         self.rowcount = 0
         self.statements: list[tuple[str, Any]] = []
         self._rows: list[tuple[Any, ...]] = []
@@ -31,6 +44,15 @@ class _Cur:
         self.statements.append((q, params))
         if q.startswith("SET LOCAL"):
             self.rowcount = 0
+            return
+        if q.startswith("WITH r AS") and "count(DISTINCT underlying) > 1" in q:
+            self._rows = [(r,) for r in self.ambiguous]
+            self.rowcount = len(self._rows)
+            return
+        if q.startswith("SELECT symbol FROM raw_market.ticker"):
+            wanted = set(params[0]) if params else set()
+            self._rows = [(r,) for r in self.real_symbols if r in wanted]
+            self.rowcount = len(self._rows)
             return
         if "FROM raw_market.option_contract" in q and q.startswith("SELECT DISTINCT"):
             self._rows = [
@@ -45,8 +67,17 @@ class _Cur:
             return
         if q.startswith("UPDATE raw_market."):
             table = q.split("UPDATE raw_market.")[1].split(" ")[0]
-            canonical, root, _ = params
-            self.rowcount = self.hits.get((table, root), 0)
+            # Guarded takes (canonical, root, canonical); chunked takes
+            # (canonical, root) and is asked repeatedly until it answers zero.
+            root = params[1]
+            key = (table, root)
+            if len(params) == 2:
+                left = self.hits.get(key, 0)
+                n = min(left, 50_000)
+                self.hits[key] = left - n
+                self.rowcount = n
+                return
+            self.rowcount = self.hits.get(key, 0)
             return
         self._rows = []
         self.rowcount = 0
@@ -102,7 +133,7 @@ def test_only_adjusted_families_are_listed() -> None:
 
 def test_a_plain_root_is_never_rewritten() -> None:
     """AAPL and BRK.B must not appear in a single UPDATE."""
-    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200})
+    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200}, real_symbols=["BDX1", "SPGI1"])
     repair_adjusted_underlyings(_Conn(cur))
     updated_roots = {p[1] for q, p in cur.statements if q.startswith("UPDATE") and p}
     assert updated_roots == {"BDX1", "SPGI1"}
@@ -113,6 +144,7 @@ def test_it_counts_what_it_rewrote_per_table() -> None:
         CATALOGUE,
         {("option_daily", "BDX1"): 4200, ("option_daily", "SPGI1"): 910,
          ("option_minute", "BDX1"): 80},
+        real_symbols=["BDX1", "SPGI1"],
     )
     out = repair_adjusted_underlyings(_Conn(cur))
     assert out == {"option_daily": 5110, "option_minute": 80}
@@ -128,9 +160,11 @@ def test_a_clean_catalogue_issues_no_update_at_all() -> None:
 def test_the_rewrite_is_guarded_by_the_catalogue() -> None:
     """A root that is some other instrument's real symbol must survive.
 
-    The EXISTS ties the rewrite to the exact contract, not to the string.
+    The EXISTS ties the rewrite to the exact contract, not to the string —
+    measured 2026-09-10, ECHO, VMRK and IA are all live symbols and two of them
+    are mid-rename in the catalogue itself.
     """
-    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 1})
+    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 1}, real_symbols=["BDX1", "SPGI1"])
     repair_adjusted_underlyings(_Conn(cur))
     update = next(q for q, _ in cur.statements if q.startswith("UPDATE"))
     assert "EXISTS" in update
@@ -151,7 +185,7 @@ def test_each_root_is_committed_as_it_goes() -> None:
     """The backlog is 2,964,147 rows across 36 families and two dozen monthly
     partitions. No pass rewrites that inside any sensible budget while the queue
     is ingesting, so the run has to leave behind what it managed."""
-    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200})
+    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200}, real_symbols=["BDX1", "SPGI1"])
     conn = _Conn(cur)
     repair_adjusted_underlyings(conn)
     # Two families × two tables.
@@ -169,7 +203,7 @@ def test_one_slow_family_costs_that_family_and_not_the_run() -> None:
                 raise RuntimeError("canceling statement due to statement timeout")
             super().execute(sql, params)
 
-    cur = _Flaky(CATALOGUE, {("option_daily", "SPGI1"): 910})
+    cur = _Flaky(CATALOGUE, {("option_daily", "SPGI1"): 910}, real_symbols=["BDX1", "SPGI1"])
     conn = _Conn(cur)
     out = repair_adjusted_underlyings(conn)
     # SPGI1 still got done in both tables; BDX1 is left for the next deploy.
@@ -183,9 +217,65 @@ def test_the_budget_stops_it_rather_than_the_deploy() -> None:
     # First call sets the deadline; each loop turn checks it. So: start,
     # one family inside the budget, then past it.
     ticks = iter([0.0, 0.0, 999.0, 999.0, 999.0, 999.0])
-    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200})
+    cur = _Cur(CATALOGUE, {("option_daily", "BDX1"): 4200}, real_symbols=["BDX1", "SPGI1"])
     conn = _Conn(cur)
     out = repair_adjusted_underlyings(conn, budget_sec=90, now=lambda: next(ticks))
     # It did the first family and stopped; nothing raised.
     assert out["option_daily"] == 4200
     assert len([q for q, _ in cur.statements if q.startswith("UPDATE")]) == 1
+
+
+# ── the unguarded path, and exactly where it stops ────────────────────────
+
+
+def test_a_root_the_catalogue_is_unambiguous_about_skips_the_per_row_guard() -> None:
+    """SPXW is 2,799,555 rows whose contracts expired out of the catalogue.
+
+    The EXISTS could never touch them — it is what makes the repair safe and
+    what put 99.995% of the backlog out of reach. Clearing the pair once, on the
+    catalogue's own mapping, is what B was for.
+    """
+    pairs = unguarded_pairs(_Cur(CATALOGUE, {}), [("SPXW", "SPX"), ("BRKB", "BRK.B")])
+    assert pairs == [("SPXW", "SPX"), ("BRKB", "BRK.B")]
+
+
+def test_an_ambiguous_root_keeps_the_guard() -> None:
+    """Measured: ECHO → {ECHO, SATS} and VMRK → {EQR, VMRK}, both mid-rename.
+    Which contract it is decides the answer, and only the EXISTS knows."""
+    cur = _Cur(CATALOGUE, {}, ambiguous=["ECHO"])
+    assert unguarded_pairs(cur, [("ECHO", "SATS"), ("SPXW", "SPX")]) == [("SPXW", "SPX")]
+
+
+def test_a_root_that_is_a_live_symbol_keeps_the_guard() -> None:
+    """ECHO, VMRK and IA are all real tickers. A root that names a live
+    instrument is the one case where rewriting on the mapping could clobber
+    something real."""
+    cur = _Cur(CATALOGUE, {}, real_symbols=["IA"])
+    assert unguarded_pairs(cur, [("IA", "ISSC"), ("SPXW", "SPX")]) == [("SPXW", "SPX")]
+
+
+def test_the_unguarded_rewrite_goes_in_chunks_that_each_commit() -> None:
+    """One statement for SPXW's 2.8M rows finishes inside no budget worth
+    setting, so a timeout has to cost a chunk rather than the root."""
+    cur = _Cur([("O:SPXW260918C05000000", "SPX")], {("option_daily", "SPXW"): 120_000})
+    conn = _Conn(cur)
+    out = repair_adjusted_underlyings(conn, tables=("option_daily",))
+    assert out["option_daily"] == 120_000
+    updates = [q for q, _ in cur.statements if q.startswith("UPDATE")]
+    # 50k + 50k + 20k, then one more that answers zero and ends the loop.
+    assert len(updates) == 4
+    assert all("EXISTS" not in q for q in updates)
+    assert conn.commits == 4
+
+
+def test_the_budget_stops_a_long_rewrite_between_chunks() -> None:
+    """It rides a deploy. What it does not finish carries to the next one —
+    and now that is true rather than a hope, because each chunk committed."""
+    ticks = iter([0.0, 0.0, 0.0, 999.0, 999.0, 999.0, 999.0])
+    cur = _Cur([("O:SPXW260918C05000000", "SPX")], {("option_daily", "SPXW"): 500_000})
+    conn = _Conn(cur)
+    out = repair_adjusted_underlyings(
+        conn, tables=("option_daily",), budget_sec=90, now=lambda: next(ticks)
+    )
+    assert out["option_daily"] == 50_000  # one chunk landed and stayed landed
+    assert conn.commits == 1
