@@ -129,3 +129,32 @@ def test_it_stays_out_of_the_gate_that_blocks_research(wired) -> None:
     gaps["raw_market.option_daily"] = [sessions[20]]
     for f in _continuity_findings(None, today=TODAY):
         assert f.id.split(":", 1)[0] not in EOD_CRITICAL_CHECKS
+
+
+def test_a_self_healing_dataset_gets_no_prescription(wired) -> None:
+    """treasury_yield's slot re-pulls thirty days on every run.
+
+    Prescribing an enqueue for a session it will fix by itself is noise, and
+    telling a reader it is unrecoverable — which the brief did — is wrong.
+    """
+    sessions, gaps = wired
+    gaps["raw_market.treasury_yield"] = [sessions[20]]
+    out = _continuity_findings(None, today=TODAY)
+    assert not [f for f in out if "treasury_yield" in f.id]
+
+
+def test_short_volume_is_prescribed_by_kind_not_by_slot(wired) -> None:
+    """Its slot would also fire ratios_market, whose endpoint ignores the date."""
+    sessions, gaps = wired
+    hole = sessions[20]
+    gaps["raw_market.short_volume"] = [hole]
+    hit = [
+        f for f in _continuity_findings(None, today=TODAY)
+        if f.id == f"continuity:short_volume:{hole}"
+    ]
+    assert len(hit) == 1
+    assert hit[0].fix == {
+        "action": "enqueue",
+        "kind": "short_volume_market",
+        "payload": {"date": hole.isoformat()},
+    }

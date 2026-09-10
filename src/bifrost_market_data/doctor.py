@@ -338,9 +338,10 @@ def _continuity_findings(
     read-only measure — what finds a hole could not fix it, and what fixes could
     not find it. This is the join.
 
-    Only datasets whose contract names a ``backfill_slot`` are considered. A
-    missed EOD option chain is gone for good and a prescription for it would be
-    a lie, not a repair.
+    Only datasets whose contract can actually be refilled for a named date are
+    considered — ``refill.how`` of ``slot`` or ``kind``. A missed EOD option
+    chain is gone for good and a prescription for it would be a lie; a dataset
+    whose slot carries its own lookback repairs itself and needs none.
     """
     from bifrost_market_data.continuity import has_continuity, missing_sessions
     from bifrost_market_data.trading_calendar import expected_trading_days
@@ -357,7 +358,9 @@ def _continuity_findings(
 
     out: list[Finding] = []
     for c in CONTRACTS:
-        if not c.backfill_slot or c.cadence != "session" or not has_continuity(c):
+        if c.refill.how not in ("slot", "kind") or not c.refill.target:
+            continue
+        if c.cadence != "session" or not has_continuity(c):
             continue
         gaps = missing_sessions(
             conn,
@@ -381,7 +384,7 @@ def _continuity_findings(
             out.append(
                 Finding(
                     f"continuity:{name}",
-                    c.backfill_slot,
+                    c.refill.target,
                     "ok",
                     f"Continuity: {name}",
                     f"every session in {window_days}d",
@@ -404,14 +407,14 @@ def _continuity_findings(
             out.append(
                 Finding(
                     f"continuity:{name}:{day.isoformat()}",
-                    c.backfill_slot,
+                    c.refill.target,
                     "warn",
                     f"Missing session: {name}",
                     "rows for every trading day",
                     "no rows",
                     detail + ".",
                     session=day.isoformat(),
-                    fix=_slot_fix(c.backfill_slot, day),
+                    fix=_refill_fix(c, day),
                     auto_fixable=True,
                     missing_sample=[d.isoformat() for d in absent[:10]],
                 )
@@ -643,6 +646,23 @@ def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[st
     if session is not None:
         fix["date"] = session.isoformat()
     return fix
+
+
+def _refill_fix(c: Any, day: date) -> dict[str, Any]:
+    """The call that refills one named session for this dataset.
+
+    A slot where the slot is the right unit, a single job kind where it is not:
+    short_volume's slot would also fire ratios_market, whose endpoint ignores
+    the date, and short_interest_market, whose own 45-day lookback already
+    covers it. Two wasted jobs per repaired session, and the contract says so.
+    """
+    if c.refill.how == "kind":
+        return {
+            "action": "enqueue",
+            "kind": c.refill.target,
+            "payload": {"date": day.isoformat()},
+        }
+    return _slot_fix(str(c.refill.target), day)
 
 
 def run_doctor(
@@ -1247,6 +1267,20 @@ def heal(
                 entry["result"] = {
                     k: res.get(k)
                     for k in ("enqueued", "deduped", "skipped", "reason", "target_date")
+                }
+            elif pres["action"] == "enqueue":
+                # One job kind rather than a whole slot. short_volume's slot
+                # would also fire ratios_market, whose endpoint ignores the
+                # date, and short_interest_market, whose own 45-day lookback
+                # already covers it — two wasted jobs per repaired session.
+                ids = insert_jobs_bulk(
+                    conn,
+                    [(str(pres["kind"]), dict(pres.get("payload") or {}), 4, 3)],
+                )
+                entry["result"] = {
+                    "enqueued": sum(1 for i in ids if i is not None),
+                    "deduped": sum(1 for i in ids if i is None),
+                    "kind": pres["kind"],
                 }
             elif pres["action"] == "retry-jobs":
                 entry["result"] = _retry_jobs(conn, [int(i) for i in pres.get("job_ids", [])])

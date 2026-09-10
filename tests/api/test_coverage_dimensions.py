@@ -499,3 +499,51 @@ def test_an_unresolved_session_falls_back_rather_than_reporting_nothing() -> Non
     mod._held_symbols(_Conn(), c, None)
     assert "<= %s" not in seen[-1]
     assert "max(" in seen[-1]
+
+
+def test_refill_separates_the_three_reasons_there_is_nothing_to_prescribe() -> None:
+    """`backfill_slot: None` was doing three jobs, and a reader acts on each
+    differently.
+
+    The console's agent brief read the first meaning for all of them and told a
+    reader that treasury_yield's missed sessions were unrecoverable, when the
+    slot re-pulls thirty days on its next run.
+    """
+    by = {c.dataset: c for c in CONTRACTS}
+
+    # Gone: the vendor will not serve that date again.
+    for name in ("raw_market.option_snapshot", "raw_market.option_open_interest"):
+        assert by[name].refill.how == "unrecoverable", name
+    assert by["raw_market.ratios"].refill.how == "unrecoverable"
+
+    # Repairs itself: the slot's own window covers it, so nothing to do.
+    for name, days in (
+        ("raw_market.treasury_yield", 30),
+        ("raw_market.corporate_action", 7),
+        ("raw_market.short_interest", 45),
+    ):
+        r = by[name].refill
+        assert r.how == "lookback", name
+        assert r.lookback_days == days, name
+
+    # Refillable, and by what.
+    assert by["raw_market.option_daily"].refill.how == "slot"
+    assert by["raw_market.option_daily"].refill.target == "option-bars"
+
+
+def test_short_volume_refills_by_kind_because_its_slot_would_do_more() -> None:
+    """Measured and written down on 2026-09-09: the slot also fires
+    ratios_market, whose endpoint ignores the date, and short_interest_market,
+    whose 45-day lookback already covers it."""
+    r = BY_DATASET["raw_market.short_volume"].refill
+    assert r.how == "kind"
+    assert r.target == "short_volume_market"
+    assert "ratios_market" in r.why
+
+
+def test_every_refill_that_names_a_target_actually_names_one() -> None:
+    for c in CONTRACTS:
+        if c.refill.how in ("slot", "kind"):
+            assert c.refill.target, c.dataset
+        if c.refill.how == "unrecoverable":
+            assert c.refill.why, f"{c.dataset} must say why it cannot be refilled"

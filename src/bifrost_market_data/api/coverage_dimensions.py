@@ -300,7 +300,16 @@ def _one(
         "grain": c.grain,
         "slots": list(c.slots),
         "breadth_window": c.breadth_window,
-        "backfill_slot": c.backfill_slot,
+        # How a missed session is repaired, or why it needs no repairing. The
+        # console's agent brief turns this into the exact call, and three
+        # different reasons for "nothing to prescribe" must not collapse into
+        # one: gone for good, repairs itself, and not a session series.
+        "refill": {
+            "how": c.refill.how,
+            "target": c.refill.target,
+            "lookback_days": c.refill.lookback_days,
+            "why": c.refill.why,
+        },
         "error": error,
         "breadth": {
             "held": in_scope,

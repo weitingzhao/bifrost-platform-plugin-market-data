@@ -17,7 +17,7 @@ See ``docs/MASSIVE_BLUEPRINT.md`` §3. Contracts C-B1, C-D1, C-F2, C-G1.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 Tier = Literal["whole-market", "universe", "benchmark-only", "global"]
@@ -49,6 +49,30 @@ class DepthTarget:
     kind: DepthKind
     #: rolling_days → days; sessions → sessions; since → ISO date. Unused otherwise.
     value: int | str | None = None
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class Refill:
+    """How a missing session is repaired, or why it needs no repairing.
+
+    ``backfill_slot`` answered this with a slot name or None, and None was doing
+    three jobs at once: gone for good, repairs itself, and not a session series.
+    The console's agent brief read the first meaning for all three and told a
+    reader that treasury_yield's missed sessions were unrecoverable when the
+    slot re-pulls thirty days on its next run.
+
+    ``slot``           enqueue that schedule slot for the date
+    ``kind``           enqueue that one job kind — the slot would do more
+    ``lookback``       nothing to do; the slot's own window repairs it
+    ``unrecoverable``  the vendor cannot serve that date again
+    """
+
+    how: Literal["slot", "kind", "lookback", "unrecoverable"]
+    #: Slot or job kind, depending on ``how``. Unused for the other two.
+    target: str | None = None
+    #: How far the slot reaches back on each run, where that is what repairs it.
+    lookback_days: int | None = None
     why: str = ""
 
 
@@ -94,20 +118,10 @@ class DatasetContract:
     #: ``filing``     published per report or settlement, not per session
     grain: Grain = "daily"
 
-    #: The slot that can refill one *named* past session, or None when a missed
-    #: session is gone for good. This is the difference between a hole the
-    #: doctor can prescribe for and one it can only report.
-    #:
-    #: None is not "we have not wired it up yet" — it is a property of the
-    #: source. An EOD option chain download only ever returns the current
-    #: session, so option_snapshot (and option_open_interest, derived from the
-    #: same response) cannot be recovered once the day passes; 2026-08-11 is
-    #: permanently absent for that reason. ratios' endpoint ignores ?date and
-    #: always answers with the latest values, so its history can only accrue
-    #: forward. Datasets whose slot carries a lookback window (treasury 30d,
-    #: corporate 7d, short_interest 45d) repair themselves on the next run and
-    #: need no prescription.
-    backfill_slot: str | None = None
+    #: How a missed session is repaired — declared, because the three reasons
+    #: there might be nothing to prescribe are not the same reason and a reader
+    #: acts differently on each. See ``Refill``.
+    refill: Refill = field(default_factory=lambda: Refill("unrecoverable"))
 
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
@@ -144,8 +158,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # The grouped whole-market pull, not the watchlist one: a blank session
         # is blank for all 5,317 names, and seven of them went unnoticed for
         # ninety days before the fourth axis existed.
-        backfill_slot="universe-daily",
         grain="daily",
+        refill=Refill("slot", "universe-daily", why="the grouped whole-market pull; a blank session is blank for all 5,317"),
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -157,6 +171,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "session_date",
         freshness_dimension="stock_snapshot",
         grain="snapshot",
+        refill=Refill("unrecoverable", why="an all-tickers snapshot is the market as it is now; yesterday's cannot be asked for"),
     ),
     DatasetContract(
         "raw_market.stock_movers",
@@ -168,6 +183,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "session_date",
         freshness_dimension="stock_movers",
         grain="snapshot",
+        refill=Refill("unrecoverable", why="a top-N list of the session that is running; not servable for a past date"),
     ),
     DatasetContract(
         "raw_market.ticker",
@@ -180,6 +196,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="ticker_sync",
         grain="catalogue",
+        refill=Refill("lookback", "reference", why="the whole-market ticker sync runs nightly; a catalogue has no session to miss"),
     ),
     DatasetContract(
         "raw_market.corporate_action",
@@ -196,6 +213,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="dividends",
         grain="catalogue",
+        refill=Refill("lookback", "corporate", lookback_days=7, why="the slot re-pulls a 7-day window on every run"),
     ),
     DatasetContract(
         "raw_market.income_statement",
@@ -208,6 +226,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="financials",
         grain="filing",
+        refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
     ),
     DatasetContract(
         "raw_market.balance_sheet",
@@ -220,6 +239,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="financials",
         grain="filing",
+        refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
     ),
     DatasetContract(
         "raw_market.cash_flow",
@@ -232,6 +252,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="financials",
         grain="filing",
+        refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
     ),
     DatasetContract(
         "raw_market.ratios",
@@ -246,6 +267,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "period_date",
         freshness_dimension="ratios",
         grain="daily",
+        refill=Refill("unrecoverable", why="the endpoint ignores ?date and always answers with the latest values, so this history only accrues"),
     ),
     DatasetContract(
         "raw_market.short_volume",
@@ -268,8 +290,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # and short_interest_market (whose 45-day lookback already covers it).
         # Two wasted jobs per repaired session, knowingly: holes are rare, and
         # the alternative is a second prescription vocabulary.
-        backfill_slot="fundamentals-market",
         grain="daily",
+        refill=Refill("kind", "short_volume_market", why="the slot would also fire ratios_market, whose endpoint ignores the date, and short_interest_market, whose 45-day lookback already covers it"),
     ),
     DatasetContract(
         "raw_market.short_interest",
@@ -287,6 +309,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         cadence="settlement",
         freshness_dimension="short_interest",
         grain="filing",
+        refill=Refill("lookback", "fundamentals-market", lookback_days=45, why="the slot re-pulls 45 days of settlements on every run"),
     ),
     # ── global: one series, no instruments ──
     DatasetContract(
@@ -299,6 +322,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "yield_date",
         freshness_dimension="treasury_yields",
         grain="daily",
+        refill=Refill("lookback", "treasury", lookback_days=30, why="the slot re-pulls 30 days on every run"),
     ),
     DatasetContract(
         "raw_market.us_market_holiday",
@@ -311,6 +335,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="calendar",
         grain="catalogue",
+        refill=Refill("lookback", "calendar", why="the calendar is rewritten nightly; there is no session to miss"),
     ),
     # ── universe: per-symbol calls, so follow the Research rule ──
     DatasetContract(
@@ -334,6 +359,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         low_cardinality=True,
         freshness_dimension="option_snapshot",
         grain="snapshot",
+        refill=Refill("unrecoverable", why="a chain download only returns the current session — 2026-08-11 is permanently absent for this reason"),
     ),
     DatasetContract(
         "raw_market.option_contract",
@@ -349,6 +375,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         breadth_window="ever",
         freshness_dimension="option_contract",
         grain="catalogue",
+        refill=Refill("lookback", "option-refresh", why="the catalogue is re-enumerated on rotation; a stale name is refreshed when its turn comes"),
     ),
     DatasetContract(
         "raw_market.option_open_interest",
@@ -366,6 +393,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "trade_date",
         freshness_dimension="option_open_interest",
         grain="snapshot",
+        refill=Refill("unrecoverable", why="derived from the same chain response, so it shares the chain's boundary"),
     ),
     DatasetContract(
         "raw_market.option_daily",
@@ -381,8 +409,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_date",
         low_cardinality=True,
         freshness_dimension="option_daily",
-        backfill_slot="option-bars",
         grain="daily",
+        refill=Refill("slot", "option-bars", why="near-spot contracts for the named session, at the universe scope"),
     ),
     # ── benchmark-only: too big to be worth more than a few names ──
     DatasetContract(
@@ -395,8 +423,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_time",
         low_cardinality=True,
         freshness_dimension="stock_minute",
-        backfill_slot="minute-bars",
         grain="minute",
+        refill=Refill("slot", "minute-bars"),
     ),
     DatasetContract(
         "raw_market.option_minute",
@@ -408,8 +436,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_time",
         low_cardinality=True,
         freshness_dimension="option_minute",
-        backfill_slot="minute-bars",
         grain="minute",
+        refill=Refill("slot", "minute-bars", why="a rotation, so one run fills a bounded batch rather than the whole benchmark set"),
     ),
 )
 
