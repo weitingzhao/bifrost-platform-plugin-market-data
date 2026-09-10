@@ -613,16 +613,24 @@ def test_breadth_is_not_asked_where_it_is_the_wrong_question() -> None:
     assert BY_DATASET["raw_market.stock_daily"].breadth_unjudged is None
 
 
-def test_the_financials_divide_by_common_stock_not_by_every_listing() -> None:
-    """An ETF or a trust files nothing; counting them made 83% look like a gap.
+def test_the_financials_still_divide_by_every_active_ticker() -> None:
+    """A tier for common stock was built on a hypothesis the data refuted.
 
-    fundamentals-rotate already walks exactly this list.
+    The three statements read ~83% held and the guess was that ETFs and trusts
+    were padding the denominator. Measured 2026-09-10, every one of the 5,317
+    active tickers is instrument_type CS on market stocks — the reference sync
+    pulls nothing else — so the denominator was already right and the tier was
+    an identical copy of whole-market implying a distinction that does not
+    exist. 83% is a true reading: the vendor has no statements for the rest.
     """
     for name in ("income_statement", "balance_sheet", "cash_flow", "ratios"):
-        assert BY_DATASET[f"raw_market.{name}"].tier == "common-stock", name
-    # Short volume and interest do exist for ETFs, so they stay whole-market.
-    assert BY_DATASET["raw_market.short_volume"].tier == "whole-market"
-    assert BY_DATASET["raw_market.short_interest"].tier == "whole-market"
+        assert BY_DATASET[f"raw_market.{name}"].tier == "whole-market", name
+    assert {c.tier for c in CONTRACTS} == {
+        "whole-market",
+        "universe",
+        "benchmark-only",
+        "global",
+    }
 
 
 def test_a_rotation_is_not_measured_by_one_session() -> None:

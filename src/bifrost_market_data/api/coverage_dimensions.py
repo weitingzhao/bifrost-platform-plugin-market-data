@@ -26,12 +26,7 @@ from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetCon
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
-from bifrost_market_data.scopes import (
-    active_tickers,
-    benchmark_scope,
-    common_stock_scope,
-    universe_symbols,
-)
+from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market/coverage", tags=["market-coverage"])
@@ -451,7 +446,6 @@ def _denominators(conn: Any) -> dict[str, Any]:
     over today's active tickers reads as 389% coverage.
     """
     active = active_tickers(conn, statement_timeout=STATEMENT_TIMEOUT)
-    common = common_stock_scope(conn, statement_timeout=STATEMENT_TIMEOUT)
     universe_syms = universe_symbols(conn, statement_timeout=STATEMENT_TIMEOUT)
     by_tier: dict[str, int] = {}
     for row in load_research_universe(conn) or []:
@@ -465,15 +459,11 @@ def _denominators(conn: Any) -> dict[str, Any]:
     )
     return {
         "whole-market": len(active),
-        # The financials slots address common stock, not every listed
-        # instrument: an ETF or a trust files nothing.
-        "common-stock": len(common),
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
         "benchmark-only": len(bench),
         "global": 1,
         "scopes": {
             "whole-market": active,
-            "common-stock": common,
             "universe": universe_syms,
             "benchmark-only": bench,
             "global": set(),

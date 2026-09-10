@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Tier = Literal["whole-market", "common-stock", "universe", "benchmark-only", "global"]
+Tier = Literal["whole-market", "universe", "benchmark-only", "global"]
 #: "session" — instruments present in the newest observation, which is what a
 #: daily feed should cover. "ever" — instruments ever seen, which is the honest
 #: numerator for a dataset that accumulates (a company files quarterly, not
@@ -235,7 +235,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     ),
     DatasetContract(
         "raw_market.income_statement",
-        "common-stock",
+        "whole-market",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -249,7 +249,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     ),
     DatasetContract(
         "raw_market.balance_sheet",
-        "common-stock",
+        "whole-market",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -263,7 +263,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     ),
     DatasetContract(
         "raw_market.cash_flow",
-        "common-stock",
+        "whole-market",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -277,7 +277,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     ),
     DatasetContract(
         "raw_market.ratios",
-        "common-stock",
+        "whole-market",
         DepthTarget(
             "forward_only",
             why="the vendor ignores ?date and returns the latest; history only accumulates",
