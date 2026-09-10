@@ -12,7 +12,12 @@ metadata:
     app.kubernetes.io/component: schema-migrate
     bifrost.io/wave: "8"
 spec:
-  ttlSecondsAfterFinished: 86400
+  # Short enough that a redeploy finds a clean slate. A Job's pod template is
+  # immutable, so once this stopped being pinned to 0.11.1 and started
+  # tracking the release tag, a second apply inside the TTL failed the whole
+  # kustomization. Ten minutes is long enough to read the log after a deploy,
+  # and re-running idempotent migrations on each release is the point.
+  ttlSecondsAfterFinished: 600
   backoffLimit: 2
   template:
     metadata:
