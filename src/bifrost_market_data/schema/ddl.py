@@ -662,6 +662,41 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
+    # The coverage matrix's memory. Run-length encoded: one row per *change* of
+    # the verdict map, not one per compute — the page recomputes on a timer and
+    # almost every recompute reproduces the previous verdicts exactly.
+    #
+    # Recorded forward while continuity is computed on read, and the difference
+    # is the point: continuity asks a question the rows themselves still answer,
+    # a verdict asks one only the moment could answer. Freshness divides by how
+    # late the newest row is *now*; breadth divides by the tier scope as it
+    # stood. Re-running either tomorrow answers tomorrow's question.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.coverage_sample (
+            coverage_sample_id bigserial   PRIMARY KEY,
+            first_seen_at      timestamptz NOT NULL DEFAULT now(),
+            last_seen_at       timestamptz NOT NULL DEFAULT now(),
+            digest             text        NOT NULL,
+            verdicts           jsonb       NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS coverage_sample_first_seen
+        ON ops_jobs.coverage_sample (first_seen_at DESC, coverage_sample_id DESC)
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON TABLE ops_jobs.coverage_sample IS
+          'Four-axis verdicts per dataset over time, one row per change. '
+          'A verdict cannot be computed backwards, so it is written forward; '
+          'continuity, which can, is not recorded here.'
+        """
+    )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS ops_jobs.ingest_freshness (
@@ -1121,6 +1156,7 @@ MARKET_ANALYTICS_TABLES: tuple[str, ...] = ()
 DATA_OPS_TABLES: tuple[str, ...] = (
     "job_ingest",
     "queue_sample",
+    "coverage_sample",
     "ingest_freshness",
     "data_source_void",
     "symbol_source_void",

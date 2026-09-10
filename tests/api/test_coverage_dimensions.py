@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from bifrost_market_data.api import coverage_dimensions as mod
+from bifrost_market_data.verdicts import AXES
 from bifrost_market_data.contracts import CONTRACTS, BY_DATASET
 
 
@@ -740,3 +741,47 @@ def test_the_accrual_parser_never_escapes_its_guard() -> None:
             return None
 
     assert mod._accrual(_Conn(), BY_DATASET["raw_market.option_snapshot"]) is None
+
+
+# ── the matrix's memory ───────────────────────────────────────────────────
+
+
+def test_every_row_carries_its_own_verdicts(wired: dict[str, Any]) -> None:
+    """Judged in the plugin, not in the panel that draws it (C-G1).
+
+    A threshold living in TypeScript is one the doctor can never be told about,
+    which is exactly why the matrix could not say "this got worse".
+    """
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    for d in body["datasets"]:
+        assert set(d["verdicts"]) == set(AXES), d["dataset"]
+        assert all(v in {"ok", "partial", "thin", "boundary", "unknown"} for v in d["verdicts"].values())
+
+
+def test_a_tier_filtered_compute_is_never_recorded(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subset would read as every other dataset having disappeared."""
+    calls: list[Any] = []
+    monkeypatch.setattr(mod, "record_verdicts", lambda conn, m: calls.append(m) or {})
+    mod.get_dimensions(tier="universe", refresh=True)
+    assert calls == []
+    mod.CACHE.clear()
+    mod.get_dimensions(tier=None, refresh=True)
+    assert len(calls) == 1
+    assert set(calls[0]) == {c.dataset for c in CONTRACTS}
+
+
+def test_a_failed_record_does_not_sink_the_page(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And it says so, rather than showing an empty diff that reads as calm."""
+
+    def boom(conn: Any, m: Any) -> Any:
+        raise RuntimeError("no such table")
+
+    monkeypatch.setattr(mod, "record_verdicts", boom)
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    assert len(body["datasets"]) == len(CONTRACTS)
+    assert body["memory"]["recorded"] is False
+    assert "no such table" in body["memory"]["why"]

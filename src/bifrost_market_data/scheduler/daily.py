@@ -1013,6 +1013,24 @@ def enqueue_slot(
                 logger.info("trimmed %s queue_sample rows", samples_dropped)
         except Exception as exc:  # noqa: BLE001 — sample retention must not fail the trim
             logger.warning("queue_sample trim skipped: %s", exc)
+        # The matrix's memory, on the same schedule and for the same reason: it
+        # is a history the source tables cannot reproduce. Its trim keeps the
+        # newest row whatever the window says — retention bounds the history,
+        # not the present.
+        try:
+            from bifrost_market_data.coverage_history import (
+                KEEP_DAYS as COVERAGE_KEEP_DAYS,
+                trim_samples as trim_coverage_samples,
+            )
+
+            coverage_dropped = trim_coverage_samples(
+                conn,
+                keep_days=int(scfg.get("coverage_sample_keep_days") or COVERAGE_KEEP_DAYS),
+            )
+            if coverage_dropped:
+                logger.info("trimmed %s coverage_sample rows", coverage_dropped)
+        except Exception as exc:  # noqa: BLE001 — sample retention must not fail the trim
+            logger.warning("coverage_sample trim skipped: %s", exc)
         try:
             update_freshness(conn, "job_trim", int(deleted or 0), status="ok")
         except Exception as exc:  # noqa: BLE001 — freshness must not fail trim

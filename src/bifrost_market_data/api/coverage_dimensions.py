@@ -22,7 +22,9 @@ from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.continuity import measure as measure_continuity
+from bifrost_market_data.coverage_history import record as record_verdicts
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
+from bifrost_market_data.verdicts import verdict_map, verdicts_for
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
@@ -428,7 +430,7 @@ def _one(
     # The numerator is what we hold *of what this tier asked for*. Held rows
     # outside that scope are reported separately rather than inflating a ratio.
     in_scope = of_n if c.symbol_column is None else len(held_symbols & scope)
-    return {
+    row = {
         "dataset": c.dataset,
         "tier": c.tier,
         # Tier says which instruments, grain says what one row is. Two axes, and
@@ -472,6 +474,12 @@ def _one(
         ),
         "continuity": continuity,
     }
+    # Judged here, not in the panel that draws it. C-G1 makes the contract table
+    # the only source of thresholds, and a threshold living in TypeScript is one
+    # the doctor can never be told about — which is the whole reason the matrix
+    # could not say "this got worse".
+    row["verdicts"] = verdicts_for(row)
+    return row
 
 
 #: How many of a dataset's own publication intervals may pass before the
@@ -615,7 +623,39 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "denominators": public_denominators,
         "datasets": rows,
+        "memory": _remember(key, rows),
     }
+
+
+def _remember(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Record this compute's verdicts and report what moved since the last.
+
+    Only for the whole estate. A tier-filtered compute holds a subset of the
+    contracts, and recording that subset would read as every other dataset
+    having disappeared — the diff is keyed by dataset name precisely so an
+    appearance or a disappearance is legible, which makes writing a partial
+    map actively harmful rather than merely useless.
+
+    Outside the caller's guard and swallowing its own failures: the record is a
+    nicety, the page is not. 0.20.0 blanked three good axes by sharing one
+    ``try`` with a fourth, and that mistake does not need a third outing.
+    """
+    if key != "all":
+        return {
+            "recorded": False,
+            "why": "verdicts are recorded for the whole estate, not one tier",
+            "changes": [],
+        }
+    conn = None
+    try:
+        conn = connect_db(statement_timeout=STATEMENT_TIMEOUT)
+        return record_verdicts(conn, verdict_map(rows))
+    except Exception as exc:  # noqa: BLE001 — a page that cannot remember still renders
+        logger.warning("coverage verdict record failed: %s", exc)
+        return {"recorded": False, "why": str(exc)[:160], "changes": []}
+    finally:
+        if conn is not None:
+            _close_quietly(conn)
 
 
 @router.get("/dimensions")

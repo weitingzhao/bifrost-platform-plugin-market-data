@@ -114,8 +114,9 @@ def test_expected_object_counts() -> None:
     assert "ticker_type" in MARKET_TABLES
     assert "stock_financials" not in MARKET_TABLES
     assert len(MARKET_ANALYTICS_TABLES) == 0
-    assert len(DATA_OPS_TABLES) == 6
+    assert len(DATA_OPS_TABLES) == 7
     assert "queue_sample" in DATA_OPS_TABLES  # the queue's only history
+    assert "coverage_sample" in DATA_OPS_TABLES  # the matrix's only memory
     assert "data_source_void" in DATA_OPS_TABLES
     assert "symbol_source_void" in DATA_OPS_TABLES
     assert "watchlist_cache" in DATA_OPS_TABLES
