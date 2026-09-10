@@ -151,14 +151,29 @@ def measure(
     if counts is None:
         return {"measured": False, "why": "read failed"}
 
-    present = {d for d, _ in counts}
-    holes = thin_days(counts)
-
-    absent: list[date] = []
     # Only a dataset published every trading day can be judged against the
     # trading calendar. short_interest settles twice a month; measured against
-    # sessions it reported 56 missing days that were never due.
+    # sessions it reported 56 missing days that were never due. An empty
+    # calendar means unreadable, not "no trading days" — filtering on it would
+    # blank the axis rather than report it.
+    sessions: set[date] | None = None
     if expected_days is not None and contract.cadence == "session":
+        cal = set(expected_days)
+        sessions = cal or None
+
+    # A row dated on a Saturday is not a thin session. Non-trading days are
+    # dropped from the judged series *and* from the baseline it is judged
+    # against: measured 2026-09-10, four of option_open_interest's five worst
+    # "thin" days were weekends, and leaving those few-row days in the trailing
+    # median also drags the floor down where a real weekday hole should trip it.
+    judged = counts if sessions is None else [(d, n) for d, n in counts if d in sessions]
+    off_calendar = [] if sessions is None else [d for d, _ in counts if d not in sessions]
+
+    present = {d for d, _ in judged}
+    holes = thin_days(judged)
+
+    absent: list[date] = []
+    if sessions is not None:
         # Only sessions inside the observed span: a dataset that starts midway
         # through the window has not lost the days before it existed.
         first = min(present) if present else None
@@ -169,12 +184,18 @@ def measure(
     return {
         "measured": True,
         "window_days": window_days,
-        "days_present": len(counts),
+        # Sessions with rows, once non-trading days are set aside — the same
+        # unit days_absent counts, so the two can be read against each other.
+        "days_present": len(judged),
         # Two numbers, never merged: one is "the day is missing", the other is
         # "the day is there and nearly empty". They have different causes.
         "days_absent": len(absent),
         "cadence": contract.cadence,
         "days_thin": len(holes),
+        # Rows dated on a day the market was shut. Not a hole — the opposite —
+        # but nothing else in the system would say so.
+        "days_off_calendar": len(off_calendar),
+        "off_calendar_sample": [d.isoformat() for d in sorted(off_calendar)[:5]],
         "worst": [
             {"date": d.isoformat(), "rows": n, "neighbours": m}
             for d, n, m in sorted(holes, key=lambda t: t[1])[:5]

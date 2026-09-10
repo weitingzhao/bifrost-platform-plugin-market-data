@@ -1140,7 +1140,7 @@ def enqueue_slot(
     tier_of: dict[str, str] = {}
     months_of: dict[str, int] = {}
     if (
-        slot_key in ("option-refresh", "option-backfill", "eod-pipeline")
+        slot_key in ("option-refresh", "option-backfill", "eod-pipeline", "option-bars")
         and str(scfg.get("universe") or "").lower() == "research"
     ):
         universe = load_research_universe(conn)
@@ -1339,6 +1339,11 @@ def enqueue_slot(
             _add("option_contract", {"underlying": sym, "expired": False}, pri=_tier_pri(sym))
 
     elif slot_key == "option-bars":
+        # Scope follows the universe, not the watchlist. The P4 backfill bought
+        # two years of option_daily for 575 underlyings while this slot renewed
+        # only the watchlist union — measured 2026-09-10, depth 503/575 at
+        # target against breadth 25/575, so 550 names' history would have
+        # stopped advancing the day the backfill ended.
         bars_syms = union_iv_radar_benchmarks(symbols, cfg)
         tickers = load_option_tickers_near_spot(
             conn,
@@ -1447,11 +1452,15 @@ def enqueue_slot(
         session = sessions[-1] if sessions else day
         session_s = session.isoformat()
         si_back = int(scfg.get("short_interest_lookback_days") or 45)
+        si_pages = int(scfg.get("short_interest_max_pages") or 400)
         _add("ratios_market", {"date": session_s}, pri=priority)
         _add("short_volume_market", {"date": session_s}, pri=priority)
         _add(
             "short_interest_market",
-            {"settlement_date_gte": (session - timedelta(days=si_back)).isoformat()},
+            {
+                "settlement_date_gte": (session - timedelta(days=si_back)).isoformat(),
+                "max_pages": si_pages,
+            },
             pri=priority,
         )
 

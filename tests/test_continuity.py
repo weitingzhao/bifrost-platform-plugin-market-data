@@ -164,3 +164,56 @@ def test_short_volume_history_is_bought_not_merely_accrued() -> None:
     assert c.depth.kind == "rolling_days"
     assert c.depth.value == 730
     assert contract_for("raw_market.ratios").depth.kind == "forward_only"
+
+
+def test_a_weekend_row_is_not_a_thin_session() -> None:
+    """Measured 2026-09-10: four of option_open_interest's five worst "thin"
+    days were a Saturday or a Sunday. A day the market was shut cannot be a
+    session that came up short, and its handful of rows must not sit in the
+    trailing median either — that drags the floor down where a real weekday
+    hole should trip it.
+    """
+    weekdays = [d for d in (date(2026, 8, 3) + timedelta(days=i) for i in range(28))
+                if d.weekday() < 5]
+    rows = [(d, 60_000) for d in weekdays]
+    # Saturdays and Sundays carrying a trickle of rows.
+    weekend = [d for d in (date(2026, 8, 3) + timedelta(days=i) for i in range(28))
+               if d.weekday() >= 5]
+    rows += [(d, 900) for d in weekend]
+
+    without = cont.measure(_Conn(sorted(rows)), contract_for("raw_market.option_open_interest"))
+    assert without["days_thin"] == len(weekend), "no calendar: every weekend reads as a hole"
+
+    out = cont.measure(
+        _Conn(sorted(rows)),
+        contract_for("raw_market.option_open_interest"),
+        expected_days=weekdays,
+    )
+    assert out["days_thin"] == 0
+    assert out["days_present"] == len(weekdays)
+    assert out["days_off_calendar"] == len(weekend)
+    assert out["off_calendar_sample"][0] == weekend[0].isoformat()
+
+
+def test_a_real_weekday_hole_still_trips_with_the_calendar_on() -> None:
+    """Filtering weekends must not blunt the measure it was meant to sharpen."""
+    weekdays = [d for d in (date(2026, 8, 3) + timedelta(days=i) for i in range(28))
+                if d.weekday() < 5]
+    rows = [(d, 60_000) for d in weekdays]
+    hole = weekdays[15]
+    rows[15] = (hole, 300)
+    out = cont.measure(
+        _Conn(rows), contract_for("raw_market.option_open_interest"), expected_days=weekdays
+    )
+    assert out["days_thin"] == 1
+    assert out["worst"][0]["date"] == hole.isoformat()
+
+
+def test_an_unreadable_calendar_does_not_blank_the_axis() -> None:
+    """expected_days == [] means the calendar read failed, not "no trading days"."""
+    days = [date(2026, 8, 3) + timedelta(days=i) for i in range(10)]
+    rows = [(d, 5_000) for d in days]
+    out = cont.measure(_Conn(rows), contract_for("raw_market.option_open_interest"), expected_days=[])
+    assert out["measured"] is True
+    assert out["days_present"] == len(days)
+    assert out["days_off_calendar"] == 0

@@ -78,7 +78,13 @@ async def handle_short_interest_market(job: JobRow, client: Any, conn: Any) -> M
     since = str(payload.get("settlement_date_gte") or payload.get("from") or "").strip()
     if not since:
         raise ValueError("short_interest_market payload requires settlement_date_gte")
-    data = await client.fetch_short_interest_market(since)
+    # The cap is a runaway guard, not a budget. 120 pages was measured
+    # insufficient on 2026-09-09 (the job failed and short_interest fell 27 days
+    # behind); the window's true row count is not measurable from here, so the
+    # payload carries it and the slot sets it far above any plausible 45-day
+    # window — a truncation at that height means the shape of the feed changed.
+    max_pages = int(payload.get("max_pages") or 400)
+    data = await client.fetch_short_interest_market(since, max_pages=max_pages)
     _reject_truncation("short_interest_market", data)
     rows = _rows_from(
         list(data.get("results") or []),

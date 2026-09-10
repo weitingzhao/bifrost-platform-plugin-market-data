@@ -61,6 +61,9 @@ data:
           # At-the-money: next 3 expiries × ±10 strikes per right, per underlying.
           expiries: 3
           strikes_each_side: 10
+          # Renews the same 575 underlyings the P4 backfill bought history for;
+          # the watchlist stays the fallback when research.option_universe is empty.
+          universe: research
         # option-trades retired 0.10.3: option trades are not in Options Starter.
         minute-bars:
           cron: "15 23 * * *"
@@ -141,6 +144,9 @@ data:
           cron: "30 4 * * 2-6"
           priority: 2
           short_interest_lookback_days: 45
+          # 120 pages truncated the 2026-09-09 pull mid-market and the job
+          # correctly failed; short_interest then fell 27 days behind.
+          short_interest_max_pages: 400
         # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
         # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
         # Wave 14G-A: readiness-refresh slot + CronJob retired (stock_readiness_daily gone).

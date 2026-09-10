@@ -50,6 +50,35 @@ def test_parse_option_ticker() -> None:
     assert put["strike"] == 450.0
 
 
+def test_parse_option_ticker_accepts_adjusted_roots() -> None:
+    """OCC gives an adjusted contract a numeric root suffix after a corporate action.
+
+    These are real, enumerable contracts — option_contract held 910 SPGI1 rows
+    while option_daily rejected every one — so the root must admit digits.
+    """
+    for raw, root, expiry, strike in (
+        ("O:WDC1250221C00005000", "WDC1", date(2025, 2, 21), 5.0),
+        ("O:SPGI1250117P00037500", "SPGI1", date(2025, 1, 17), 37.5),
+        ("O:XOM2260116C00120000", "XOM2", date(2026, 1, 16), 120.0),
+    ):
+        parsed = parse_option_ticker(raw)
+        assert parsed["underlying"] == root
+        assert parsed["expiry"] == expiry
+        assert parsed["strike"] == strike
+
+
+def test_parse_option_ticker_split_is_unambiguous() -> None:
+    """A digit-bearing root must not eat the date: the tail is fixed-width."""
+    parsed = parse_option_ticker("O:BRK.B250117C00500000")
+    assert parsed["underlying"] == "BRK.B"
+    assert parsed["expiry"] == date(2025, 1, 17)
+    # A root that is all digits still splits on the fixed tail.
+    assert parse_option_ticker("O:X1250117C00500000")["underlying"] == "X1"
+    for bad in ("O:AAPL25062C00150000", "O:AAPL250620X00150000", "O:AAPL250620C0015000"):
+        with pytest.raises(ValueError):
+            parse_option_ticker(bad)
+
+
 def test_parse_option_ticker_invalid() -> None:
     with pytest.raises(ValueError):
         parse_option_ticker("AAPL")

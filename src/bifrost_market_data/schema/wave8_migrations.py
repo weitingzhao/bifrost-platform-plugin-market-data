@@ -65,6 +65,19 @@ def create_financials_entity_tables(cur: _Cursor) -> None:
             ON raw_market.{table} (symbol, period_date DESC)
             """
         )
+        # Every index here led with `symbol`, so "who did we hold on the latest
+        # day" — SELECT DISTINCT symbol WHERE period_date = max(period_date) —
+        # had no choice but a full scan. Harmless at 76k rows; once the
+        # short_volume backfill took that table to 7M rows across 4.6 GB it blew
+        # the four-axis read's 120s budget and breadth reported 0 of 5,317 held
+        # when the day in fact held 15,248 rows. symbol rides along so the scan
+        # is index-only and never touches the jsonb heap.
+        cur.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS {table}_period_date_symbol
+            ON raw_market.{table} (period_date, symbol)
+            """
+        )
 
 
 def create_stock_financials_compat_view(cur: _Cursor) -> None:

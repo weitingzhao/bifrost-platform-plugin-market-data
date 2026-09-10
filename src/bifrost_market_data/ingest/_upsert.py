@@ -13,8 +13,17 @@ from zoneinfo import ZoneInfo
 from bifrost_market_data.worker.claim import JobRow
 
 # Polygon option ticker: O:AAPL250620C00150000
+#
+# The root may carry a digit. OCC appends a numeric suffix after a split,
+# merger or special dividend, so an adjusted contract reads O:WDC1250221C...
+# — measured 2026-09-10, option_contract holds 910 SPGI1 / 106 WDC1 / 64 CVX1
+# rows while this parser rejected every one of them, failing 3,861 option_daily
+# jobs in a day. The root is therefore matched non-greedily and the split is
+# taken from the right: the tail is a fixed 15 characters (6 date, 1 right,
+# 8 strike) anchored on $, so exactly one split can satisfy the pattern and
+# allowing digits in the root introduces no ambiguity.
 _OPTION_TICKER_RE = re.compile(
-    r"^O:(?P<underlying>[A-Z.\-]+)"
+    r"^O:(?P<underlying>[A-Z0-9.\-]+?)"
     r"(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})"
     r"(?P<right>[CP])"
     r"(?P<strike>\d{8})$",

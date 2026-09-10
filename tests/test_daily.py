@@ -596,6 +596,63 @@ def test_enqueue_option_bars_targets_the_money() -> None:
     )
 
 
+def test_enqueue_option_bars_follows_the_research_universe() -> None:
+    """The daily renewal must cover the names the backfill bought history for.
+
+    Measured 2026-09-10: option_daily depth read 503/575 at the two-year target
+    while breadth read 25/575, because this slot renewed the watchlist union and
+    the P4 backfill had filled the universe. 550 names' history would have
+    stopped advancing the day the backfill ended, and the fourth axis cannot see
+    that — the 25 renewed names keep every per-day count healthy.
+    """
+    contracts = []
+    for sym in ("AAPL", "NVDA", "TSLA"):
+        for right in ("C", "P"):
+            contracts.append(
+                (f"O:{sym}240621{right}00200000", sym, date(2024, 6, 21), 200.0)
+            )
+    conn = _DailyConn(
+        option_contracts=contracts,
+        spots={"AAPL": 200.0, "NVDA": 200.0, "TSLA": 200.0},
+        research_universe=[
+            {"symbol": "AAPL", "tier": "resident", "history_months": 24},
+            {"symbol": "NVDA", "tier": "core", "history_months": 24},
+        ],
+    )
+    result = enqueue_slot(
+        conn,
+        "option-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["TSLA"],  # the old scope: watchlist only
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-bars": {"universe": "research", "expiries": 1, "strikes_each_side": 0}},
+        },
+    )
+    underlyings = {
+        j["payload"]["option_ticker"][2:].split("240621")[0] for j in result["jobs"]
+    }
+    assert underlyings == {"AAPL", "NVDA"}
+    assert result["enqueued"] == 4  # 2 underlyings × 1 expiry × 2 rights
+
+
+def test_enqueue_option_bars_falls_back_to_the_watchlist() -> None:
+    """An empty research.option_universe must not stall the daily renewal."""
+    contracts = [("O:TSLA240621C00200000", "TSLA", date(2024, 6, 21), 200.0)]
+    conn = _DailyConn(option_contracts=contracts, spots={"TSLA": 200.0}, research_universe=[])
+    result = enqueue_slot(
+        conn,
+        "option-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["TSLA"],
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-bars": {"universe": "research", "expiries": 1, "strikes_each_side": 0}},
+        },
+    )
+    assert result["enqueued"] == 1
+
+
 def test_enqueue_option_bars_skips_underlyings_without_a_close() -> None:
     contracts = [("O:SPX240621C05000000", "SPX", date(2024, 6, 21), 5000.0)]
     conn = _DailyConn(option_contracts=contracts, spots={})  # no index level on this plan
@@ -1184,7 +1241,25 @@ def test_enqueue_fundamentals_market() -> None:
     assert set(by_kind) == {"ratios_market", "short_volume_market", "short_interest_market"}
     assert by_kind["ratios_market"] == {"date": "2024-06-21"}
     assert by_kind["short_volume_market"] == {"date": "2024-06-21"}
-    assert by_kind["short_interest_market"] == {"settlement_date_gte": "2024-05-07"}
+    # The page cap rides in the payload: 120 (the client default) truncated the
+    # 2026-09-09 whole-market pull mid-alphabet, the job correctly failed, and
+    # short_interest fell 27 days behind with nothing tunable short of a release.
+    assert by_kind["short_interest_market"] == {
+        "settlement_date_gte": "2024-05-07",
+        "max_pages": 400,
+    }
+    tuned = enqueue_slot(
+        _DailyConn(["AAPL"]),
+        "fundamentals-market",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "slots": {"fundamentals-market": {"priority": 2, "short_interest_max_pages": 900}}
+        },
+    )
+    assert {j["kind"]: j["payload"] for j in tuned["jobs"]}["short_interest_market"][
+        "max_pages"
+    ] == 900
     # Not holiday-gated: it fires the morning after a session, which may be a Saturday.
     weekend = enqueue_slot(
         _DailyConn(["AAPL"]),
