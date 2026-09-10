@@ -295,3 +295,90 @@ def test_missing_sessions_says_none_when_the_read_fails() -> None:
             return None
 
     assert cont.missing_sessions(_Boom(), "t", "c", [date(2026, 9, 1)]) is None
+
+
+class _MeasureConn:
+    """A connection that answers per_day_counts with a canned series."""
+
+    def __init__(self, counts: list[tuple[date, int]]) -> None:
+        self.counts = counts
+
+    class _Cur:
+        def __init__(self, outer: "_MeasureConn") -> None:
+            self.outer = outer
+
+        def __enter__(self) -> "_MeasureConn._Cur":
+            return self
+
+        def __exit__(self, *_a: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[date, int]]:
+            return list(self.outer.counts)
+
+    def cursor(self) -> "_MeasureConn._Cur":
+        return _MeasureConn._Cur(self)
+
+    def rollback(self) -> None:
+        return None
+
+
+def _contract_for_stock_daily() -> Any:
+    return contract_for("raw_market.stock_daily")
+
+
+def test_the_session_being_written_is_not_called_thin() -> None:
+    """Measured 2026-09-10 between 22:00 and 22:10 UTC.
+
+    While the EOD chain wrote that day's rows, stock_daily held a fraction of a
+    session and this axis called it thin — ok → partial at 22:03, partial → ok
+    at 22:10. Correct as a reading, useless as a verdict: it repeats every
+    night, writes two rows into the matrix's memory each time, and tells
+    anyone reading the agent brief in those ten minutes that something got
+    worse.
+    """
+    days = _series(date(2026, 6, 12), [12400] * 90)
+    # …and today, mid-write, holding a handful of rows.
+    today = days[-1][0] + timedelta(days=1)
+    series = days + [(today, 18)]
+    calendar = [d for d, _ in series]
+    conn = _MeasureConn(series)
+    c = _contract_for_stock_daily()
+
+    # The session the tables should hold is yesterday: today's EOD is not due.
+    out = cont.measure(conn, c, expected_days=calendar, session=days[-1][0])
+    assert out["days_thin"] == 0
+    assert out["days_not_due"] == 1
+    assert out["not_due_sample"] == [today.isoformat()]
+    # Present, not absent — the rows are there; whether all of them are there
+    # is not yet a question.
+    assert out["days_present"] == len(series)
+    assert out["days_absent"] == 0
+
+
+def test_once_the_session_is_due_a_thin_day_is_a_thin_day() -> None:
+    """The rule defers judgement, it does not cancel it."""
+    days = _series(date(2026, 6, 12), [12400] * 90)
+    today = days[-1][0] + timedelta(days=1)
+    series = days + [(today, 18)]
+    calendar = [d for d, _ in series]
+    out = cont.measure(_MeasureConn(series), _contract_for_stock_daily(),
+                       expected_days=calendar, session=today)
+    assert out["days_thin"] == 1
+    assert out["days_not_due"] == 0
+    assert out["worst"][0]["date"] == today.isoformat()
+
+
+def test_without_a_session_nothing_is_held_out() -> None:
+    """A caller that cannot resolve the session gets the old behaviour, not a
+    silently-forgiving one."""
+    days = _series(date(2026, 6, 12), [12400] * 90)
+    today = days[-1][0] + timedelta(days=1)
+    series = days + [(today, 18)]
+    out = cont.measure(_MeasureConn(series), _contract_for_stock_daily(),
+                       expected_days=[d for d, _ in series], session=None)
+    assert out["days_thin"] == 1
+    assert out["days_not_due"] == 0

@@ -197,9 +197,25 @@ def measure(
     *,
     window_days: int = WINDOW_DAYS,
     expected_days: Iterable[date] | None = None,
+    session: date | None = None,
     statement_timeout: str = "120s",
 ) -> dict[str, Any]:
-    """Absent days and thin days over the window, reported separately."""
+    """Absent days and thin days over the window, reported separately.
+
+    ``session`` is the session the tables should hold by now
+    (``session.resolve_session``). Days after it are present but **not yet
+    due**, and are held out of the thin-day judgement — the same rule the
+    doctor already applies to absent days, where the comment reads "the newest
+    session may simply not be due yet". Extending it from absent to thin is
+    what this parameter is for.
+
+    Measured 2026-09-10: between 22:00 and 22:10 UTC, while the EOD chain was
+    writing that day's rows, ``stock_daily`` held a fraction of a session and
+    this axis called it thin — ok → partial at 22:03, partial → ok at 22:10.
+    Correct as a reading and useless as a verdict: it would repeat every night,
+    write two rows into the matrix's memory each time, and tell anyone reading
+    the agent brief during those ten minutes that something had got worse.
+    """
     if not has_continuity(contract):
         return {"measured": False, "why": f"{contract.depth.kind} has no session cadence"}
 
@@ -233,7 +249,18 @@ def measure(
     off_calendar = [] if sessions is None else [d for d, _ in counts if d not in sessions]
 
     present = {d for d, _ in judged}
-    holes = thin_days(judged)
+
+    # A session that is not due yet is present, and simply not judged. Keeping
+    # it in `days_present` while holding it out of the thin test is the honest
+    # split: the rows are there, whether they are all there is not yet a
+    # question. Only the newest days can be affected — the baseline is
+    # trailing, so nothing held out here was serving as one.
+    if session is None:
+        judged_for_thin, not_due = judged, []
+    else:
+        judged_for_thin = [(d, n) for d, n in judged if d <= session]
+        not_due = [d for d, _ in judged if d > session]
+    holes = thin_days(judged_for_thin)
 
     # How often this dataset actually publishes, measured rather than assumed.
     # A settlement series reads 15; a daily one reads 1. Freshness needs it:
@@ -270,6 +297,11 @@ def measure(
         "median_interval_days": interval,
         "days_off_calendar": len(off_calendar),
         "off_calendar_sample": [d.isoformat() for d in sorted(off_calendar)[:5]],
+        # Present, and deliberately not judged: their session has not closed
+        # its books yet. Named so the panel can say so rather than leaving a
+        # reader to wonder why the count moved.
+        "days_not_due": len(not_due),
+        "not_due_sample": [d.isoformat() for d in sorted(not_due)[:5]],
         "worst": [
             {"date": d.isoformat(), "rows": n, "neighbours": m}
             for d, n, m in sorted(holes, key=lambda t: t[1])[:5]

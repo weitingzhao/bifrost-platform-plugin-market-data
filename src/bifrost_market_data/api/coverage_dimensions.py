@@ -412,7 +412,14 @@ def _one(
         # fault in it must not erase three measurements that already succeeded.
         try:
             continuity = measure_continuity(
-                conn, c, expected_days=expected_days, statement_timeout=STATEMENT_TIMEOUT
+                conn,
+                c,
+                expected_days=expected_days,
+                # The one definition of "the session the tables should hold"
+                # (C-F1). A day after it is present but not due, and calling it
+                # thin turns every EOD window into a nightly false regression.
+                session=session,
+                statement_timeout=STATEMENT_TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("continuity failed for %s: %s", c.dataset, exc)
