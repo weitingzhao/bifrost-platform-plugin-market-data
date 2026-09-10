@@ -145,8 +145,13 @@ def missing_sessions(
     Nor a probe per day. Measured 2026-09-10, that traded the aggregate for 210
     round trips and the doctor's median barely moved — the cost had become
     latency, not work. The calendar goes to the server as a VALUES list so the
-    whole question is one statement and each day is an index probe that stops at
-    the first row.
+    whole question is one statement.
+
+    LATERAL with LIMIT 1 rather than NOT EXISTS. Against a forty-row outer side
+    the planner reads an anti-join as an invitation to hash the whole inner
+    relation, and on option_daily that ran past the 30s budget and the dataset
+    was skipped — the check silently missing the very table it was built for. A
+    lateral with a limit has to be evaluated per day and stops at the first row.
 
     Half-open bounds rather than a cast, so a timestamp column (``bar_time``) is
     compared on the index instead of through ``::date``.
@@ -158,10 +163,12 @@ def missing_sessions(
     sql = f"""
         SELECT v.d
         FROM (VALUES {values}) AS v(d)
-        WHERE NOT EXISTS (
-            SELECT 1 FROM {table}
+        LEFT JOIN LATERAL (
+            SELECT 1 AS hit FROM {table}
             WHERE {column} >= v.d AND {column} < v.d + 1
-        )
+            LIMIT 1
+        ) p ON true
+        WHERE p.hit IS NULL
         ORDER BY v.d
     """
     try:

@@ -266,7 +266,11 @@ def test_missing_sessions_asks_once_for_the_whole_calendar() -> None:
     assert len(probes) == 1, "the whole calendar in one statement"
     q = probes[0]
     assert "VALUES" in q and q.count("(%s)") == len(days) - 1
-    assert "NOT EXISTS" in q
+    # A lateral with a limit, not an anti-join: against a forty-row outer side
+    # the planner hashes the whole inner relation and option_daily blew the
+    # 30s budget, so the check skipped the table it exists for.
+    assert "LEFT JOIN LATERAL" in q and "LIMIT 1" in q
+    assert "NOT EXISTS" not in q
     assert "count(" not in q.lower(), "presence, not volume"
     # Half-open bounds, so a timestamp column rides the index instead of ::date.
     assert ">= v.d AND" in q and "< v.d + 1" in q
