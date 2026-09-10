@@ -355,3 +355,45 @@ def test_the_two_axes_are_independent() -> None:
     assert snap.tier == odaily.tier and snap.grain != odaily.grain
     sdaily = by["raw_market.stock_daily"]
     assert sdaily.grain == odaily.grain and sdaily.tier != odaily.tier
+
+
+def test_a_chain_snapshot_declares_a_boundary_not_a_target() -> None:
+    """90 sessions is what trim keeps, not a depth the chain can be made to hold.
+
+    A chain download only ever returns the current session — which is why
+    2026-08-11 is permanently absent from option_snapshot — so this depth
+    accrues forward and can never be bought. Read as `sessions/90` it measured
+    0 of 570 at target with a median of two days and rendered red, which is a
+    ramp being reported as a fault.
+    """
+    for name in ("raw_market.option_snapshot", "raw_market.option_open_interest"):
+        c = BY_DATASET[name]
+        assert c.depth.kind == "forward_only", name
+        assert c.depth.kind in mod.BOUNDARY_KINDS, name
+        assert "90" in c.depth.why, f"{name} must still say what trim keeps"
+
+
+def test_the_boundary_does_not_cost_the_accumulation_its_visibility() -> None:
+    """Depth stops measuring them; continuity does not, so a ramp stays legible.
+
+    That is what makes the trade acceptable: the per-symbol median goes, but
+    "did the chain land every session" is the question those two datasets are
+    actually judged on, and the fourth axis still answers it.
+    """
+    from bifrost_market_data.continuity import CONTINUITY_KINDS, has_continuity
+
+    assert "forward_only" in CONTINUITY_KINDS
+    for name in ("raw_market.option_snapshot", "raw_market.option_open_interest"):
+        assert has_continuity(BY_DATASET[name]), name
+
+
+def test_a_boundary_skips_the_per_symbol_scan() -> None:
+    """The scan exists to grade a target. With no target there is nothing to grade.
+
+    option_snapshot alone is 570 underlyings; the dimensions read paid for that
+    pass only to discard it.
+    """
+    for name in ("raw_market.option_snapshot", "raw_market.option_open_interest"):
+        c = BY_DATASET[name]
+        assert c.symbol_column and c.date_column
+        assert c.depth.kind in mod.BOUNDARY_KINDS, "so _one() skips _per_symbol_oldest"

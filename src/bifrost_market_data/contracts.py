@@ -316,7 +316,17 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     DatasetContract(
         "raw_market.option_snapshot",
         "universe",
-        DepthTarget("sessions", 90, "trim keeps 90 sessions of EOD chains"),
+        # A plan boundary, not a target being missed. A chain download only ever
+        # returns the current session — that is why 2026-08-11 is permanently
+        # absent — so this depth accrues forward and can never be bought. Read as
+        # `sessions/90` it measured 0 of 570 at target with a median of two days
+        # and painted red on a matrix built to lower the barrier to
+        # understanding, when what it was showing was a ramp.
+        DepthTarget(
+            "forward_only",
+            why="a chain download only returns the current session, so depth accrues "
+            "and cannot be backfilled; trim then keeps 90 of them",
+        ),
         2.0,
         ("eod-pipeline", "intraday-chain"),
         "underlying",
@@ -343,7 +353,13 @@ CONTRACTS: tuple[DatasetContract, ...] = (
     DatasetContract(
         "raw_market.option_open_interest",
         "universe",
-        DepthTarget("sessions", 90, "derived from the chain snapshot, same retention"),
+        # Derived from the same chain response as option_snapshot, so the same
+        # boundary applies for the same reason.
+        DepthTarget(
+            "forward_only",
+            why="derived from the chain snapshot, which only returns the current "
+            "session; same 90-session retention",
+        ),
         2.0,
         ("eod-pipeline",),
         "underlying",
