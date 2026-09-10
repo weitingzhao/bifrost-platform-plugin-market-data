@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from bifrost_market_data.verdicts import diff
 
@@ -81,7 +81,35 @@ def _latest_two(cur: Any) -> list[tuple[Any, ...]]:
     return _rows(cur)
 
 
-def record(conn: Any, verdicts: Mapping[str, Any]) -> dict[str, Any]:
+def _carry_forward(
+    current: Mapping[str, Any],
+    previous: Mapping[str, Any] | None,
+    unread: Iterable[str],
+) -> dict[str, Any]:
+    """Let the last good verdicts stand for a dataset this compute could not read.
+
+    A failed read is not a reading. `short_volume` timed out on the very first
+    recorded compute (2026-09-10) and its four axes came back `unknown` — not
+    because anything about the data moved, but because one statement hit its
+    budget. Recorded as-is, a dataset that times out now and then would write two
+    rows per flap and report "1 changed" on a page whose job is to make a real
+    regression stand out.
+
+    Only an outright read failure qualifies. `treasury_yield` answers `unknown`
+    on depth because it has no symbol column to spread across, which is a stable
+    fact about the dataset and is recorded as what it is.
+    """
+    merged = dict(current)
+    for name in unread:
+        prior = (previous or {}).get(name)
+        if isinstance(prior, Mapping):
+            merged[name] = dict(prior)
+    return merged
+
+
+def record(
+    conn: Any, verdicts: Mapping[str, Any], *, unread: Iterable[str] = ()
+) -> dict[str, Any]:
     """Store this compute's verdicts and report what moved since the last one.
 
     Returns the shape the payload carries, never raises: a page that cannot
@@ -94,15 +122,21 @@ def record(conn: Any, verdicts: Mapping[str, Any]) -> dict[str, Any]:
         "changed_at": None,
         "previous_at": None,
         "samples": 0,
+        "carried_forward": [],
         "changes": [],
     }
     if not verdicts:
         return empty
-    d = digest(verdicts)
     try:
         with conn.cursor() as cur:
             latest = _latest_two(cur)
             head = latest[0] if latest else None
+            # Merged against the head *before* digesting, so an unread dataset
+            # cannot produce a different fingerprint and therefore a new row.
+            verdicts = _carry_forward(
+                verdicts, _loads(head[4]) if head is not None else None, unread
+            )
+            d = digest(verdicts)
             if head is not None and str(head[3]) == d:
                 # Same verdicts as the newest row: nothing to add, but the fact
                 # that they were seen again is worth keeping — it is the
@@ -140,6 +174,9 @@ def record(conn: Any, verdicts: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "recorded": True,
+        # Named rather than silently folded in: the reader should know which
+        # rows on this page are last-known rather than just-measured.
+        "carried_forward": sorted(set(unread)),
         # When the *current* verdicts first appeared. On the very first sample
         # there is nothing before it, and the console must say "first reading"
         # rather than "no changes" — those are different claims.

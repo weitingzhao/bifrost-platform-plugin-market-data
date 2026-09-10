@@ -212,3 +212,45 @@ def test_history_survives_a_json_string_column() -> None:
     ch.record(conn, MAP_A)
     conn.table[0]["verdicts"] = json.dumps(MAP_A)
     assert ch.history(conn)[0]["verdicts"] == MAP_A
+
+
+MAP_ERR = {"raw_market.stock_daily": {"breadth": "unknown", "depth": "unknown"}}
+
+
+def test_a_dataset_that_could_not_be_read_keeps_its_last_verdicts() -> None:
+    """A failed read is not a reading.
+
+    short_volume timed out on the first recorded compute and came back unknown
+    on all four axes — nothing about the data had moved. Recorded as-is, a
+    dataset that times out now and then writes two rows per flap and reports
+    "1 changed" on a page whose job is to make a real regression stand out.
+    """
+    conn = _Conn()
+    ch.record(conn, MAP_A)
+    conn.now = T0 + timedelta(hours=1)
+    out = ch.record(conn, MAP_ERR, unread={"raw_market.stock_daily"})
+    assert len(conn.table) == 1  # no new row: the fingerprint did not move
+    assert out["changes"] == []
+    assert out["carried_forward"] == ["raw_market.stock_daily"]
+    assert ch.history(conn)[0]["verdicts"] == MAP_A
+
+
+def test_a_real_change_still_lands_while_another_dataset_is_unread() -> None:
+    conn = _Conn()
+    ch.record(conn, {**MAP_A, "b": {"breadth": "ok"}})
+    conn.now = T0 + timedelta(hours=1)
+    out = ch.record(
+        conn,
+        {**MAP_ERR, "b": {"breadth": "thin"}},
+        unread={"raw_market.stock_daily"},
+    )
+    assert len(conn.table) == 2
+    assert [(c["dataset"], c["from"], c["to"]) for c in out["changes"]] == [("b", "ok", "thin")]
+
+
+def test_the_first_sample_records_the_unknowns_it_has() -> None:
+    """There is no last-known verdict to stand in for them."""
+    conn = _Conn()
+    out = ch.record(conn, MAP_ERR, unread={"raw_market.stock_daily"})
+    assert ch.history(conn)[0]["verdicts"] == MAP_ERR
+    assert out["carried_forward"] == ["raw_market.stock_daily"]

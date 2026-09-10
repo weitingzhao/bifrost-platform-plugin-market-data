@@ -186,6 +186,21 @@ def verdict_map(datasets: Any) -> dict[str, dict[str, str]]:
     return out
 
 
+def unread_datasets(datasets: Any) -> set[str]:
+    """Datasets whose read failed outright, by name.
+
+    Distinguished from an axis that answers `unknown` for a reason of its own —
+    `treasury_yield` has no symbol column to spread depth across, and that is a
+    stable fact about the dataset, not a failure to look. Only the first kind
+    may be carried forward.
+    """
+    out: set[str] = set()
+    for row in datasets or []:
+        if isinstance(row, Mapping) and row.get("error") and row.get("dataset"):
+            out.add(str(row["dataset"]))
+    return out
+
+
 def direction(before: str, after: str) -> str:
     """`regressed` / `recovered` / `changed` — never a number.
 
@@ -241,6 +256,7 @@ __all__ = [
     "continuity_verdict",
     "verdicts_for",
     "verdict_map",
+    "unread_datasets",
     "direction",
     "diff",
 ]

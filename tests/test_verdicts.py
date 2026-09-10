@@ -175,3 +175,13 @@ def test_a_dataset_that_stopped_being_computed_is_reported_not_skipped() -> None
     """Silence is exactly what this record exists to break."""
     changes = v.diff({"gone": {"breadth": "ok"}}, {})
     assert [(c["dataset"], c["from"], c["to"]) for c in changes] == [("gone", "ok", None)]
+
+
+def test_only_an_outright_read_failure_counts_as_unread() -> None:
+    """treasury_yield answers unknown on depth because it has no symbol column
+    to spread across — a stable fact about the dataset, not a failure to look."""
+    rows = [
+        _row(dataset="a", error="statement timeout"),
+        _row(dataset="b", depth={"at_target": 0, "of": 0}),
+    ]
+    assert v.unread_datasets(rows) == {"a"}

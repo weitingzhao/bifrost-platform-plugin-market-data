@@ -439,6 +439,10 @@ Owner 读到「Whole market 5,317」问的是：这是什么？Stock？SEPA 的 
 
 三个必须分开的状态（合成一个计数就等于又没有记忆了）：**没有可比对的上一次**（第一次读数）、**比对过且没有变化**、**记录写失败**。矩阵头部的标签、Agent 简报的 `## Since last reading` 一节各自把三者分开说。
 
+**读失败不算一次读数。** 第一次真正落库的 compute 就撞上了这一条：`short_volume` 语句超时，四个轴全部返回 `unknown`——数据没动，只是有一条语句超了预算。照原样记下去，一个偶尔超时的数据集每翻一次就写两行，并且在一个专门用来让真回退显眼的页面上常年报「1 changed」。所以**读失败的数据集这一轮不贡献判定**，上一次的判定继续有效，`carried_forward` 里点名说它是「上次已知」而不是「刚测到」。只有**整条读失败**算数：`treasury_yield` 深度报 `unknown` 是因为它没有可摊开的 symbol 列，那是关于这个数据集的稳定事实，照实记。
+
+**一个发布链的坑，顺手补上（0.30.1）。** 0.30.0 把建表写进了 `apply_ddl`——而集群从来不跑 `apply_ddl`，schema Job 是 `init_schema.py --wave8-only`。Job 自己打印的 `ops_jobs tables: … coverage_sample …` 是那个**声明用的元组**，不是 CREATE 跑过的证据。表不存在，API 每次写都答 `relation does not exist`，而记录路径老实地报成 `recorded: false` 而不是一个看起来像「什么都没变」的空 diff。建表语句改成一个函数、两个调用方（fresh install 与 deploy），并加了棘轮：`DATA_OPS_TABLES` 里的每张表都必须能被 deploy 路径建出来，除非显式列进 `FRESH_INSTALL_ONLY`。
+
 保留 180 天，但**修剪永远保留最新一行**——安静了一个季度不该把「当前状态」的唯一描述删掉，随后每个数据集都报成第一次读数。留存约束的是历史，不是现在。
 
 ### 变化画在哪里

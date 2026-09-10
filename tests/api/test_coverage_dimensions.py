@@ -763,7 +763,9 @@ def test_a_tier_filtered_compute_is_never_recorded(
 ) -> None:
     """A subset would read as every other dataset having disappeared."""
     calls: list[Any] = []
-    monkeypatch.setattr(mod, "record_verdicts", lambda conn, m: calls.append(m) or {})
+    monkeypatch.setattr(
+        mod, "record_verdicts", lambda conn, m, **kw: calls.append(m) or {}
+    )
     mod.get_dimensions(tier="universe", refresh=True)
     assert calls == []
     mod.CACHE.clear()
@@ -777,7 +779,7 @@ def test_a_failed_record_does_not_sink_the_page(
 ) -> None:
     """And it says so, rather than showing an empty diff that reads as calm."""
 
-    def boom(conn: Any, m: Any) -> Any:
+    def boom(conn: Any, m: Any, **_kw: Any) -> Any:
         raise RuntimeError("no such table")
 
     monkeypatch.setattr(mod, "record_verdicts", boom)

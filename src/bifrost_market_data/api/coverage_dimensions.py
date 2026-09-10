@@ -24,7 +24,7 @@ from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.continuity import measure as measure_continuity
 from bifrost_market_data.coverage_history import record as record_verdicts
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
-from bifrost_market_data.verdicts import verdict_map, verdicts_for
+from bifrost_market_data.verdicts import unread_datasets, verdict_map, verdicts_for
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
@@ -649,7 +649,11 @@ def _remember(key: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     conn = None
     try:
         conn = connect_db(statement_timeout=STATEMENT_TIMEOUT)
-        return record_verdicts(conn, verdict_map(rows))
+        # A dataset whose read failed contributes nothing to the sample; its
+        # last good verdicts stand. Otherwise a dataset that times out now and
+        # then writes two rows per flap and reports "1 changed" on a page whose
+        # whole job is to make a real regression stand out.
+        return record_verdicts(conn, verdict_map(rows), unread=unread_datasets(rows))
     except Exception as exc:  # noqa: BLE001 — a page that cannot remember still renders
         logger.warning("coverage verdict record failed: %s", exc)
         return {"recorded": False, "why": str(exc)[:160], "changes": []}
