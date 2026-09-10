@@ -669,3 +669,74 @@ def test_ratios_breadth_is_not_a_coverage_question() -> None:
     assert "overlaps this tier rather than covering it" in c.breadth_unjudged
     # short_volume covers nearly all of the same tier, so it stays judged.
     assert BY_DATASET["raw_market.short_volume"].breadth_unjudged is None
+
+
+def test_a_forward_only_boundary_reports_what_it_has_accrued() -> None:
+    """A boundary says the depth cannot be bought, not that nothing is happening.
+
+    A chain snapshot climbs toward the ninety sessions trim keeps, and that
+    climb is the only thing this axis can report for it. Without it the square
+    was inert — and depth was inert for thirteen of nineteen datasets.
+    """
+    by = {c.dataset: c for c in CONTRACTS}
+    for name in ("option_snapshot", "option_open_interest"):
+        assert by[f"raw_market.{name}"].depth.accrues_to_sessions == 90, name
+    # The other two forward-only feeds accrue without a ceiling to climb to.
+    for name in ("ratios", "short_interest"):
+        assert by[f"raw_market.{name}"].depth.accrues_to_sessions is None, name
+    # A catalogue holds what is listed now; there is no climb to report.
+    for c in CONTRACTS:
+        if c.depth.kind in ("catalogue", "current_only"):
+            assert c.depth.accrues_to_sessions is None, c.dataset
+
+
+def test_the_accrual_rides_along_with_the_boundary() -> None:
+    c = BY_DATASET["raw_market.option_snapshot"]
+    out = mod._depth(c, [], date(2026, 9, 10), None, {"sessions_held": 36, "accrues_to": 90, "pct": 40.0})
+    assert out["measured"] is False, "still a boundary"
+    assert out["accrual"]["sessions_held"] == 36
+    assert out["accrual"]["pct"] == 40.0
+    assert out["target"]["accrues_to_sessions"] == 90
+
+
+def test_an_unreadable_accrual_leaves_the_boundary_standing() -> None:
+    """And, more to the point, leaves the other three axes standing.
+
+    0.20.0 put continuity inside the guard that protects breadth, depth and
+    freshness, so one fault blanked three good readings. This one has its own.
+    """
+    c = BY_DATASET["raw_market.option_snapshot"]
+    out = mod._depth(c, [], date(2026, 9, 10), None, None)
+    assert out["measured"] is False
+    assert "accrual" not in out
+
+
+def test_the_accrual_parser_never_escapes_its_guard() -> None:
+    """An unexpected row shape is as much a failed read as a timeout.
+
+    Written for per_day_counts in 0.20.1, and this reader repeated the mistake:
+    the int() sat outside the try, so a two-column row took the whole dataset's
+    entry down with it.
+    """
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def execute(self, sql, params=None):
+            return None
+
+        def fetchall(self):
+            return [("AAPL", date(2026, 1, 1))]  # wrong shape on purpose
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def rollback(self):
+            return None
+
+    assert mod._accrual(_Conn(), BY_DATASET["raw_market.option_snapshot"]) is None

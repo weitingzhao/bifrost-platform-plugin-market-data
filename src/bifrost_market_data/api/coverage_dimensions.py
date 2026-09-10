@@ -166,21 +166,101 @@ def _newest(conn: Any, c: DatasetContract) -> date | None:
 UNJUDGED_DEPTH_KINDS = frozenset({"since"})
 
 
+#: How many sessions a forward-only dataset has managed to accrue, and when it
+#: started. A boundary said "this cannot be bought" and then showed nothing at
+#: all, which is a quarter of the matrix rendered inert — but a chain snapshot
+#: climbing toward the ninety sessions trim keeps is doing something, and the
+#: number is worth reading.
+#:
+#: One index probe per distinct day, the same loose scan `enumerated_underlyings`
+#: uses. Bounded, because a table with years of daily rows would otherwise walk
+#: every one of them for a figure nobody needs to that precision.
+ACCRUAL_WALK_LIMIT = 2000
+
+_ACCRUAL_SQL = """
+/* accrual */
+WITH RECURSIVE walk AS (
+    (SELECT min({col}) AS t FROM {table})
+    UNION ALL
+    SELECT (SELECT min({col}) FROM {table} WHERE {col} >= ((walk.t)::date + 1))
+    FROM walk WHERE walk.t IS NOT NULL
+)
+SELECT count(*)::bigint, min(t)::date, max(t)::date
+FROM (SELECT t FROM walk WHERE t IS NOT NULL LIMIT {limit}) d
+"""
+
+
+def _rollback_quietly(conn: Any) -> None:
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _accrual(conn: Any, c: DatasetContract) -> dict[str, Any] | None:
+    """Sessions held and the first of them, or None when it cannot be read."""
+    if c.date_column is None:
+        return None
+    sql = _ACCRUAL_SQL.format(
+        col=c.date_column, table=c.dataset, limit=ACCRUAL_WALK_LIMIT
+    )
+    try:
+        rows = _rows(conn, sql)
+        # Parsing belongs inside the guard too — an unexpected row shape is as
+        # much a failed read as a timeout, and neither may escape. Written once
+        # for per_day_counts in 0.20.1 and worth writing again: left outside,
+        # this exact line took breadth, depth and freshness down with it.
+        if not rows or rows[0][0] is None:
+            return None
+        held = int(rows[0][0] or 0)
+        first, last = rows[0][1], rows[0][2]
+    except Exception as exc:  # noqa: BLE001 — the boundary still stands without it
+        logger.warning("accrual read failed for %s: %s", c.dataset, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    out: dict[str, Any] = {
+        "sessions_held": held,
+        "since": first.isoformat() if first else None,
+        "newest": last.isoformat() if last else None,
+        "capped": held >= ACCRUAL_WALK_LIMIT,
+    }
+    if c.depth.accrues_to_sessions:
+        out["accrues_to"] = c.depth.accrues_to_sessions
+        out["pct"] = round(100.0 * held / c.depth.accrues_to_sessions, 1)
+    return out
+
+
 def _depth(
     c: DatasetContract,
     per_symbol: list[tuple[str, date | None]],
     today: date,
     scope: set[str] | None = None,
+    accrual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Depth as the contract defines it, or the plan boundary that replaces it."""
-    target = {"kind": c.depth.kind, "value": c.depth.value, "why": c.depth.why}
+    target = {
+        "kind": c.depth.kind,
+        "value": c.depth.value,
+        "why": c.depth.why,
+        "accrues_to_sessions": c.depth.accrues_to_sessions,
+    }
     if c.depth.kind in BOUNDARY_KINDS or not per_symbol:
-        return {
+        out: dict[str, Any] = {
             "target": target,
             "measured": False,
             "at_target": None,
             "of": len(per_symbol) or None,
         }
+        # A boundary says the depth cannot be bought. It does not say nothing is
+        # happening: a chain snapshot is climbing toward the ninety sessions
+        # trim keeps, and that climb is the only thing this axis can report for
+        # it. Without this the square was inert.
+        if accrual is not None:
+            out["accrual"] = accrual
+        return out
 
     # The same population breadth divides by. Depth counted every symbol the
     # table had ever held — 20,703 for stock_daily against a breadth denominator
@@ -312,6 +392,18 @@ def _one(
             per_symbol, held_symbols, held_total, newest = [], set(), 0, None
             error = str(exc)[:160]
 
+        # In a guard of its own, and only for a forward-only depth. A catalogue
+        # holds what is listed now and a point-in-time snapshot holds today;
+        # neither climbs toward anything. Sharing the guard above is how 0.20.0
+        # let one axis blank the three that had already succeeded.
+        accrual = None
+        if c.depth.kind == "forward_only":
+            try:
+                accrual = _accrual(conn, c)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("accrual failed for %s: %s", c.dataset, exc)
+                _rollback_quietly(conn)
+
         # The fourth axis, in a guard of its own. Breadth, depth and freshness
         # all read healthy over seven blank days in stock_daily and only this
         # one looks at the middle — but it is the newest of the four, and a
@@ -374,7 +466,7 @@ def _one(
                 else None
             ),
         },
-        "depth": _depth(c, per_symbol, today, scope),
+        "depth": _depth(c, per_symbol, today, scope, accrual),
         "freshness": _freshness(
             c, newest, today, interval_days=continuity.get("median_interval_days")
         ),

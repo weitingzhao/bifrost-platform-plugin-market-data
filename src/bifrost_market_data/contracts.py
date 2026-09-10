@@ -53,6 +53,11 @@ class DepthTarget:
     #: rolling_days → days; sessions → sessions; since → ISO date. Unused otherwise.
     value: int | str | None = None
     why: str = ""
+    #: Where a forward-only depth is climbing to, when anything caps it. A chain
+    #: snapshot cannot be backfilled, so its depth is a boundary — but it is
+    #: still accruing toward the ninety sessions trim keeps, and "36 of 90" is
+    #: worth more than a blank square. None means it accrues without a ceiling.
+    accrues_to_sessions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +389,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
             "forward_only",
             why="a chain download only returns the current session, so depth accrues "
             "and cannot be backfilled; trim then keeps 90 of them",
+            accrues_to_sessions=90,
         ),
         2.0,
         ("eod-pipeline", "intraday-chain"),
@@ -419,6 +425,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
             "forward_only",
             why="derived from the chain snapshot, which only returns the current "
             "session; same 90-session retention",
+            accrues_to_sessions=90,
         ),
         2.0,
         ("eod-pipeline",),
