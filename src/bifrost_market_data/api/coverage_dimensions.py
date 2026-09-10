@@ -257,8 +257,12 @@ def _one(
     return {
         "dataset": c.dataset,
         "tier": c.tier,
+        # Tier says which instruments, grain says what one row is. Two axes, and
+        # the console arranges the estate by both.
+        "grain": c.grain,
         "slots": list(c.slots),
         "breadth_window": c.breadth_window,
+        "backfill_slot": c.backfill_slot,
         "error": error,
         "breadth": {
             "held": in_scope,

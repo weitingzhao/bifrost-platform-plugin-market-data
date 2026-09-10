@@ -711,14 +711,47 @@ def query_stock_day_quality_detail(
     return query_bar_quality_detail(conn, symbol=symbol, days=days)
 
 
-@router.get("/quality-score")
-def coverage_quality_score() -> dict[str, Any]:
-    """Run P7 data-quality checks (stock daily / option snapshot / OI / freshness)."""
-    conn = require_db()
+#: The verdict every reader wants first — 4/4 PASS or not — cost 12 seconds
+#: measured 2026-09-10, because its checks read the session across stock_daily,
+#: the chains and open interest. That put the page's *macro* answer behind the
+#: same wait as its detail, so the reader paid for depth before asking for it.
+#: Served from the last pass while the next runs, like inventory and dimensions.
+QUALITY_CACHE = BackgroundCache("quality-score")
+QUALITY_STATEMENT_TIMEOUT = "600s"
+
+#: Same shape, no verdict: a panel can tell "still checking" from "checked, and
+#: it failed". Never PASS — an empty answer must not read as a healthy one.
+_QUALITY_EMPTY: dict[str, Any] = {
+    "ok": True,
+    "summary": None,
+    "checks": [],
+    "watchlist_source_count": None,
+}
+
+
+def _quality_payload() -> dict[str, Any]:
+    conn = connect_db(statement_timeout=QUALITY_STATEMENT_TIMEOUT)
     try:
         return run_all_checks(conn)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — a close that fails must not lose the answer
+            pass
+
+
+@router.get("/quality-score")
+def coverage_quality_score(
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Run P7 data-quality checks (stock daily / option snapshot / OI / freshness)."""
+    if not refresh:
+        return QUALITY_CACHE.read("quality-score", _quality_payload, empty=_QUALITY_EMPTY)
+    try:
+        return QUALITY_CACHE.compute_now("quality-score", _quality_payload)
+    except Exception as exc:
+        logger.exception("coverage quality score failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 #: The inventory's widest read is one full pass over 13.6M ``stock_daily`` rows

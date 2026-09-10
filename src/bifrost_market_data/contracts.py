@@ -27,6 +27,9 @@ Tier = Literal["whole-market", "universe", "benchmark-only", "global"]
 #: daily). Getting this wrong reads as 389% coverage: five years of symbols,
 #: including delisted ones, over a denominator of today's active tickers.
 BreadthWindow = Literal["session", "ever"]
+
+#: What one row of a dataset represents. See DatasetContract.grain.
+Grain = Literal["catalogue", "daily", "snapshot", "minute", "filing"]
 DepthKind = Literal[
     "rolling_days", "since", "sessions", "current_only", "forward_only", "catalogue"
 ]
@@ -79,6 +82,18 @@ class DatasetContract:
     #: keeping their own copies of the mapping.
     freshness_dimension: str | None = None
 
+    #: What one row *is*. Declared, not derived: the console groups the contract
+    #: table by tier and grain so a reader can see the whole estate at a glance,
+    #: and a hand-kept mapping in the console would drift from this file the
+    #: first time a dataset is added.
+    #:
+    #: ``catalogue``  a list of things that exist; no observation date
+    #: ``daily``      one row per instrument per session
+    #: ``snapshot``   the state of something at one instant
+    #: ``minute``     intraday bars
+    #: ``filing``     published per report or settlement, not per session
+    grain: Grain = "daily"
+
     #: The slot that can refill one *named* past session, or None when a missed
     #: session is gone for good. This is the difference between a hole the
     #: doctor can prescribe for and one it can only report.
@@ -130,6 +145,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # is blank for all 5,317 names, and seven of them went unnoticed for
         # ninety days before the fourth axis existed.
         backfill_slot="universe-daily",
+        grain="daily",
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -140,6 +156,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "session_date",
         freshness_dimension="stock_snapshot",
+        grain="snapshot",
     ),
     DatasetContract(
         "raw_market.stock_movers",
@@ -150,6 +167,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "session_date",
         freshness_dimension="stock_movers",
+        grain="snapshot",
     ),
     DatasetContract(
         "raw_market.ticker",
@@ -161,6 +179,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         None,
         breadth_window="ever",
         freshness_dimension="ticker_sync",
+        grain="catalogue",
     ),
     DatasetContract(
         "raw_market.corporate_action",
@@ -176,6 +195,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "ex_date",
         breadth_window="ever",
         freshness_dimension="dividends",
+        grain="catalogue",
     ),
     DatasetContract(
         "raw_market.income_statement",
@@ -187,6 +207,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "period_date",
         breadth_window="ever",
         freshness_dimension="financials",
+        grain="filing",
     ),
     DatasetContract(
         "raw_market.balance_sheet",
@@ -198,6 +219,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "period_date",
         breadth_window="ever",
         freshness_dimension="financials",
+        grain="filing",
     ),
     DatasetContract(
         "raw_market.cash_flow",
@@ -209,6 +231,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "period_date",
         breadth_window="ever",
         freshness_dimension="financials",
+        grain="filing",
     ),
     DatasetContract(
         "raw_market.ratios",
@@ -222,6 +245,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         freshness_dimension="ratios",
+        grain="daily",
     ),
     DatasetContract(
         "raw_market.short_volume",
@@ -245,6 +269,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # Two wasted jobs per repaired session, knowingly: holes are rare, and
         # the alternative is a second prescription vocabulary.
         backfill_slot="fundamentals-market",
+        grain="daily",
     ),
     DatasetContract(
         "raw_market.short_interest",
@@ -261,6 +286,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # 15 days over the last 120, against 1 day for ratios and short_volume.
         cadence="settlement",
         freshness_dimension="short_interest",
+        grain="filing",
     ),
     # ── global: one series, no instruments ──
     DatasetContract(
@@ -272,6 +298,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         None,
         "yield_date",
         freshness_dimension="treasury_yields",
+        grain="daily",
     ),
     DatasetContract(
         "raw_market.us_market_holiday",
@@ -283,6 +310,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         None,
         breadth_window="ever",
         freshness_dimension="calendar",
+        grain="catalogue",
     ),
     # ── universe: per-symbol calls, so follow the Research rule ──
     DatasetContract(
@@ -295,6 +323,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "snapshot_ts",
         low_cardinality=True,
         freshness_dimension="option_snapshot",
+        grain="snapshot",
     ),
     DatasetContract(
         "raw_market.option_contract",
@@ -309,6 +338,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         low_cardinality=True,
         breadth_window="ever",
         freshness_dimension="option_contract",
+        grain="catalogue",
     ),
     DatasetContract(
         "raw_market.option_open_interest",
@@ -319,6 +349,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "underlying",
         "trade_date",
         freshness_dimension="option_open_interest",
+        grain="snapshot",
     ),
     DatasetContract(
         "raw_market.option_daily",
@@ -335,6 +366,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         low_cardinality=True,
         freshness_dimension="option_daily",
         backfill_slot="option-bars",
+        grain="daily",
     ),
     # ── benchmark-only: too big to be worth more than a few names ──
     DatasetContract(
@@ -348,6 +380,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         low_cardinality=True,
         freshness_dimension="stock_minute",
         backfill_slot="minute-bars",
+        grain="minute",
     ),
     DatasetContract(
         "raw_market.option_minute",
@@ -360,6 +393,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         low_cardinality=True,
         freshness_dimension="option_minute",
         backfill_slot="minute-bars",
+        grain="minute",
     ),
 )
 

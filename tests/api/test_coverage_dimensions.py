@@ -322,3 +322,36 @@ def test_freshness_without_an_observed_interval_does_not_guess() -> None:
     si = BY_DATASET["raw_market.short_interest"]
     out = mod._freshness(si, date(2026, 8, 14), date(2026, 12, 1), interval_days=None)
     assert out["overdue"] is None
+
+
+def test_every_contract_declares_a_grain() -> None:
+    """Tier says which instruments; grain says what one row is.
+
+    The console arranges the estate by both, and a hand-kept mapping there would
+    drift from this file the first time a dataset is added.
+    """
+    allowed = {"catalogue", "daily", "snapshot", "minute", "filing"}
+    for c in CONTRACTS:
+        assert c.grain in allowed, f"{c.dataset} has grain {c.grain!r}"
+
+
+def test_grain_and_depth_agree_about_catalogues() -> None:
+    """A catalogue has no observation date, and nothing else claims to be one."""
+    for c in CONTRACTS:
+        if c.depth.kind == "catalogue":
+            assert c.grain == "catalogue", c.dataset
+        if c.grain == "minute":
+            assert c.date_column == "bar_time", c.dataset
+
+
+def test_the_two_axes_are_independent() -> None:
+    """Neither is derivable from the other — which is why both are declared.
+
+    option_snapshot and option_daily share a tier and differ in grain;
+    stock_daily and option_daily share a grain and differ in tier.
+    """
+    by = {c.dataset: c for c in CONTRACTS}
+    snap, odaily = by["raw_market.option_snapshot"], by["raw_market.option_daily"]
+    assert snap.tier == odaily.tier and snap.grain != odaily.grain
+    sdaily = by["raw_market.stock_daily"]
+    assert sdaily.grain == odaily.grain and sdaily.tier != odaily.tier

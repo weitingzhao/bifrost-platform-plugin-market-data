@@ -13,6 +13,11 @@ class _DummyConn:
 
 
 def test_coverage_quality_score(monkeypatch) -> None:
+    """The verdict is served from the last pass, not computed inside the request.
+
+    Measured 2026-09-10 it cost 12 seconds, which put the page's *macro* answer
+    behind the same wait as its detail.
+    """
     from bifrost_market_data.api import coverage as mod
 
     sample = {
@@ -26,15 +31,33 @@ def test_coverage_quality_score(monkeypatch) -> None:
         ],
     }
     monkeypatch.setattr(mod, "run_all_checks", lambda *_a, **_k: sample)
-    monkeypatch.setattr(mod, "require_db", lambda: _DummyConn())
+    monkeypatch.setattr(mod, "connect_db", lambda **_k: _DummyConn())
+    mod.QUALITY_CACHE.clear()
     client = TestClient(create_app())
-    resp = client.get("/market/coverage/quality-score")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["ok"] is True
+
+    data = client.get("/market/coverage/quality-score?refresh=true").json()
     assert data["summary"] == "PASS"
     assert len(data["checks"]) == 4
     assert data["checks"][0]["check"] == "stock_daily_coverage"
+
+    cached = client.get("/market/coverage/quality-score").json()
+    assert cached["summary"] == "PASS", "the next reader is served the last pass"
+
+
+def test_a_quality_score_still_computing_never_reads_as_pass(monkeypatch) -> None:
+    """An empty answer is "still checking", not a healthy one.
+
+    A panel must be able to tell the two apart; a null summary rendered as PASS
+    would be the same class of lie as the skipped-jobs-count-as-success bug the
+    fourth axis was built after.
+    """
+    from bifrost_market_data.api import coverage as mod
+
+    mod.QUALITY_CACHE.clear()
+    monkeypatch.setattr(mod, "run_all_checks", lambda *_a, **_k: {"ok": True, "summary": "PASS"})
+    monkeypatch.setattr(mod, "connect_db", lambda **_k: _DummyConn())
+    assert mod._QUALITY_EMPTY["summary"] is None
+    assert mod._QUALITY_EMPTY["checks"] == []
 
 
 def test_coverage_db_summary(monkeypatch) -> None:
