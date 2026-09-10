@@ -547,3 +547,86 @@ def test_every_refill_that_names_a_target_actually_names_one() -> None:
             assert c.refill.target, c.dataset
         if c.refill.how == "unrecoverable":
             assert c.refill.why, f"{c.dataset} must say why it cannot be refilled"
+
+
+def test_a_filing_is_not_judged_by_a_clock() -> None:
+    """A company files when it files.
+
+    period_date follows each company's own fiscal calendar, so the dataset's
+    newest row only says who filed most recently. Against a 48-hour deadline
+    the three statements read 39 days late on 2026-09-10 with nothing wrong —
+    the same cadence mistake fixed for short_interest, which missed them.
+    """
+    for name in ("income_statement", "balance_sheet", "cash_flow"):
+        c = BY_DATASET[f"raw_market.{name}"]
+        assert c.cadence == "filing", name
+        out = mod._freshness(c, date(2026, 8, 2), date(2026, 9, 10))
+        assert out["judged"] is False, name
+        assert out["overdue"] is None, name
+        assert "not a clock" in out["why"]
+
+    # A session feed is still judged, and still by its own deadline.
+    assert mod._freshness(BY_DATASET["raw_market.stock_daily"], date(2026, 9, 9), date(2026, 9, 10))[
+        "judged"
+    ] is True
+
+
+def test_depth_is_measured_over_the_population_breadth_divides_by() -> None:
+    """One dataset, one population. stock_daily's depth counted every symbol the
+    table had ever held — 20,703 — against a breadth denominator of 5,317."""
+    c = BY_DATASET["raw_market.stock_daily"]
+    today = date(2026, 9, 10)
+    per_symbol = [
+        ("AAA", date(2019, 1, 1)),   # in scope, deep
+        ("BBB", date(2026, 8, 1)),   # in scope, shallow
+        ("GONE", date(2019, 1, 1)),  # delisted years ago, never in scope
+    ]
+    wide = mod._depth(c, per_symbol, today)
+    narrow = mod._depth(c, per_symbol, today, {"AAA", "BBB"})
+    assert wide["of"] == 3
+    assert narrow["of"] == 2, "the delisted tail is not part of the question"
+    assert narrow["at_target"] == 1
+
+
+def test_an_absolute_start_reports_a_spread_not_a_pass_count() -> None:
+    """A company that listed in 2020 can never reach 2009.
+
+    Every one of income_statement's 4,467 symbols "failed" that target while the
+    median held 9.7 years, which is a count of nothing rendered as a fault.
+    """
+    c = BY_DATASET["raw_market.income_statement"]
+    assert c.depth.kind == "since"
+    out = mod._depth(c, [("AAA", date(2016, 1, 1)), ("BBB", date(2020, 1, 1))], date(2026, 9, 10))
+    assert out["measured"] is True
+    assert out["judged"] is False
+    assert out["at_target"] is None
+    assert out["median_days"] > 0, "the spread is still the answer"
+
+
+def test_breadth_is_not_asked_where_it_is_the_wrong_question() -> None:
+    """A top-N list is not partial coverage of the market."""
+    movers = BY_DATASET["raw_market.stock_movers"]
+    corp = BY_DATASET["raw_market.corporate_action"]
+    assert movers.breadth_unjudged and "top-N" in movers.breadth_unjudged
+    assert corp.breadth_unjudged and "events that happened" in corp.breadth_unjudged
+    # Everything else still answers it.
+    assert BY_DATASET["raw_market.stock_daily"].breadth_unjudged is None
+
+
+def test_the_financials_divide_by_common_stock_not_by_every_listing() -> None:
+    """An ETF or a trust files nothing; counting them made 83% look like a gap.
+
+    fundamentals-rotate already walks exactly this list.
+    """
+    for name in ("income_statement", "balance_sheet", "cash_flow", "ratios"):
+        assert BY_DATASET[f"raw_market.{name}"].tier == "common-stock", name
+    # Short volume and interest do exist for ETFs, so they stay whole-market.
+    assert BY_DATASET["raw_market.short_volume"].tier == "whole-market"
+    assert BY_DATASET["raw_market.short_interest"].tier == "whole-market"
+
+
+def test_a_rotation_is_not_measured_by_one_session() -> None:
+    """minute-bars reaches about three underlyings a day and all of them over ten."""
+    assert BY_DATASET["raw_market.option_minute"].breadth_window == "ever"
+    # stock_minute enqueues every symbol every day, so the session is right there.
+    assert BY_DATASET["raw_market.stock_minute"].breadth_window == "session"

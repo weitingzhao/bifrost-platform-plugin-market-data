@@ -49,6 +49,29 @@ def universe_symbols(conn: Any, *, statement_timeout: str = "60s") -> set[str]:
     )
 
 
+def common_stock_scope(conn: Any, *, statement_timeout: str = "60s") -> set[str]:
+    """Active USD common stock — the population the financials slots address.
+
+    Judged against every active ticker, the three statements read ~83% held and
+    rendered red, but an ETF or a trust files nothing: the shortfall was the
+    denominator counting instruments the dataset was never going to hold. The
+    ``fundamentals-rotate`` slot already walks exactly this list.
+    """
+    return _symbol_set(
+        conn,
+        """
+        SELECT symbol FROM raw_market.ticker
+        WHERE instrument_type = 'CS'
+          AND market = 'stocks'
+          AND COALESCE(active, true) = true
+          AND lower(COALESCE(currency, 'usd')) = 'usd'
+          AND symbol IS NOT NULL AND trim(symbol) <> ''
+        """,
+        statement_timeout=statement_timeout,
+        what="common stock universe",
+    )
+
+
 def benchmark_scope(
     conn: Any,
     benchmarks: list[str],

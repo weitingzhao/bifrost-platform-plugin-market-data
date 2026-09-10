@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Tier = Literal["whole-market", "universe", "benchmark-only", "global"]
+Tier = Literal["whole-market", "common-stock", "universe", "benchmark-only", "global"]
 #: "session" — instruments present in the newest observation, which is what a
 #: daily feed should cover. "ever" — instruments ever seen, which is the honest
 #: numerator for a dataset that accumulates (a company files quarterly, not
@@ -30,6 +30,9 @@ BreadthWindow = Literal["session", "ever"]
 
 #: What one row of a dataset represents. See DatasetContract.grain.
 Grain = Literal["catalogue", "daily", "snapshot", "minute", "filing"]
+
+#: How often a row set is published. See DatasetContract.cadence.
+Cadence = Literal["session", "settlement", "filing"]
 DepthKind = Literal[
     "rolling_days", "since", "sessions", "current_only", "forward_only", "catalogue"
 ]
@@ -99,7 +102,20 @@ class DatasetContract:
     #: settles twice a month, so measured against sessions it read as 56 missing
     #: days on the first live read of the continuity axis. A cadence is declared,
     #: never inferred from the data it is meant to judge.
-    cadence: str = "session"
+    #: ``filing`` is the third: a company files when it files, and there is no
+    #: interval to measure either — period_date follows each company's own
+    #: fiscal calendar, so the dataset's newest row only tells you who filed
+    #: most recently. Judged against a 48-hour deadline it read 39 days late
+    #: while nothing was wrong. Whether the collector is still running is the
+    #: ingest_freshness question, not this one.
+    cadence: Cadence = "session"
+
+    #: Why breadth against this tier's scope is not a fair question. Absence
+    #: means it is. A top-N list is not partial coverage of the market, and a
+    #: catalogue of events that happened is not partial coverage of the
+    #: instruments they could have happened to — both rendered red at 0.4% and
+    #: 14.2% on 2026-09-10 with nothing wrong.
+    breadth_unjudged: str | None = None
 
     #: The ops_jobs.ingest_freshness dimension that evidences this dataset,
     #: declared here so the doctor's staleness table and the quality gate stop
@@ -184,6 +200,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="stock_movers",
         grain="snapshot",
         refill=Refill("unrecoverable", why="a top-N list of the session that is running; not servable for a past date"),
+        breadth_unjudged="a top-N list of the session's biggest moves; holding 22 of them is the whole list, not 0.4% of the market",
     ),
     DatasetContract(
         "raw_market.ticker",
@@ -214,10 +231,11 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="dividends",
         grain="catalogue",
         refill=Refill("lookback", "corporate", lookback_days=7, why="the slot re-pulls a 7-day window on every run"),
+        breadth_unjudged="events that happened, not instruments to cover; most tickers have no split or dividend in the window",
     ),
     DatasetContract(
         "raw_market.income_statement",
-        "whole-market",
+        "common-stock",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -227,10 +245,11 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="financials",
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
+        cadence="filing",
     ),
     DatasetContract(
         "raw_market.balance_sheet",
-        "whole-market",
+        "common-stock",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -240,10 +259,11 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="financials",
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
+        cadence="filing",
     ),
     DatasetContract(
         "raw_market.cash_flow",
-        "whole-market",
+        "common-stock",
         DepthTarget("since", FINANCIALS_SINCE, "Financials & Ratios: statements from 2009"),
         48.0,
         ("fundamentals-rotate",),
@@ -253,10 +273,11 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="financials",
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
+        cadence="filing",
     ),
     DatasetContract(
         "raw_market.ratios",
-        "whole-market",
+        "common-stock",
         DepthTarget(
             "forward_only",
             why="the vendor ignores ?date and returns the latest; history only accumulates",
@@ -438,6 +459,13 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="option_minute",
         grain="minute",
         refill=Refill("slot", "minute-bars", why="a rotation, so one run fills a bounded batch rather than the whole benchmark set"),
+        # A rotation, so "this session" is the wrong window. minute-bars picks a
+        # bounded batch of 80 near-spot contracts out of the watchlist's chains,
+        # which reaches about three underlyings a day and the whole set over
+        # roughly ten. Measured per session it read 3 of 26 and rendered red for
+        # working exactly as designed; whether the rotation is turning is the
+        # continuity axis's question, not breadth's.
+        breadth_window="ever",
     ),
 )
 

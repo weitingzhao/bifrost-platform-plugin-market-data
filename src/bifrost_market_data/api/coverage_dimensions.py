@@ -26,7 +26,12 @@ from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetCon
 from bifrost_market_data.scheduler.daily import load_research_universe
 from bifrost_market_data.scheduler.daily import resolve_scheduler_cfg
 from bifrost_market_data.api.slow_cache import DEFAULT_TTL_SEC, BackgroundCache
-from bifrost_market_data.scopes import active_tickers, benchmark_scope, universe_symbols
+from bifrost_market_data.scopes import (
+    active_tickers,
+    benchmark_scope,
+    common_stock_scope,
+    universe_symbols,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market/coverage", tags=["market-coverage"])
@@ -152,8 +157,20 @@ def _newest(conn: Any, c: DatasetContract) -> date | None:
     return rows[0][0] if rows else None
 
 
+#: Depth targets that describe a distribution rather than a bar to clear. An
+#: absolute start cannot be judged per symbol without knowing when each
+#: instrument began: a company that listed in 2020 can never reach 2009, and
+#: measured 2026-09-10 every one of the 4,467 symbols in income_statement
+#: "failed" a 2009 target while the median held 9.7 years. The spread is
+#: reported; the pass count is not, because it would be a count of nothing.
+UNJUDGED_DEPTH_KINDS = frozenset({"since"})
+
+
 def _depth(
-    c: DatasetContract, per_symbol: list[tuple[str, date | None]], today: date
+    c: DatasetContract,
+    per_symbol: list[tuple[str, date | None]],
+    today: date,
+    scope: set[str] | None = None,
 ) -> dict[str, Any]:
     """Depth as the contract defines it, or the plan boundary that replaces it."""
     target = {"kind": c.depth.kind, "value": c.depth.value, "why": c.depth.why}
@@ -164,6 +181,16 @@ def _depth(
             "at_target": None,
             "of": len(per_symbol) or None,
         }
+
+    # The same population breadth divides by. Depth counted every symbol the
+    # table had ever held — 20,703 for stock_daily against a breadth denominator
+    # of 5,317 — so one dataset was graded on two different populations, which
+    # is the mismatch C-B1 exists to end. Most of that tail is delisted or never
+    # in scope, and a five-year window ending today was never asked of it.
+    if scope and c.symbol_column:
+        in_scope = [(sym, d) for sym, d in per_symbol if sym in scope]
+        if in_scope:
+            per_symbol = in_scope
 
     spans = [(s, (today - d).days) for s, d in per_symbol if d is not None]
     if not spans:
@@ -181,9 +208,26 @@ def _depth(
 
     days = sorted(d for _s, d in spans)
     shallowest = min(spans, key=lambda kv: kv[1])
+    if c.depth.kind in UNJUDGED_DEPTH_KINDS:
+        return {
+            "target": target,
+            "measured": True,
+            "judged": False,
+            "why": (
+                "an absolute start cannot be judged per symbol without knowing when "
+                "each instrument began; the spread is the answer, not a pass count"
+            ),
+            "need_days": need,
+            "at_target": None,
+            "of": len(days),
+            "median_days": int(statistics.median(days)),
+            "shallowest": {"symbol": shallowest[0], "days": shallowest[1]},
+            "oldest_days": days[-1],
+        }
     return {
         "target": target,
         "measured": True,
+        "judged": True,
         "need_days": need,
         "at_target": sum(1 for d in days if d >= need),
         "of": len(days),
@@ -312,6 +356,10 @@ def _one(
         },
         "error": error,
         "breadth": {
+            # False where dividing by the tier's scope is the wrong question,
+            # not where the read failed.
+            "judged": c.breadth_unjudged is None,
+            "why": c.breadth_unjudged,
             "held": in_scope,
             "held_total": held_total,
             "outside_scope": max(0, held_total - in_scope),
@@ -326,7 +374,7 @@ def _one(
                 else None
             ),
         },
-        "depth": _depth(c, per_symbol, today),
+        "depth": _depth(c, per_symbol, today, scope),
         "freshness": _freshness(
             c, newest, today, interval_days=continuity.get("median_interval_days")
         ),
@@ -369,10 +417,25 @@ def _freshness(
         "cadence": c.cadence,
         "expected_interval_days": None,
         "overdue": None,
+        # False where a clock is the wrong instrument, not where it failed.
+        "judged": True,
     }
     if c.cadence == "session":
         # A session feed keeps its hour deadline; the doctor owns that verdict
         # and this axis must not answer it differently.
+        return out
+    if c.cadence == "filing":
+        # There is nothing here for a clock to judge. A company files when it
+        # files, and period_date follows each company's own fiscal calendar, so
+        # the dataset's newest row only says who filed most recently — measured
+        # 2026-09-10 the three statements read 39 days behind a 48-hour deadline
+        # with nothing wrong. Whether the collector still runs is the
+        # ingest_freshness question, and it is asked elsewhere.
+        out["judged"] = False
+        out["why"] = (
+            "a filing arrives when the company files; the newest period_date is "
+            "not a clock. Watch the slot's own liveness instead."
+        )
         return out
     out["expected_interval_days"] = interval_days
     if behind is not None and interval_days:
@@ -388,6 +451,7 @@ def _denominators(conn: Any) -> dict[str, Any]:
     over today's active tickers reads as 389% coverage.
     """
     active = active_tickers(conn, statement_timeout=STATEMENT_TIMEOUT)
+    common = common_stock_scope(conn, statement_timeout=STATEMENT_TIMEOUT)
     universe_syms = universe_symbols(conn, statement_timeout=STATEMENT_TIMEOUT)
     by_tier: dict[str, int] = {}
     for row in load_research_universe(conn) or []:
@@ -401,11 +465,15 @@ def _denominators(conn: Any) -> dict[str, Any]:
     )
     return {
         "whole-market": len(active),
+        # The financials slots address common stock, not every listed
+        # instrument: an ETF or a trust files nothing.
+        "common-stock": len(common),
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
         "benchmark-only": len(bench),
         "global": 1,
         "scopes": {
             "whole-market": active,
+            "common-stock": common,
             "universe": universe_syms,
             "benchmark-only": bench,
             "global": set(),
