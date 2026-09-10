@@ -52,13 +52,24 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         # In ops_jobs, which the plugin's role owns — so a new table of its own
         # can be created on this path rather than waiting for a superuser run.
         create_coverage_sample(cur)
-        # A data repair rather than a schema change, but it belongs on the same
-        # path: it needs raw_market write access, it is idempotent, and 0.21.0
-        # is what created the rows it fixes.
-        repaired = repair_adjusted_underlyings(cur)
+    # The schema is what the deploy needs, so it lands first and on its own. The
+    # data repair below commits per root and may run out of budget; committing
+    # here means it cannot take the schema down with it.
+    conn.commit()
+
+    # A data repair rather than a schema change, riding the same path because it
+    # needs raw_market write access. Given the connection, not a cursor: it
+    # commits each root as it goes, so a slow family costs that family and not
+    # the run, and what it does not finish carries to the next deploy. It must
+    # never fail the migration — measured 2026-09-10, a timeout in here is what
+    # made a successful deploy print "DDL failed" as its last line.
+    try:
+        repaired = repair_adjusted_underlyings(conn)
+    except Exception as exc:  # noqa: BLE001 — a data fix must not fail a schema deploy
+        print(f"adjusted-root repair skipped: {exc}")
+    else:
         if any(repaired.values()):
             print(f"adjusted roots repaired: {repaired}")
-    conn.commit()
 
 
 def apply_wave9_migrations(conn: _Connection) -> dict[str, Any]:

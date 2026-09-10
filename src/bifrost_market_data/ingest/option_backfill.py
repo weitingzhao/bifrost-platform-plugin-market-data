@@ -137,7 +137,23 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         specs.append(
             (
                 "option_daily",
-                {"option_ticker": ticker, "from": win_from.isoformat(), "to": win_to.isoformat()},
+                {
+                    "option_ticker": ticker,
+                    # The catalogue's underlying, not the ticker's root. Without
+                    # it the handler falls back to parsing, and an adjusted
+                    # contract reads O:BDX1… and lands under "BDX1" as a symbol
+                    # of its own. Measured 2026-09-10: 2,964,147 option_daily
+                    # rows filed that way, ~150k a month through the P4 window
+                    # and 425 in September — a backlog this path created and
+                    # would have created again on the next backfill.
+                    #
+                    # option-bars has passed it since 0.21.x; this planner was
+                    # missed because `storage` was already in scope, already
+                    # correct, and simply never put in the payload.
+                    "underlying": storage,
+                    "from": win_from.isoformat(),
+                    "to": win_to.isoformat(),
+                },
                 priority,
                 3,
             )

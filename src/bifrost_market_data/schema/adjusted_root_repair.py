@@ -15,6 +15,14 @@ underlying, counted 570, and a downstream ``WHERE underlying = 'BDX'`` would
 miss the adjusted series entirely.
 
 Idempotent by construction: once rewritten, no row matches again.
+
+Two things this file got wrong the first time, both recorded because the second
+hid the first. It ran every rewrite inside the migration's one transaction, so a
+timeout rolled the whole run back — and the run after that reported "nothing
+written", which reads exactly like "nothing left to do". The backlog was
+2,964,147 rows the whole time. And the enqueuer that created them,
+``option_backfill``, was never passing the catalogue's underlying at all; fixing
+the rewrite without fixing that would have been a treadmill.
 """
 
 from __future__ import annotations
@@ -77,43 +85,88 @@ def mismatched_roots(cur: _Cursor) -> list[tuple[str, str]]:
     return sorted(set(pairs))
 
 
+#: How long one deploy may spend chipping at the backlog. The repair rides the
+#: schema-migration Job, and a deploy that waits ten minutes on a data fix is a
+#: deploy nobody runs.
+DEFAULT_BUDGET_SEC = 90.0
+
+
 def repair_adjusted_underlyings(
-    cur: _Cursor,
+    conn: Any,
     *,
     tables: Sequence[str] = BAR_TABLES,
     statement_timeout: str = "120s",
+    budget_sec: float = DEFAULT_BUDGET_SEC,
+    now: Any = None,
 ) -> dict[str, int]:
     """Rewrite each mismatched root to the underlying the catalogue names.
 
-    One statement per (root, table) so each rides
-    ``(underlying, bar_date)`` instead of scanning, and so a slow family cannot
-    hold a transaction open across all of them. The EXISTS is not decoration:
-    it rewrites a row only when the catalogue confirms *that* contract belongs
-    to *that* underlying, so a root that is genuinely some other instrument's
-    symbol is left alone.
+    **Commits per root, and that is the point.** The first version ran all
+    ``len(pairs) × len(tables)`` statements inside the migration's single
+    transaction, so a timeout on the fortieth rolled back the thirty-nine before
+    it. Measured 2026-09-10 that was not an edge case: 2,964,147 option_daily
+    rows are still filed under an adjusted root, across 36 root families and two
+    dozen monthly partitions, and no single pass rewrites that inside any
+    sensible budget while the queue is ingesting. Rolling back on the way out
+    meant the repair could never finish — and made it look finished, because the
+    next run reported "nothing written".
+
+    Committing each root turns it into a job that chips away: each deploy
+    rewrites what it can and the next one continues. A statement that times out
+    costs that one root, not the run.
+
+    ``budget_sec`` bounds the whole thing, because this rides a deploy.
+
+    One statement per (root, table) so each rides ``(underlying, bar_date)``
+    instead of scanning. The EXISTS is not decoration: it rewrites a row only
+    when the catalogue confirms *that* contract belongs to *that* underlying,
+    so a root that is genuinely some other instrument's symbol is left alone.
     """
-    pairs = mismatched_roots(cur)
+    import time
+
+    clock = now or time.monotonic
+    deadline = clock() + float(budget_sec)
+
+    with conn.cursor() as cur:
+        pairs = mismatched_roots(cur)
     if not pairs:
         return {t: 0 for t in tables}
 
     repaired: dict[str, int] = {t: 0 for t in tables}
-    cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
     for table in tables:
         for root, canonical in pairs:
-            cur.execute(
-                f"""
-                UPDATE raw_market.{table} d
-                SET underlying = %s
-                WHERE d.underlying = %s
-                  AND EXISTS (
-                        SELECT 1 FROM raw_market.option_contract c
-                        WHERE c.option_ticker = d.option_ticker
-                          AND c.underlying = %s
-                  )
-                """,
-                (canonical, root, canonical),
-            )
-            n = int(getattr(cur, "rowcount", 0) or 0)
+            if clock() >= deadline:
+                logger.info(
+                    "adjusted-root repair out of budget after %.0fs; "
+                    "the rest carries to the next run",
+                    budget_sec,
+                )
+                return repaired
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+                    cur.execute(
+                        f"""
+                        UPDATE raw_market.{table} d
+                        SET underlying = %s
+                        WHERE d.underlying = %s
+                          AND EXISTS (
+                                SELECT 1 FROM raw_market.option_contract c
+                                WHERE c.option_ticker = d.option_ticker
+                                  AND c.underlying = %s
+                          )
+                        """,
+                        (canonical, root, canonical),
+                    )
+                    n = int(getattr(cur, "rowcount", 0) or 0)
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 — one slow family is not a failed deploy
+                logger.warning("adjusted-root repair skipped %s.%s: %s", table, root, exc)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                continue
             if n > 0:
                 repaired[table] += n
                 logger.info("repaired %s rows in %s: %s -> %s", n, table, root, canonical)
