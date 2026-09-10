@@ -35,7 +35,15 @@ async def handle_option_daily(job: JobRow, client: Any, conn: Any) -> Mapping[st
     option_ticker = str(payload.get("option_ticker") or "").strip().upper()
     if not option_ticker:
         raise ValueError("option_daily payload requires option_ticker")
-    parsed = parse_option_ticker(option_ticker)
+    # The payload's underlying wins where the enqueuer supplied it. An adjusted
+    # contract's root is not its underlying — O:BDX1260918C00085000 belongs to
+    # BDX, and option_contract says so — while parse_option_ticker can only
+    # report what the ticker spells. option_snapshot has always stored the
+    # request's underlying for the same reason.
+    parsed = dict(parse_option_ticker(option_ticker))
+    payload_und = str(payload.get("underlying") or "").strip().upper()
+    if payload_und:
+        parsed["underlying"] = payload_und
     from_value = payload.get("from") or payload.get("from_value")
     to_value = payload.get("to") or payload.get("to_value")
     if from_value is None or to_value is None:

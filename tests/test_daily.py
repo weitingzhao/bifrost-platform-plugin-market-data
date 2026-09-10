@@ -153,7 +153,9 @@ class _DailyCursor:
             as_of = params[1]
             n_exp = int(params[4])
             per_right = int(params[5])
-            picked: list[tuple[str]] = []
+            # (option_ticker, underlying) — the catalogue's underlying, which for
+            # an adjusted contract is not the ticker's root.
+            picked: list[tuple[str, str]] = []
             for und in sorted(syms):
                 spot = self.parent.spots.get(und)
                 if spot is None:
@@ -169,7 +171,7 @@ class _DailyCursor:
                                 c[3] if len(c) > 3 else 0,
                             )
                         )
-                        picked.extend((c[0],) for c in cands[:per_right])
+                        picked.extend((c[0], c[1]) for c in cands[:per_right])
             self.parent._fetchall = sorted(picked)
             self.parent._fetchone = None
         elif "from research.option_universe" in q:
@@ -634,6 +636,29 @@ def test_enqueue_option_bars_follows_the_research_universe() -> None:
     }
     assert underlyings == {"AAPL", "NVDA"}
     assert result["enqueued"] == 4  # 2 underlyings × 1 expiry × 2 rights
+
+
+def test_option_bars_payload_carries_the_catalogue_underlying() -> None:
+    """Not the ticker's root: an adjusted contract reads O:BDX1… and is BDX."""
+    contracts = [
+        ("O:BDX1260918C00085000", "BDX", date(2026, 9, 18), 85.0),
+        ("O:BDX1260918P00085000", "BDX", date(2026, 9, 18), 85.0),
+    ]
+    conn = _DailyConn(option_contracts=contracts, spots={"BDX": 85.0})
+    result = enqueue_slot(
+        conn,
+        "option-bars",
+        target_date=date(2026, 9, 9),
+        watchlist_symbols=["BDX"],
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-bars": {"expiries": 1, "strikes_each_side": 0}},
+        },
+    )
+    assert result["enqueued"] == 2
+    for j in result["jobs"]:
+        assert j["payload"]["option_ticker"].startswith("O:BDX1")
+        assert j["payload"]["underlying"] == "BDX"
 
 
 def test_enqueue_option_bars_falls_back_to_the_watchlist() -> None:

@@ -79,6 +79,21 @@ class DatasetContract:
     #: keeping their own copies of the mapping.
     freshness_dimension: str | None = None
 
+    #: The slot that can refill one *named* past session, or None when a missed
+    #: session is gone for good. This is the difference between a hole the
+    #: doctor can prescribe for and one it can only report.
+    #:
+    #: None is not "we have not wired it up yet" — it is a property of the
+    #: source. An EOD option chain download only ever returns the current
+    #: session, so option_snapshot (and option_open_interest, derived from the
+    #: same response) cannot be recovered once the day passes; 2026-08-11 is
+    #: permanently absent for that reason. ratios' endpoint ignores ?date and
+    #: always answers with the latest values, so its history can only accrue
+    #: forward. Datasets whose slot carries a lookback window (treasury 30d,
+    #: corporate 7d, short_interest 45d) repair themselves on the next run and
+    #: need no prescription.
+    backfill_slot: str | None = None
+
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
 STOCK_WINDOW_DAYS = 5 * 365
@@ -111,6 +126,10 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "bar_date",
         freshness_dimension="stock_daily",
+        # The grouped whole-market pull, not the watchlist one: a blank session
+        # is blank for all 5,317 names, and seven of them went unnoticed for
+        # ninety days before the fourth axis existed.
+        backfill_slot="universe-daily",
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -221,6 +240,11 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "symbol",
         "period_date",
         freshness_dimension="short_volume",
+        # The slot also fires ratios_market (whose endpoint ignores the date)
+        # and short_interest_market (whose 45-day lookback already covers it).
+        # Two wasted jobs per repaired session, knowingly: holes are rare, and
+        # the alternative is a second prescription vocabulary.
+        backfill_slot="fundamentals-market",
     ),
     DatasetContract(
         "raw_market.short_interest",
@@ -310,6 +334,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_date",
         low_cardinality=True,
         freshness_dimension="option_daily",
+        backfill_slot="option-bars",
     ),
     # ── benchmark-only: too big to be worth more than a few names ──
     DatasetContract(
@@ -322,6 +347,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_time",
         low_cardinality=True,
         freshness_dimension="stock_minute",
+        backfill_slot="minute-bars",
     ),
     DatasetContract(
         "raw_market.option_minute",
@@ -333,6 +359,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "bar_time",
         low_cardinality=True,
         freshness_dimension="option_minute",
+        backfill_slot="minute-bars",
     ),
 )
 

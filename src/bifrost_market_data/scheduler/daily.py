@@ -822,7 +822,7 @@ def load_option_tickers_near_spot(
     as_of: date,
     expiries: int = 3,
     strikes_each_side: int = 10,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """Contracts around the money: the next ``expiries`` expiries per underlying
     and, per expiry and right, the ``2·strikes_each_side+1`` strikes nearest the
     latest close. The old selection took the lowest strikes of the nearest
@@ -830,6 +830,12 @@ def load_option_tickers_near_spot(
 
     Underlyings without a close in ``stock_daily`` (index roots such as SPX on
     a plan without index levels) are skipped.
+
+    Returns ``(option_ticker, underlying)``. The underlying comes from the
+    catalogue rather than the ticker because an adjusted contract's root is not
+    its underlying: O:BDX1260918C00085000 belongs to BDX, and option_contract
+    says so. Parsing the root instead put BDX1 in option_daily as a symbol of
+    its own while option_snapshot held the same family under BDX.
     """
     syms = [str(s).strip().upper() for s in underlyings if str(s).strip()]
     if not syms:
@@ -856,7 +862,7 @@ def load_option_tickers_near_spot(
               ) d
             ),
             ranked AS (
-              SELECT c.option_ticker,
+              SELECT c.option_ticker, c.underlying,
                      ROW_NUMBER() OVER (
                        PARTITION BY c.underlying, c.expiry, c.option_right
                        ORDER BY abs(c.strike - s.close), c.strike
@@ -866,16 +872,20 @@ def load_option_tickers_near_spot(
               JOIN exp e ON e.underlying = c.underlying AND e.expiry = c.expiry
               WHERE e.erank <= %s
             )
-            SELECT option_ticker FROM ranked WHERE srank <= %s ORDER BY option_ticker
+            SELECT option_ticker, underlying FROM ranked WHERE srank <= %s
+            ORDER BY option_ticker
             """,
             (syms, as_of, syms, as_of, n_exp, per_right),
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for row in rows or []:
-        t = row.get("option_ticker") if isinstance(row, Mapping) else (row[0] if row else None)
-        if t:
-            out.append(str(t).strip().upper())
+        if isinstance(row, Mapping):
+            t, u = row.get("option_ticker"), row.get("underlying")
+        else:
+            t, u = (row[0], row[1]) if row and len(row) > 1 else (None, None)
+        if t and u:
+            out.append((str(t).strip().upper(), str(u).strip().upper()))
     return out
 
 
@@ -1352,8 +1362,13 @@ def enqueue_slot(
             expiries=int(scfg.get("expiries") or 3),
             strikes_each_side=int(scfg.get("strikes_each_side") or 10),
         )
-        for ot in tickers:
-            _add("option_daily", {"option_ticker": ot, "from": day_s, "to": day_s})
+        for ot, und in tickers:
+            # The catalogue's underlying, not the ticker's root: an adjusted
+            # contract reads O:BDX1… and belongs to BDX.
+            _add(
+                "option_daily",
+                {"option_ticker": ot, "underlying": und, "from": day_s, "to": day_s},
+            )
 
     elif slot_key == "minute-bars":
         # Stock intraday: 1min / 5min / 1hour (replaces retired Trade stocks_ib Celery path).
@@ -1384,11 +1399,12 @@ def enqueue_slot(
             batch = rotated[: max(0, batch_size)]
         else:
             batch = []
-        for ot in batch:
+        for ot, und in batch:
             _add(
                 "option_minute",
                 {
                     "option_ticker": ot,
+                    "underlying": und,
                     "from": day_s,
                     "to": day_s,
                     "multiplier": 1,

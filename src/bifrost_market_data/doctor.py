@@ -35,7 +35,11 @@ from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 
-from bifrost_market_data.contracts import STOCK_DAILY_MIN_SESSION_SYMBOLS, staleness_by_slot
+from bifrost_market_data.contracts import (
+    CONTRACTS,
+    STOCK_DAILY_MIN_SESSION_SYMBOLS,
+    staleness_by_slot,
+)
 from bifrost_market_data.session import EOD_EXPECTED_BY_NY as _EOD_BY_NY
 from bifrost_market_data.session import deadline
 from bifrost_market_data.session import resolve_session as _resolve_session
@@ -129,6 +133,14 @@ class Finding:
     fix: dict[str, Any] | None = None
     auto_fixable: bool = False
     missing_sample: list[str] = field(default_factory=list)
+
+
+def _rollback(conn: Any) -> None:
+    """A failed read leaves the transaction aborted; the next check needs it clean."""
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001 — nothing useful to do if even this fails
+        pass
 
 
 def _row0(row: Any) -> Any:
@@ -296,6 +308,115 @@ def _presence_finding(
         auto_fixable=bool(missing) and fixable,
         missing_sample=missing[:8],
     )
+
+
+#: How far back the doctor looks for a session that never landed. The fourth
+#: axis reads 120 days because it is answering "is the middle solid"; the doctor
+#: is answering "what can I still fix tonight", and a shorter window keeps the
+#: per-day scan off the doctor's latency budget.
+CONTINUITY_WINDOW_DAYS = 60
+
+#: Missing sessions prescribed per dataset per run. One option-bars day is
+#: ~70,000 jobs, so an unbounded prescription for a dataset that has been broken
+#: for a month would enqueue millions in a single nightly heal. Three nights
+#: clear nine days, and the finding says plainly when the cap is biting.
+CONTINUITY_MAX_PRESCRIBED = 3
+
+
+def _continuity_findings(
+    conn: Any,
+    *,
+    today: date,
+    window_days: int = CONTINUITY_WINDOW_DAYS,
+    statement_timeout: str = "30s",
+) -> list[Finding]:
+    """Sessions that never landed and a slot can still refill.
+
+    The doctor has always been a per-session check with no memory: it reported
+    2026-08-11 as critical on 2026-08-11 and forgot by the next morning, so the
+    hole sat there for a month. The fourth axis has the memory but is a
+    read-only measure — what finds a hole could not fix it, and what fixes could
+    not find it. This is the join.
+
+    Only datasets whose contract names a ``backfill_slot`` are considered. A
+    missed EOD option chain is gone for good and a prescription for it would be
+    a lie, not a repair.
+    """
+    from bifrost_market_data.continuity import has_continuity, per_day_counts
+    from bifrost_market_data.trading_calendar import expected_trading_days
+
+    start = today - timedelta(days=int(window_days))
+    try:
+        sessions = set(expected_trading_days(conn, start=start, end=today))
+    except Exception as exc:  # noqa: BLE001 — without the calendar there is no question to ask
+        logger.warning("continuity findings: calendar unavailable: %s", exc)
+        _rollback(conn)
+        return []
+    if not sessions:
+        return []
+
+    out: list[Finding] = []
+    for c in CONTRACTS:
+        if not c.backfill_slot or c.cadence != "session" or not has_continuity(c):
+            continue
+        counts = per_day_counts(
+            conn,
+            c.dataset,
+            str(c.date_column),
+            window_days=window_days,
+            statement_timeout=statement_timeout,
+        )
+        if counts is None:
+            continue
+        present = {d for d, _ in counts if d in sessions}
+        if not present:
+            continue
+        # Only sessions inside the observed span: a dataset that starts midway
+        # through the window has not lost the days before it existed, and the
+        # newest session may simply not be due yet.
+        first, last = min(present), max(present)
+        absent = sorted(d for d in sessions if first <= d <= last and d not in present)
+        name = c.dataset.replace("raw_market.", "")
+        if not absent:
+            out.append(
+                Finding(
+                    f"continuity:{name}",
+                    c.backfill_slot,
+                    "ok",
+                    f"Continuity: {name}",
+                    f"every session in {window_days}d",
+                    f"{len(present)} sessions, none missing",
+                    f"No session missing from {name} between {first} and {last}.",
+                )
+            )
+            continue
+        prescribed = absent[:CONTINUITY_MAX_PRESCRIBED]
+        for day in prescribed:
+            detail = (
+                f"{name} has no rows for {day}, a trading day between {first} and {last}. "
+                f"{len(absent)} such session(s) in the last {window_days} days"
+            )
+            if len(absent) > len(prescribed):
+                detail += (
+                    f"; prescribing the {len(prescribed)} oldest this run, "
+                    f"{len(absent) - len(prescribed)} left for the next"
+                )
+            out.append(
+                Finding(
+                    f"continuity:{name}:{day.isoformat()}",
+                    c.backfill_slot,
+                    "warn",
+                    f"Missing session: {name}",
+                    "rows for every trading day",
+                    "no rows",
+                    detail + ".",
+                    session=day.isoformat(),
+                    fix=_slot_fix(c.backfill_slot, day),
+                    auto_fixable=True,
+                    missing_sample=[d.isoformat() for d in absent[:10]],
+                )
+            )
+    return out
 
 
 def _presence_findings(
@@ -986,6 +1107,16 @@ def run_doctor(
                 auto_fixable=False,
             )
         )
+
+    # ── Continuity: sessions that never landed and can still be refilled ──
+    # In a guard of its own. This is the newest check and the only one that
+    # looks past the current session; a fault in it must not erase the
+    # per-session findings that already succeeded.
+    try:
+        findings.extend(_continuity_findings(conn, today=now_utc.date()))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("continuity findings failed: %s", exc)
+        _rollback(conn)
 
     # ── Prescriptions: one per distinct fix ──
     seen: set[str] = set()

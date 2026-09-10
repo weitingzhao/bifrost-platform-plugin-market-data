@@ -1,7 +1,7 @@
 ---
-version: 2026-09-10.1
+version: 2026-09-10.2
 updated: 2026-09-10
-status: 队列跑空后的四轴普查 · 一个解析器缺陷、一处会烂掉的历史、四处量错了
+status: 四轴普查已落地 · 调整后合约归一 · Doctor 接上了厚度轴（能发现的现在也能修）
 ---
 
 # Massive 校准
@@ -148,6 +148,38 @@ Owner 定：**扩范围**。`option-bars` 改吃 `research.option_universe`（wa
 
 **`stock_minute` / `option_minute` 的分母有 8 个标的没人跑**：`minute-bars` 实测覆盖 18 个，benchmark 档的分母是 26。
 
+## 2e. 排程能防止腐败吗（2026-09-10，Plugin 0.22.0）
+
+回填跑完后逐 slot 核对「续期范围 vs 契约分母」，答案分三层。
+
+**广度**：`option-bars` 改吃全宇宙之后，每个数据集的续期 slot 都覆盖到了它声明的分母，只剩两处例外——`minute-bars` 用 watchlist（18 个）而 benchmark 档的分母是 26，**那 8 个标的永远轮不到，不会自愈**；`option-refresh` 是 batch 12 × 每 6 小时的轮转，575 个标的转一圈约 12 天（设计如此，但目录会滞后）。
+
+**深度**：真正的风险已消除。回填给 575 个标的买了两年历史而续期只覆盖 25 个——那 550 个的历史会停在回填结束当天。改成 `universe: research` 后实测 575 标的 / **69,950 job/交易日**。
+
+**厚度：原本没有任何自动保障，本轮补上了。**
+
+大多数 slot 只填当天，漏一次点火就是永久的洞。只有四个带回看窗口能自愈：`treasury`(30 天)、`corporate`(7 天)、`short_interest`(45 天)、`fundamentals-rotate`（每天跑全池）。而结构上有一道断裂：
+
+- **厚度轴能看见**旧洞（120 天窗口），但它是只读度量，不产生处方
+- **Doctor 能开处方并执行**，作用域却是 `resolve_session()` 的**一个 session** + 24 小时失败窗口
+- 每晚 00:45 的 Dagster `market_self_heal` 调的就是 `GET /market/doctor`，继承了同一个作用域
+
+**能发现洞的修不了，能修的发现不了。** 2026-08-11 那个洞躺了一个月正是因为这个——它发生当天 doctor 一定报了 crit，但 doctor 没有记忆，第二天就永久隐形。
+
+0.22.0 把两者接上：doctor 新增 `continuity:<dataset>[:<date>]` 一族 finding，在 60 天窗口内找出「日历上是交易日、表里没有任何行」的 session，并给出**精确到那一天**的 `enqueue-slot` 处方。`market_self_heal` 不用改一行就获得了修补旧洞的能力。
+
+三条刻意的边界：
+
+1. **能不能补是契约声明的，不是推断的。** `DatasetContract.backfill_slot` 为 None 表示这一天**找不回来了**，而不是「还没接线」：EOD 链下载只返回当前 session（`option_snapshot` 与派生的 `option_open_interest`），`ratios` 的端点忽略 `?date` 只能向前累积。给这些开处方是撒谎，不是修复。目前 19 个数据集里 5 个可补。
+2. **每次每个数据集最多开 3 张处方**，且当上限生效时会在 detail 里明说还剩几天。一个 `option-bars` 日 ≈ 7 万个 job，无上限的处方遇到坏了一个月的数据集会在一夜之间压进去几百万。
+3. **不进 `EOD_CRITICAL_CHECKS`。** finding id 前缀是 `continuity:`，不会阻塞 Research 的 dbt 批次——一个可补的旧洞是 warn，不是 crit。
+
+### 调整后合约归一（同版）
+
+0.21.0 让解析器接受了调整后合约，但没有告诉它这些合约属于谁：`option_daily` 用**解析出来的**根（`BDX1`），而 `option_snapshot` 一直用请求里的 `storage`（`BDX`）。结果是深度轴数出 581 个标的而快照表数出 570，且下游 `WHERE underlying = 'BDX'` 会整条漏掉调整后序列。这些行在 0.21.0 之前不可能存在——那时 job 直接失败。
+
+修法是 enqueuer 在 payload 里带上**目录表的** underlying（它本来就是按 underlying 选的合约），handler 优先用它。历史行由一条幂等迁移订正，依据同样是目录表：逐个 `(root, canonical)` 走 `(underlying, bar_date)` 索引更新，并用 `EXISTS` 把重写绑定到**那一张具体合约**上——所以一个碰巧长得像调整根的真实代码不会被误改。
+
 ## 2b. 三维首次读数（2026-09-09，`/market/coverage/dimensions`）
 
 契约表落地后第一次全量读数。**每个百分比的分子都取自它自己的分母集合**（"该档位要的标的里，我持有多少"），范围外的持有量另列，不灌进比率。
@@ -272,6 +304,7 @@ Owner 定：**扩范围**。`option-bars` 改吃 `research.option_universe`（wa
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-10.2 | 2026-09-10 | Doctor 接上厚度轴（§2e）：60 天窗口内找出可补的缺失 session 并给出精确到日的处方，`market_self_heal` 因此获得修补旧洞的能力；能不能补由契约的 `backfill_slot` 声明，19 个数据集里 5 个可补。调整后合约的 underlying 归一到目录表，历史行由幂等迁移订正。 |
 | 2026-09-10.1 | 2026-09-10 | 队列跑空后的四轴普查（§2d）。一个解析器缺陷让所有调整后期权合约（`WDC1`/`XOM2`/`SPGI1`…）拿不到日线；`option_daily` 的两年历史本会从回填结束当天起停止前进，Owner 定为扩 `option-bars` 到全宇宙（69,950 job/交易日）；四处「量错了」中的三处已修。 |
 | 2026-09-09.11 | 2026-09-09 | 厚度轴照出的最大一处已修：`short_volume` 原本只有 2 天真数据，契约把它误标为不可回填（抄自 `ratios`）。改为 `rolling_days` 730 天并补齐 496 个交易日，501/501。 |
 | 2026-09-09.10 | 2026-09-09 | 第四轴：厚度（C-C1–C-C4）。蓝图升到 v1.1。首次读数见 §2c——`stock_daily` 的 7 个空洞已补，`short_volume` 三个月的缺口首次可见。 |

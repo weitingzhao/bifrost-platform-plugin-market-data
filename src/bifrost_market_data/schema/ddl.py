@@ -21,6 +21,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
 )
+from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
 from bifrost_market_data.schema.wave9_migrations import migrate_option_snapshot_observed_time
 
 
@@ -46,6 +47,12 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
         retire_data_ops_compat_schema(cur)
+        # A data repair rather than a schema change, but it belongs on the same
+        # path: it needs raw_market write access, it is idempotent, and 0.21.0
+        # is what created the rows it fixes.
+        repaired = repair_adjusted_underlyings(cur)
+        if any(repaired.values()):
+            print(f"adjusted roots repaired: {repaired}")
     conn.commit()
 
 

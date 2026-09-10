@@ -109,3 +109,82 @@ async def test_option_daily_invalid_ticker() -> None:
             mock_client(),
             FakeConn(),
         )
+
+
+ADJUSTED = "O:BDX1260918C00085000"
+
+
+@pytest.mark.asyncio
+async def test_option_daily_files_an_adjusted_contract_under_its_underlying() -> None:
+    """The root is not the underlying. O:BDX1… belongs to BDX, and the catalogue
+    says so — the ticker can only spell BDX1. Without the payload's underlying,
+    option_daily grew a symbol of its own while option_snapshot held the same
+    corporate-action family under BDX.
+    """
+    client = mock_client(
+        fetch_stock_aggs={
+            "results": [
+                {"t": 1_704_153_600_000, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 5, "vw": 1.1, "n": 1},
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_option_daily(
+        make_job(
+            "option_daily",
+            {
+                "option_ticker": ADJUSTED,
+                "underlying": "BDX",
+                "from": "2024-01-01",
+                "to": "2024-01-31",
+            },
+        ),
+        client,
+        conn,
+    )
+    assert result["underlying"] == "BDX"
+    row = conn.statements[0][1][0]
+    assert row[0] == ADJUSTED, "the ticker itself is untouched"
+    assert row[1] == "BDX"
+    # Expiry and strike still come from the ticker, which is the only place they are.
+    assert float(row[3]) == 85.0
+    assert row[4] == "C"
+
+
+@pytest.mark.asyncio
+async def test_option_daily_falls_back_to_the_root_without_a_payload_underlying() -> None:
+    """A hand-enqueued job with no underlying must still land, not fail."""
+    client = mock_client(
+        fetch_stock_aggs={"results": [{"t": 1_704_153_600_000, "c": 1.5}], "pages": 1}
+    )
+    conn = FakeConn()
+    result = await handle_option_daily(
+        make_job("option_daily", {"option_ticker": ADJUSTED, "from": "2024-01-01", "to": "2024-01-31"}),
+        client,
+        conn,
+    )
+    assert result["underlying"] == "BDX1"
+
+
+@pytest.mark.asyncio
+async def test_option_minute_takes_the_payload_underlying_too() -> None:
+    client = mock_client(
+        fetch_stock_aggs={"results": [{"t": 1_704_153_600_000, "c": 1}], "pages": 1}
+    )
+    conn = FakeConn()
+    result = await handle_option_minute(
+        make_job(
+            "option_minute",
+            {
+                "option_ticker": ADJUSTED,
+                "underlying": "BDX",
+                "from": "2024-01-02",
+                "to": "2024-01-02",
+                "multiplier": 1,
+            },
+        ),
+        client,
+        conn,
+    )
+    assert result["underlying"] == "BDX"
