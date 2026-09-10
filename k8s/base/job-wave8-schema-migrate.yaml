@@ -37,7 +37,12 @@ spec:
               exit 1
       containers:
         - name: migrate
-          image: 192.168.10.73:30500/bifrost-market-data:0.11.1
+          # Bare name so kustomize's image transformer rewrites it, the way
+          # every other manifest here is written. Spelling the registry out
+          # made the transformer skip this Job: it stayed on 0.11.1 from
+          # 0.11.1 onward, and its 2026-09-10 log still listed the ops_jobs
+          # tables as of that release — queue_sample, added in 0.20.x, absent.
+          image: bifrost-market-data:0.1.0
           imagePullPolicy: Always
           command: ["python", "scripts/init_schema.py", "--wave8-only"]
           env:
