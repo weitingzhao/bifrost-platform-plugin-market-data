@@ -128,6 +128,47 @@ def per_day_counts(
         return None
 
 
+def missing_sessions(
+    conn: Any,
+    table: str,
+    column: str,
+    sessions: Sequence[date],
+    *,
+    statement_timeout: str = "30s",
+) -> list[date] | None:
+    """Which of ``sessions`` the table holds no row for at all, or None on a failed read.
+
+    A presence probe per day rather than the aggregate ``per_day_counts`` runs.
+    The thin-day statistic needs counts; this question does not — it needs to
+    know whether the day is there, and ``LIMIT 1`` on a half-open range stops at
+    the first row instead of grouping two million. Measured 2026-09-10: the
+    aggregate added about ten seconds to the doctor across five datasets, which
+    is most of its headroom under a 60-second gateway.
+
+    Half-open bounds rather than a cast, so a timestamp column (``bar_time``)
+    is compared on the index instead of through ``::date``.
+    """
+    out: list[date] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+            for day in sessions:
+                cur.execute(
+                    f"SELECT 1 FROM {table} WHERE {column} >= %s AND {column} < %s LIMIT 1",
+                    (day, day + timedelta(days=1)),
+                )
+                if not (cur.fetchall() if hasattr(cur, "fetchall") else []):
+                    out.append(day)
+    except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the check
+        logger.warning("session presence read failed for %s: %s", table, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    return out
+
+
 def measure(
     conn: Any,
     contract: DatasetContract,
@@ -230,6 +271,7 @@ __all__ = [
     "has_continuity",
     "thin_days",
     "per_day_counts",
+    "missing_sessions",
     "measure",
     "window_start",
 ]

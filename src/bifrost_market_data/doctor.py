@@ -342,12 +342,12 @@ def _continuity_findings(
     missed EOD option chain is gone for good and a prescription for it would be
     a lie, not a repair.
     """
-    from bifrost_market_data.continuity import has_continuity, per_day_counts
+    from bifrost_market_data.continuity import has_continuity, missing_sessions
     from bifrost_market_data.trading_calendar import expected_trading_days
 
     start = today - timedelta(days=int(window_days))
     try:
-        sessions = set(expected_trading_days(conn, start=start, end=today))
+        sessions = sorted(set(expected_trading_days(conn, start=start, end=today)))
     except Exception as exc:  # noqa: BLE001 — without the calendar there is no question to ask
         logger.warning("continuity findings: calendar unavailable: %s", exc)
         _rollback(conn)
@@ -359,23 +359,23 @@ def _continuity_findings(
     for c in CONTRACTS:
         if not c.backfill_slot or c.cadence != "session" or not has_continuity(c):
             continue
-        counts = per_day_counts(
+        gaps = missing_sessions(
             conn,
             c.dataset,
             str(c.date_column),
-            window_days=window_days,
+            sessions,
             statement_timeout=statement_timeout,
         )
-        if counts is None:
+        if gaps is None:
             continue
-        present = {d for d, _ in counts if d in sessions}
+        present = [d for d in sessions if d not in set(gaps)]
         if not present:
             continue
         # Only sessions inside the observed span: a dataset that starts midway
         # through the window has not lost the days before it existed, and the
         # newest session may simply not be due yet.
-        first, last = min(present), max(present)
-        absent = sorted(d for d in sessions if first <= d <= last and d not in present)
+        first, last = present[0], present[-1]
+        absent = [d for d in gaps if first <= d <= last]
         name = c.dataset.replace("raw_market.", "")
         if not absent:
             out.append(

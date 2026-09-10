@@ -31,23 +31,29 @@ def _sessions(n: int = 40) -> list[date]:
 
 @pytest.fixture()
 def wired(monkeypatch: pytest.MonkeyPatch):
-    """Answer the calendar and the per-day counts; the SQL itself is not the subject."""
+    """Answer the calendar and the presence probe; the SQL itself is not the subject.
+
+    ``gaps[table]`` is the days that table holds no row for — None means the
+    read failed, which is not the same as "no days are missing".
+    """
     sessions = _sessions()
-    counts: dict[str, list[tuple[date, int]] | None] = {}
+    gaps: dict[str, list[date] | None] = {}
 
     def fake_days(conn: Any, *, start: date, end: date) -> list[date]:
         return [d for d in sessions if start <= d <= end]
 
-    def fake_counts(conn: Any, table: str, column: str, **kw: Any):
-        return counts.get(table, [(d, 1000) for d in sessions])
+    def fake_missing(conn: Any, table: str, column: str, days: Any, **kw: Any):
+        if table in gaps:
+            return gaps[table]
+        return []
 
     monkeypatch.setattr(cal, "expected_trading_days", fake_days)
-    monkeypatch.setattr(cont, "per_day_counts", fake_counts)
-    return sessions, counts
+    monkeypatch.setattr(cont, "missing_sessions", fake_missing)
+    return sessions, gaps
 
 
 def test_a_clean_window_prescribes_nothing(wired) -> None:
-    sessions, _ = wired
+    _sess, _gaps = wired
     out = _continuity_findings(None, today=TODAY)
     assert out, "every backfillable dataset should still report"
     assert {f.severity for f in out} == {"ok"}
@@ -55,9 +61,9 @@ def test_a_clean_window_prescribes_nothing(wired) -> None:
 
 
 def test_a_missing_session_becomes_a_prescription(wired) -> None:
-    sessions, counts = wired
+    sessions, gaps = wired
     hole = sessions[20]
-    counts["raw_market.option_daily"] = [(d, 1000) for d in sessions if d != hole]
+    gaps["raw_market.option_daily"] = [hole]
 
     out = _continuity_findings(None, today=TODAY)
     hit = [f for f in out if f.id == f"continuity:option_daily:{hole}"]
@@ -77,8 +83,8 @@ def test_a_missing_session_becomes_a_prescription(wired) -> None:
 def test_a_dataset_that_cannot_be_refilled_is_never_prescribed_for(wired) -> None:
     """An EOD chain download only returns the current session. A prescription
     for a past one would be a lie, not a repair — 2026-08-11 is gone."""
-    sessions, counts = wired
-    counts["raw_market.option_snapshot"] = [(d, 1000) for d in sessions[:-5]]
+    sessions, gaps = wired
+    gaps["raw_market.option_snapshot"] = list(sessions[-5:])
     out = _continuity_findings(None, today=TODAY)
     assert not [f for f in out if "option_snapshot" in f.id]
     assert not [f for f in out if "ratios" in f.id]
@@ -87,9 +93,9 @@ def test_a_dataset_that_cannot_be_refilled_is_never_prescribed_for(wired) -> Non
 
 def test_the_prescription_cap_is_stated_not_silent(wired) -> None:
     """One option-bars day is ~70,000 jobs; an unbounded run would enqueue millions."""
-    sessions, counts = wired
+    sessions, gaps = wired
     holes = set(sessions[10:20])
-    counts["raw_market.option_daily"] = [(d, 1000) for d in sessions if d not in holes]
+    gaps["raw_market.option_daily"] = sorted(holes)
 
     out = [f for f in _continuity_findings(None, today=TODAY) if f.id.startswith("continuity:option_daily:")]
     assert len(out) == CONTINUITY_MAX_PRESCRIBED
@@ -101,15 +107,16 @@ def test_the_prescription_cap_is_stated_not_silent(wired) -> None:
 
 def test_days_before_the_dataset_existed_are_not_holes(wired) -> None:
     """A dataset that starts midway through the window has not lost anything."""
-    sessions, counts = wired
-    counts["raw_market.option_daily"] = [(d, 1000) for d in sessions[25:]]
+    sessions, gaps = wired
+    # Nothing before session 25 — the dataset did not exist yet.
+    gaps["raw_market.option_daily"] = list(sessions[:25])
     out = [f for f in _continuity_findings(None, today=TODAY) if "option_daily" in f.id]
     assert [f.severity for f in out] == ["ok"]
 
 
 def test_an_unreadable_dataset_is_skipped_not_guessed_at(wired) -> None:
-    sessions, counts = wired
-    counts["raw_market.option_daily"] = None  # per_day_counts returns None on a failed read
+    sessions, gaps = wired
+    gaps["raw_market.option_daily"] = None  # a failed read, not an empty answer
     out = _continuity_findings(None, today=TODAY)
     assert not [f for f in out if "option_daily" in f.id]
     assert [f for f in out if "stock_daily" in f.id], "one bad read must not sink the rest"
@@ -118,7 +125,7 @@ def test_an_unreadable_dataset_is_skipped_not_guessed_at(wired) -> None:
 def test_it_stays_out_of_the_gate_that_blocks_research(wired) -> None:
     from bifrost_market_data.doctor import EOD_CRITICAL_CHECKS
 
-    sessions, counts = wired
-    counts["raw_market.option_daily"] = [(d, 1000) for d in sessions if d != sessions[20]]
+    sessions, gaps = wired
+    gaps["raw_market.option_daily"] = [sessions[20]]
     for f in _continuity_findings(None, today=TODAY):
         assert f.id.split(":", 1)[0] not in EOD_CRITICAL_CHECKS

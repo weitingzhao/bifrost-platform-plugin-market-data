@@ -217,3 +217,64 @@ def test_an_unreadable_calendar_does_not_blank_the_axis() -> None:
     assert out["measured"] is True
     assert out["days_present"] == len(days)
     assert out["days_off_calendar"] == 0
+
+
+def test_missing_sessions_probes_rather_than_counts() -> None:
+    """The doctor asks whether a day is there, not how full it is.
+
+    Counting to answer that added about ten seconds across five datasets, which
+    is most of the doctor's headroom under a 60-second gateway.
+    """
+    class _Cur:
+        def __init__(self, has: set[date]) -> None:
+            self.has = has
+            self.sql: list[str] = []
+            self._rows: list[tuple[int, ...]] = []
+
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: object = None) -> None:
+            q = " ".join(str(sql).split())
+            self.sql.append(q)
+            if q.startswith("SET LOCAL"):
+                return
+            day = params[0] if isinstance(params, tuple) else None
+            self._rows = [(1,)] if day in self.has else []
+
+        def fetchall(self) -> list[tuple[int, ...]]:
+            return self._rows
+
+    class _C:
+        def __init__(self, cur: _Cur) -> None:
+            self._cur = cur
+
+        def cursor(self) -> _Cur:
+            return self._cur
+
+    days = [date(2026, 9, 1) + timedelta(days=i) for i in range(5)]
+    cur = _Cur(set(days) - {days[2]})
+    out = cont.missing_sessions(_C(cur), "raw_market.option_daily", "bar_date", days)
+    assert out == [days[2]]
+
+    probe = [q for q in cur.sql if not q.startswith("SET LOCAL")][0]
+    assert "LIMIT 1" in probe, "stop at the first row, do not count"
+    assert "count(" not in probe.lower()
+    # Half-open bounds, so a timestamp column rides the index instead of ::date.
+    assert ">= %s AND" in probe and "< %s" in probe
+    assert "::date" not in probe
+
+
+def test_missing_sessions_says_none_when_the_read_fails() -> None:
+    """A failed read is not "no days are missing" — the doctor must skip, not prescribe."""
+    class _Boom:
+        def cursor(self) -> object:
+            raise RuntimeError("statement timeout")
+
+        def rollback(self) -> None:
+            return None
+
+    assert cont.missing_sessions(_Boom(), "t", "c", [date(2026, 9, 1)]) is None
