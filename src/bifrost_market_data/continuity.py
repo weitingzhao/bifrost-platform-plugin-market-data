@@ -138,27 +138,37 @@ def missing_sessions(
 ) -> list[date] | None:
     """Which of ``sessions`` the table holds no row for at all, or None on a failed read.
 
-    A presence probe per day rather than the aggregate ``per_day_counts`` runs.
-    The thin-day statistic needs counts; this question does not — it needs to
-    know whether the day is there, and ``LIMIT 1`` on a half-open range stops at
-    the first row instead of grouping two million. Measured 2026-09-10: the
-    aggregate added about ten seconds to the doctor across five datasets, which
-    is most of its headroom under a 60-second gateway.
+    Not ``per_day_counts``: that one was written for the thin-day statistic and
+    therefore has to count, and counting to answer a presence question cost the
+    doctor about ten seconds across five datasets.
 
-    Half-open bounds rather than a cast, so a timestamp column (``bar_time``)
-    is compared on the index instead of through ``::date``.
+    Nor a probe per day. Measured 2026-09-10, that traded the aggregate for 210
+    round trips and the doctor's median barely moved — the cost had become
+    latency, not work. The calendar goes to the server as a VALUES list so the
+    whole question is one statement and each day is an index probe that stops at
+    the first row.
+
+    Half-open bounds rather than a cast, so a timestamp column (``bar_time``) is
+    compared on the index instead of through ``::date``.
     """
-    out: list[date] = []
+    days = list(sessions)
+    if not days:
+        return []
+    values = ", ".join(["(%s::date)"] + ["(%s)"] * (len(days) - 1))
+    sql = f"""
+        SELECT v.d
+        FROM (VALUES {values}) AS v(d)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM {table}
+            WHERE {column} >= v.d AND {column} < v.d + 1
+        )
+        ORDER BY v.d
+    """
     try:
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
-            for day in sessions:
-                cur.execute(
-                    f"SELECT 1 FROM {table} WHERE {column} >= %s AND {column} < %s LIMIT 1",
-                    (day, day + timedelta(days=1)),
-                )
-                if not (cur.fetchall() if hasattr(cur, "fetchall") else []):
-                    out.append(day)
+            cur.execute(sql, tuple(days))
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the check
         logger.warning("session presence read failed for %s: %s", table, exc)
         try:
@@ -166,6 +176,11 @@ def missing_sessions(
         except Exception:
             pass
         return None
+    out: list[date] = []
+    for r in rows or []:
+        v = tuple(r.values())[0] if isinstance(r, Mapping) else (r[0] if r else None)
+        if v is not None:
+            out.append(v)
     return out
 
 

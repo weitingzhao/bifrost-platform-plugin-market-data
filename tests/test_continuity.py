@@ -219,17 +219,19 @@ def test_an_unreadable_calendar_does_not_blank_the_axis() -> None:
     assert out["days_off_calendar"] == 0
 
 
-def test_missing_sessions_probes_rather_than_counts() -> None:
-    """The doctor asks whether a day is there, not how full it is.
+def test_missing_sessions_asks_once_for_the_whole_calendar() -> None:
+    """One statement, not one per day.
 
-    Counting to answer that added about ten seconds across five datasets, which
-    is most of the doctor's headroom under a 60-second gateway.
+    Counting to answer a presence question cost the doctor ~10s across five
+    datasets; a probe per day then traded that for 210 round trips and the
+    median barely moved. The calendar goes to the server instead.
     """
     class _Cur:
         def __init__(self, has: set[date]) -> None:
             self.has = has
             self.sql: list[str] = []
-            self._rows: list[tuple[int, ...]] = []
+            self.params: list[object] = []
+            self._rows: list[tuple[date]] = []
 
         def __enter__(self) -> "_Cur":
             return self
@@ -242,10 +244,10 @@ def test_missing_sessions_probes_rather_than_counts() -> None:
             self.sql.append(q)
             if q.startswith("SET LOCAL"):
                 return
-            day = params[0] if isinstance(params, tuple) else None
-            self._rows = [(1,)] if day in self.has else []
+            self.params.append(params)
+            self._rows = [(d,) for d in (params or ()) if d not in self.has]
 
-        def fetchall(self) -> list[tuple[int, ...]]:
+        def fetchall(self) -> list[tuple[date]]:
             return self._rows
 
     class _C:
@@ -260,12 +262,23 @@ def test_missing_sessions_probes_rather_than_counts() -> None:
     out = cont.missing_sessions(_C(cur), "raw_market.option_daily", "bar_date", days)
     assert out == [days[2]]
 
-    probe = [q for q in cur.sql if not q.startswith("SET LOCAL")][0]
-    assert "LIMIT 1" in probe, "stop at the first row, do not count"
-    assert "count(" not in probe.lower()
+    probes = [q for q in cur.sql if not q.startswith("SET LOCAL")]
+    assert len(probes) == 1, "the whole calendar in one statement"
+    q = probes[0]
+    assert "VALUES" in q and q.count("(%s)") == len(days) - 1
+    assert "NOT EXISTS" in q
+    assert "count(" not in q.lower(), "presence, not volume"
     # Half-open bounds, so a timestamp column rides the index instead of ::date.
-    assert ">= %s AND" in probe and "< %s" in probe
-    assert "::date" not in probe
+    assert ">= v.d AND" in q and "< v.d + 1" in q
+    assert "::date" not in q.split("VALUES")[1].split(")")[-1]
+
+
+def test_missing_sessions_on_an_empty_calendar_asks_nothing() -> None:
+    class _Boom:
+        def cursor(self) -> object:
+            raise AssertionError("must not query")
+
+    assert cont.missing_sessions(_Boom(), "t", "c", []) == []
 
 
 def test_missing_sessions_says_none_when_the_read_fails() -> None:
