@@ -237,3 +237,44 @@ def test_partition_provisioning_has_one_list_and_two_callers() -> None:
     assert conn.committed
     # The scheduler calls the shared one rather than keeping its own list.
     assert "ensure_partitions(conn)" in inspect.getsource(daily.enqueue_slot)
+
+
+#: ops_jobs tables that only ``apply_ddl`` creates. The cluster never runs
+#: apply_ddl — the schema Job is ``init_schema.py --wave8-only`` — so anything
+#: listed here exists in DEV only because it predates that Job. A *new* table
+#: added to this list would never be created in the cluster at all, which is
+#: exactly what happened to coverage_sample on 2026-09-10: declared, printed in
+#: the Job's own summary line, and absent, with the API answering "relation does
+#: not exist" on every write.
+FRESH_INSTALL_ONLY = frozenset(
+    {
+        "job_ingest",
+        "queue_sample",
+        "ingest_freshness",
+        "data_source_void",
+        "symbol_source_void",
+        "watchlist_cache",
+    }
+)
+
+
+def test_the_deploy_path_creates_every_ops_jobs_table_it_is_responsible_for() -> None:
+    """The migration Job is the only schema path that runs in the cluster.
+
+    ops_jobs is the plugin's own schema, so its tables *can* be created by the
+    un-privileged role this Job uses — which means there is no excuse for a new
+    one to reach the cluster through apply_ddl alone.
+    """
+    from bifrost_market_data.schema.ddl import apply_wave8_migrations
+
+    conn = _FakeConn()
+    apply_wave8_migrations(conn)
+    blob = "\n".join(conn.cur.statements)
+    for name in DATA_OPS_TABLES:
+        if name in FRESH_INSTALL_ONLY:
+            continue
+        assert f"ops_jobs.{name}" in blob, (
+            f"ops_jobs.{name} is declared but the deploy path never creates it — "
+            "add it to apply_wave8_migrations, or to FRESH_INSTALL_ONLY if it "
+            "genuinely predates that Job"
+        )

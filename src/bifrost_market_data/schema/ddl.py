@@ -49,6 +49,9 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         migrate_stock_financials_split(cur)
         retire_data_ops_compat_schema(cur)
         create_option_contract_staleness_index(cur)
+        # In ops_jobs, which the plugin's role owns — so a new table of its own
+        # can be created on this path rather than waiting for a superuser run.
+        create_coverage_sample(cur)
         # A data repair rather than a schema change, but it belongs on the same
         # path: it needs raw_market write access, it is idempotent, and 0.21.0
         # is what created the rows it fixes.
@@ -539,6 +542,57 @@ def _create_market_tables(cur: _Cursor) -> None:
     )
 
 
+def create_coverage_sample(cur: _Cursor) -> None:
+    """The coverage matrix's memory. Idempotent, and on the *migration* path.
+
+    Called from ``_create_data_ops_tables`` for a fresh install and from
+    ``apply_wave8_migrations`` for a deploy, because those are two different
+    paths and only the second one runs in the cluster: the schema Job is
+    ``init_schema.py --wave8-only``, so a table added to ``apply_ddl`` alone is
+    created nowhere. Measured 2026-09-10 — this table was declared, printed in
+    the Job's own summary line, and did not exist, and the API answered
+    "relation does not exist" on every write.
+
+    ``ops_jobs`` is the plugin's own schema, so the plugin's role can create
+    here; that is why this may sit on the un-privileged path at all.
+
+    Run-length encoded: one row per *change* of the verdict map, not one per
+    compute. The page recomputes on a timer and almost every recompute
+    reproduces the previous verdicts exactly.
+
+    Recorded forward while continuity is computed on read, and the difference is
+    the point: continuity asks a question the rows themselves still answer, a
+    verdict asks one only the moment could answer. Freshness divides by how late
+    the newest row is *now*; breadth divides by the tier scope as it stood.
+    Re-running either tomorrow answers tomorrow's question.
+    """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ops_jobs.coverage_sample (
+            coverage_sample_id bigserial   PRIMARY KEY,
+            first_seen_at      timestamptz NOT NULL DEFAULT now(),
+            last_seen_at       timestamptz NOT NULL DEFAULT now(),
+            digest             text        NOT NULL,
+            verdicts           jsonb       NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS coverage_sample_first_seen
+        ON ops_jobs.coverage_sample (first_seen_at DESC, coverage_sample_id DESC)
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON TABLE ops_jobs.coverage_sample IS
+          'Four-axis verdicts per dataset over time, one row per change. '
+          'A verdict cannot be computed backwards, so it is written forward; '
+          'continuity, which can, is not recorded here.'
+        """
+    )
+
+
 def _create_data_ops_tables(cur: _Cursor) -> None:
     cur.execute(
         """
@@ -662,40 +716,7 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
-    # The coverage matrix's memory. Run-length encoded: one row per *change* of
-    # the verdict map, not one per compute — the page recomputes on a timer and
-    # almost every recompute reproduces the previous verdicts exactly.
-    #
-    # Recorded forward while continuity is computed on read, and the difference
-    # is the point: continuity asks a question the rows themselves still answer,
-    # a verdict asks one only the moment could answer. Freshness divides by how
-    # late the newest row is *now*; breadth divides by the tier scope as it
-    # stood. Re-running either tomorrow answers tomorrow's question.
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ops_jobs.coverage_sample (
-            coverage_sample_id bigserial   PRIMARY KEY,
-            first_seen_at      timestamptz NOT NULL DEFAULT now(),
-            last_seen_at       timestamptz NOT NULL DEFAULT now(),
-            digest             text        NOT NULL,
-            verdicts           jsonb       NOT NULL
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS coverage_sample_first_seen
-        ON ops_jobs.coverage_sample (first_seen_at DESC, coverage_sample_id DESC)
-        """
-    )
-    cur.execute(
-        """
-        COMMENT ON TABLE ops_jobs.coverage_sample IS
-          'Four-axis verdicts per dataset over time, one row per change. '
-          'A verdict cannot be computed backwards, so it is written forward; '
-          'continuity, which can, is not recorded here.'
-        """
-    )
+    create_coverage_sample(cur)
 
     cur.execute(
         """
