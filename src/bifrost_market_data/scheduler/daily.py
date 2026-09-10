@@ -457,6 +457,63 @@ def load_research_universe(conn: Any) -> list[dict[str, Any]]:
     return out
 
 
+#: Underlyings ordered by how long their contract catalogue has waited for a
+#: re-enumeration, oldest first, never-enumerated first of all. One index probe
+#: per underlying on (underlying, updated_at DESC) — the same loose-index-scan
+#: shape ``enumerated_underlyings`` uses, for the same reason.
+STALEST_UNDERLYINGS_QUERY = """
+/* stalest_underlyings */
+WITH RECURSIVE u AS (
+    SELECT min(underlying) AS s FROM raw_market.option_contract
+    UNION ALL
+    SELECT (SELECT min(underlying) FROM raw_market.option_contract WHERE underlying > u.s)
+    FROM u WHERE u.s IS NOT NULL
+)
+SELECT s, (SELECT max(updated_at) FROM raw_market.option_contract c WHERE c.underlying = u.s)
+FROM u WHERE s IS NOT NULL
+""".strip()
+
+
+def stalest_underlyings(conn: Any) -> dict[str, Any] | None:
+    """``{underlying: last refreshed}`` or None when the read fails.
+
+    option-refresh rotated on ``sha256(target_date)``, which is the same for all
+    four of its six-hourly runs. Measured 2026-09-10, the 06:20 and 12:20 runs
+    enqueued an identical twelve names, so the universe came round about every
+    48 days rather than the 12 the cron rate implies — and three runs in four
+    re-fetched a catalogue that had just been fetched.
+
+    Ordering by the oldest ``updated_at`` advances on every run, needs no clock,
+    and repairs itself when a run is missed. ``option_contract`` stamps
+    ``updated_at = now()`` on every row a job touches, so the maximum per
+    underlying is when that catalogue was last walked.
+
+    None means "could not tell" and the caller must fall back rather than treat
+    every name as equally stale.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '30s'")
+            cur.execute(STALEST_UNDERLYINGS_QUERY)
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — the hash rotation remains
+        logger.warning("stalest_underlyings unreadable; option-refresh rotates by date: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    out: dict[str, Any] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym, when = row.get("s"), row.get("max")
+        else:
+            sym, when = (row[0], row[1]) if row and len(row) > 1 else (None, None)
+        if sym:
+            out[str(sym).strip().upper()] = when
+    return out
+
+
 def enumerated_underlyings(conn: Any) -> set[str] | None:
     """Every underlying already tried: contracts on file, or a finished contract job this week.
 
@@ -1336,11 +1393,23 @@ def enqueue_slot(
                 fresh = [s for s in symbols if s not in have and s not in bench_set][:max_new]
         fresh_set = set(fresh)
         if symbols:
-            # Deterministic rotation so the whole list is covered over days.
-            offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
-            rotated = symbols[offset:] + symbols[:offset]
-            rest = [s for s in rotated if s not in bench_set and s not in fresh_set]
-            batch = list(benches) + fresh + rest[: max(0, batch_size)]
+            # Stalest first. The old rotation hashed the *target date*, which is
+            # identical across all four six-hourly runs, so three of them
+            # re-fetched what the first had just done and the universe came round
+            # about every 48 days. Ordering by when each catalogue was last
+            # walked advances on every run and repairs a missed one by itself.
+            last_seen = stalest_underlyings(conn)
+            candidates = [s for s in symbols if s not in bench_set and s not in fresh_set]
+            if last_seen is not None:
+                # Never enumerated sorts before any timestamp.
+                candidates.sort(key=lambda s: (last_seen.get(s) is not None, last_seen.get(s), s))
+            else:
+                # Could not tell — keep the old deterministic rotation rather
+                # than treat every name as equally stale.
+                offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
+                rotated = symbols[offset:] + symbols[:offset]
+                candidates = [s for s in rotated if s not in bench_set and s not in fresh_set]
+            batch = list(benches) + fresh + candidates[: max(0, batch_size)]
         else:
             batch = list(benches)
         # The contract handler upserts option_expiration from the same page

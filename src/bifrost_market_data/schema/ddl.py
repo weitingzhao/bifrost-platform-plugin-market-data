@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from bifrost_market_data.schema.wave8_migrations import (
     FINANCIALS_ENTITY_TABLES,
     add_financials_filing_date,
+    create_option_contract_staleness_index,
     migrate_option_open_interest_partitioned,
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
@@ -47,6 +48,7 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
         retire_data_ops_compat_schema(cur)
+        create_option_contract_staleness_index(cur)
         # A data repair rather than a schema change, but it belongs on the same
         # path: it needs raw_market write access, it is idempotent, and 0.21.0
         # is what created the rows it fixes.
@@ -314,6 +316,17 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
         CREATE INDEX IF NOT EXISTS option_contract_underlying_expiry
         ON raw_market.option_contract (underlying, expiry, strike, option_right)
+        """
+    )
+    # "Who has waited longest for a re-enumeration" — one index probe per
+    # underlying instead of a scan. option-refresh used to rotate on a hash of
+    # the target date, which is the same for all four of its six-hourly runs, so
+    # three of them re-fetched the batch the first had just done and the 575-name
+    # universe took ~48 days to come round.
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_contract_underlying_updated
+        ON raw_market.option_contract (underlying, updated_at DESC)
         """
     )
 

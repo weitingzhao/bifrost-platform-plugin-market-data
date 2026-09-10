@@ -80,6 +80,24 @@ def create_financials_entity_tables(cur: _Cursor) -> None:
         )
 
 
+def create_option_contract_staleness_index(cur: _Cursor) -> None:
+    """Support "who has waited longest" without a scan.
+
+    option-refresh rotated on a hash of the *target date*, which is identical
+    across all four of its six-hourly runs: measured 2026-09-10, the 06:20 and
+    12:20 runs enqueued the same twelve names, so the 575-name universe came
+    round about every 48 days rather than the 12 the cron rate suggests.
+    Ordering by the oldest ``updated_at`` per underlying advances on every run
+    and repairs itself when one is missed — but only if it is an index probe.
+    """
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS option_contract_underlying_updated
+        ON raw_market.option_contract (underlying, updated_at DESC)
+        """
+    )
+
+
 def create_stock_financials_compat_view(cur: _Cursor) -> None:
     cur.execute("DROP VIEW IF EXISTS raw_market.stock_financials CASCADE")
     cur.execute(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pytest
@@ -182,6 +182,13 @@ class _DailyCursor:
             seen = sorted({und for _t, und, *_r in self.parent.option_contracts})
             self.parent._fetchall = [(u,) for u in seen]
             self.parent._fetchone = None
+        elif "stalest_underlyings" in q:
+            if self.parent.raise_on_stalest:
+                raise RuntimeError("canceling statement due to statement timeout")
+            self.parent._fetchall = [
+                (sym, when) for sym, when in sorted(self.parent.catalogue_updated.items())
+            ]
+            self.parent._fetchone = None
         elif "enumerated_underlyings: contracts" in q:
             if self.parent.raise_on_enumerated:
                 raise RuntimeError("canceling statement due to statement timeout")
@@ -317,6 +324,8 @@ class _DailyConn:
         research_universe: list[tuple[str, str, int]] | None = None,
         done_contract_jobs: list[str] | None = None,
         raise_on_enumerated: bool = False,
+        catalogue_updated: dict[str, Any] | None = None,
+        raise_on_stalest: bool = False,
     ) -> None:
         self.session_evidence = session_evidence
         self.session_symbols = session_symbols or []
@@ -327,6 +336,9 @@ class _DailyConn:
         self.research_universe = research_universe or []
         self.done_contract_jobs = done_contract_jobs or []
         self.raise_on_enumerated = raise_on_enumerated
+        # {underlying: when its catalogue was last walked}; missing = never
+        self.catalogue_updated = dict(catalogue_updated or {})
+        self.raise_on_stalest = raise_on_stalest
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
@@ -541,26 +553,127 @@ def test_enqueue_option_refresh_batch() -> None:
     assert underlyings - {"SPY", "QQQ", "IWM"} <= set(symbols)
 
 
-def test_enqueue_option_refresh_rotates_by_date() -> None:
+def test_enqueue_option_refresh_takes_the_stalest_first() -> None:
+    """Whoever has waited longest for a re-enumeration goes first.
+
+    The old order hashed the *target date*, which is identical across all four
+    of this slot's six-hourly runs. Measured 2026-09-10, the 06:20 and 12:20
+    runs enqueued the same twelve names, so the 575-name universe came round
+    about every 48 days rather than the 12 the cron rate implies.
+    """
     symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
-    r1 = enqueue_slot(
-        _DailyConn(),
+    # Every name enumerated at some point, so the order is staleness alone and
+    # not the never-seen rule the next test covers.
+    conn = _DailyConn(
+        catalogue_updated={
+            "AMD": datetime(2024, 6, 1, tzinfo=timezone.utc),   # stalest
+            "META": datetime(2024, 6, 5, tzinfo=timezone.utc),  # next
+            "TSLA": datetime(2024, 6, 12, tzinfo=timezone.utc),
+            "AAPL": datetime(2024, 6, 17, tzinfo=timezone.utc),
+            "MSFT": datetime(2024, 6, 18, tzinfo=timezone.utc),
+            "NVDA": datetime(2024, 6, 19, tzinfo=timezone.utc),  # freshest
+        }
+    )
+    r = enqueue_slot(
+        conn,
         "option-refresh",
         target_date=date(2024, 6, 20),
         watchlist_symbols=symbols,
-        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 2}}},
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-refresh": {"batch_size": 2, "max_new_per_run": 0}},
+        },
+    )
+    assert [j["payload"]["underlying"] for j in r["jobs"]] == ["AMD", "META"]
+
+
+def test_four_runs_in_one_day_cover_four_different_batches() -> None:
+    """The property the batch size is sized for: one full cycle a day.
+
+    Under the date-hash rotation all four six-hourly runs computed the same
+    offset and took the same names, so raising batch_size alone would have
+    bought four copies of one batch rather than four batches.
+    """
+    universe = [f"SYM{i:03d}" for i in range(20)]
+    seen = {s: datetime(2024, 6, 1, tzinfo=timezone.utc) for s in universe}
+    cfg = {
+        "iv_radar_benchmarks": [],
+        "slots": {"option-refresh": {"batch_size": 5, "max_new_per_run": 0}},
+    }
+    batches = []
+    for run in range(4):
+        conn = _DailyConn(catalogue_updated=dict(seen))
+        r = enqueue_slot(
+            conn,
+            "option-refresh",
+            target_date=date(2024, 6, 20),  # the same day for all four runs
+            watchlist_symbols=universe,
+            scheduler_cfg=cfg,
+        )
+        picked = [j["payload"]["underlying"] for j in r["jobs"]]
+        batches.append(set(picked))
+        # What a finished job does: stamps updated_at on the rows it walked.
+        for sym in picked:
+            seen[sym] = datetime(2024, 6, 20, 6 * run, tzinfo=timezone.utc)
+
+    assert all(len(b) == 5 for b in batches)
+    for i in range(len(batches)):
+        for j in range(i + 1, len(batches)):
+            assert not (batches[i] & batches[j]), f"run {i} and {j} overlap"
+    assert set().union(*batches) == set(universe), "four runs of five cover twenty"
+
+
+def test_enqueue_option_refresh_puts_never_enumerated_before_any_timestamp() -> None:
+    symbols = ["AAA", "BBB", "CCC"]
+    conn = _DailyConn(
+        catalogue_updated={
+            "AAA": datetime(2020, 1, 1, tzinfo=timezone.utc),  # ancient, but seen
+            "BBB": datetime(2024, 6, 19, tzinfo=timezone.utc),
+        }
+    )
+    r = enqueue_slot(
+        conn,
+        "option-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={
+            "iv_radar_benchmarks": [],
+            "slots": {"option-refresh": {"batch_size": 1, "max_new_per_run": 0}},
+        },
+    )
+    assert [j["payload"]["underlying"] for j in r["jobs"]] == ["CCC"]
+
+
+def test_enqueue_option_refresh_keeps_the_date_rotation_when_it_cannot_tell() -> None:
+    """An unreadable staleness probe must not make every name equally stale.
+
+    That is the 2026-09-08 shape: a lookup failed, its fallback answered "none",
+    and every run re-enumerated the same first names from "A" while the tail of
+    the universe was never reached.
+    """
+    symbols = ["AAPL", "MSFT", "TSLA", "NVDA", "AMD", "META"]
+    cfg = {
+        "iv_radar_benchmarks": [],
+        "slots": {"option-refresh": {"batch_size": 2, "max_new_per_run": 0}},
+    }
+    r1 = enqueue_slot(
+        _DailyConn(raise_on_stalest=True),
+        "option-refresh",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg=cfg,
     )
     r2 = enqueue_slot(
-        _DailyConn(),
+        _DailyConn(raise_on_stalest=True),
         "option-refresh",
         target_date=date(2024, 6, 21),
         watchlist_symbols=symbols,
-        scheduler_cfg={"slots": {"option-refresh": {"batch_size": 2}}},
+        scheduler_cfg=cfg,
     )
     u1 = {j["payload"]["underlying"] for j in r1["jobs"]}
     u2 = {j["payload"]["underlying"] for j in r2["jobs"]}
-    # Different dates should generally pick different batches (stable sha256 rotation).
-    assert u1 != u2 or len(symbols) <= 2
+    assert u1 and u2
+    assert u1 != u2, "the date rotation is the fallback, and it still rotates"
 
 
 def test_enqueue_option_bars_targets_the_money() -> None:

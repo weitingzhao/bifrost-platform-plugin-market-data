@@ -48,7 +48,13 @@ data:
         option-refresh:
           cron: "20 */6 * * *"
           priority: 4
-          batch_size: 12
+          # One full cycle a day: four six-hourly runs x 144 covers the ~564
+          # non-benchmark names in the universe. It was 12, and because the
+          # rotation hashed the target date all four runs took the same twelve,
+          # so the catalogue came round about every 48 days. option-bars picks
+          # its near-spot tickers out of that catalogue, so a stale one narrows
+          # what gets priced.
+          batch_size: 144
           # Blueprint C-F5: enumerate research.option_universe (resident / core /
           # edge), not the watchlist. Names the table lists but nothing has
           # enumerated go first, up to this many per run; the table's tier sets
