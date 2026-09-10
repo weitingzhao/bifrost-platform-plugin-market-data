@@ -1,5 +1,5 @@
 ---
-version: 2026-09-10.4
+version: 2026-09-10.5
 updated: 2026-09-10
 status: 四轴普查已落地 · 调整后合约归一 · Doctor 接上了厚度轴（能发现的现在也能修）
 ---
@@ -174,6 +174,42 @@ Owner 定：**扩范围**。`option-bars` 改吃 `research.option_universe`（wa
 2. **每次每个数据集最多开 3 张处方**，且当上限生效时会在 detail 里明说还剩几天。一个 `option-bars` 日 ≈ 7 万个 job，无上限的处方遇到坏了一个月的数据集会在一夜之间压进去几百万。
 3. **不进 `EOD_CRITICAL_CHECKS`。** finding id 前缀是 `continuity:`，不会阻塞 Research 的 dbt 批次——一个可补的旧洞是 warn，不是 crit。
 
+### Coverage 一屏：宏观与细节分层（0.24.0 + Console）
+
+Owner 的两点观察，实测都成立。
+
+**这一屏在读者表达任何兴趣之前先付了约 52 秒。** 挂载时并发打 11 个端点，逐个计时（经 platform-api 代理，2026-09-10）：
+
+| 端点 | 耗时 | 性质 |
+|---|---|---|
+| `coverage/inventory` | 7 ms | 宏观（已缓存） |
+| `coverage/dimensions` | 9 ms | 宏观（已缓存） |
+| `ingest/queue-dashboard` | 145 ms | — |
+| `coverage/sepa-stats` | 201 ms | 细节（便宜） |
+| `coverage/watchlist` | 7.5 s | 细节 |
+| `snapshot-quality-detail` | 11.0 s | 细节（单标的 14 天） |
+| `coverage/quality-score` | 12.0 s | **宏观** |
+| `coverage/db-summary` | 16.4 s | 细节 |
+| `coverage/contracts?limit=500` | 21.0 s | 细节 |
+| `coverage/greeks?limit=500` | **52.5 s** | 细节 |
+
+四轴那份 14.5 KB 的数据 **9 毫秒**就回来了。慢的部分全部是细节，而唯一慢的宏观读数是那个 4/4 判定。
+
+**折叠不停查询。** `OpsSection` 用的是 `<details>`——折叠只隐藏、不卸载，子组件的 `useQuery` 照跑、照着 60 秒 `refetchInterval` 反复重打。所以「默认收起」这条设计规则在实现层从来没有生效过。`OpsSection` 现在会报告展开状态，三个重面板默认收起并把查询挂在上面；`db-summary` 与 `watchlist` 从 tab 顶层移下去。
+
+**结果：11 个端点降到 5 个，首屏从被 52 秒封顶变成被 200 毫秒封顶。** 展开时才取，已实测。
+
+**矩阵（契约新增 `grain`）。** 档位说「哪些标的」，粒度说「一行是什么」，两者互不可推：`option_snapshot` 与 `option_daily` 同档不同粒度，`stock_daily` 与 `option_daily` 同粒度不同档。所以 `grain` 是声明的，和 `cadence`、`backfill_slot` 一样——Console 里手写一份映射，第一次加数据集就会漂移。
+
+矩阵把 19 个契约排成档位 × 粒度，每个数据集带同样四个标记（B/D/F/C），颜色就是四轴表给出的那个判定——**不新增任何判断逻辑**，所以扫格子的人和读表的人不可能被告知不同的事。空格保留：「基准之外没有分钟数据」是一件应该不用特意去找就能看见的事。
+
+**顺带修掉两个会误导读者的判定**：
+
+1. **「还在算」曾被渲染成 PASS。** `quality-score` 挪到后台缓存后，首答是 `{ok: true, summary: null, checks: []}`，而 Console 那行 `score?.summary ?? (score?.ok === true ? 'PASS' : …)` 把它读成了通过——在一次**尚未发生**的检查上刷绿。这正是第四轴存在的理由那个形状（跳过被记成成功）。判定移进 `qualityScoreModel`，没有答案时返回 null。
+2. **没有时钟的数据集曾显示成灰色 unknown。** `ticker` / `option_contract` / `us_market_holiday` 根本没有日期列——它们列举存在的东西，不观测它。深度轴一直把这叫 boundary，新鲜度轴叫的是 unknown。改齐之后矩阵从 2/19 clean 变成 5/19。
+
+**一处未改、需要你定的**：`option_snapshot` 与 `option_open_interest` 的深度目标写的是 90 个 session（trim 保留量），当前中位 2 天，判定是 thin（红）。但 EOD 链**无法回填**，这 90 天只能向前累积——它是一个爬坡，不是缺陷。矩阵让这一点更显眼了，而红色恰恰抬高了理解门槛。要不要把它改成计划边界（像 `catalogue` 那样），是契约语义问题。
+
 ### 期权目录的轮转（0.23.0）
 
 `option-refresh` 名义上是「每 6 小时一批 12 个」，看上去 575 个标的 12 天转一圈。**实测是约 48 天**，因为轮转偏移是 `sha256(目标日期)`——一天之内四次运行算出同一个偏移、取同一批：
@@ -345,6 +381,7 @@ Owner 定：**扩范围**。`option-bars` 改吃 `research.option_universe`（wa
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-10.5 | 2026-09-10 | Coverage 分层：宏观（inventory + 4/4 + 档位×粒度矩阵）全部毫秒级，细节展开才取；11 个端点降到 5 个。契约新增 `grain`。顺带修掉「还在算被渲染成 PASS」和「没有时钟被渲染成 unknown」两个误导判定。|
 | 2026-09-10.4 | 2026-09-10 | 期权目录轮转：标称 12 天、实测 ~48 天（轮转偏移按日期哈希，一天四次运行取同一批）。改为按 `updated_at` 最旧优先 + `batch_size` 144，一天一圈。|
 | 2026-09-10.3 | 2026-09-10 | 厚度检查的查询形状三次修正（§2e 末）：聚合 → 逐日探测 → 一次往返 → LATERAL。第三步曾让 `option_daily` 静默超时被跳过，而它正是这条检查的主体。 |
 | 2026-09-10.2 | 2026-09-10 | Doctor 接上厚度轴（§2e）：60 天窗口内找出可补的缺失 session 并给出精确到日的处方，`market_self_heal` 因此获得修补旧洞的能力；能不能补由契约的 `backfill_slot` 声明，19 个数据集里 5 个可补。调整后合约的 underlying 归一到目录表，历史行由幂等迁移订正。 |
