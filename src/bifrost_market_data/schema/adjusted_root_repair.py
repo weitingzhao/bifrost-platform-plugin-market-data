@@ -111,9 +111,19 @@ def repair_adjusted_underlyings(
     meant the repair could never finish — and made it look finished, because the
     next run reported "nothing written".
 
-    Committing each root turns it into a job that chips away: each deploy
-    rewrites what it can and the next one continues. A statement that times out
-    costs that one root, not the run.
+    Committing each root means a statement that times out costs that one root
+    rather than the run.
+
+    **It does not reach the backlog, and measurement said so.** Of those
+    2,964,147 rows, 135 have a contract the catalogue still holds; the other
+    2,964,019 belong to contracts that expired months ago, and
+    ``option_contract`` starts at expiry 2026-08-05. The EXISTS below is what
+    makes this repair safe and is also what puts those rows out of reach — it
+    has already done everything it can. Whether to relax it for the 35 roots
+    that are ``canonical + digit`` (the OCC adjusted convention, which no real
+    equity symbol matches) is an Owner call, because it is 2.9M irreversible
+    rewrites. The 36th pair, ``BRKB`` → ``BRK.B``, is a punctuation difference
+    rather than an adjusted root and would need judging separately.
 
     ``budget_sec`` bounds the whole thing, because this rides a deploy.
 
