@@ -256,14 +256,21 @@ WHERE d.underlying = %s
 #: ctid: SPXW is 2.8M rows and a single statement for it finishes inside no
 #: budget worth setting. Each chunk is its own statement and its own commit, so
 #: the work survives a timeout and a deploy leaves behind what it managed.
+#:
+#: ``d.underlying = %s`` in the outer WHERE is not redundant and its absence was
+#: a data-corruption bug. **option_daily is partitioned by bar_date, and a ctid
+#: is unique only within a partition.** Filtering on ctid alone matched the same
+#: physical slot in every other partition too: run on 2026-09-10 it reported
+#: 2,200,677 rows rewritten where 598,438 were owed.
 _UNGUARDED_CHUNK = """
 UPDATE raw_market.{table} d
 SET underlying = %s
-WHERE d.ctid = ANY(ARRAY(
-    SELECT ctid FROM raw_market.{table}
-    WHERE underlying = %s
-    LIMIT {chunk}
-))
+WHERE d.underlying = %s
+  AND d.ctid = ANY(ARRAY(
+        SELECT ctid FROM raw_market.{table}
+        WHERE underlying = %s
+        LIMIT {chunk}
+  ))
 """
 
 
@@ -293,7 +300,7 @@ def _rewrite_root(
             cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
             cur.execute(
                 _UNGUARDED_CHUNK.format(table=table, chunk=int(CHUNK_ROWS)),
-                (canonical, root),
+                (canonical, root, root),
             )
             n = int(getattr(cur, "rowcount", 0) or 0)
         conn.commit()

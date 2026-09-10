@@ -71,7 +71,8 @@ class _Cur:
             # (canonical, root) and is asked repeatedly until it answers zero.
             root = params[1]
             key = (table, root)
-            if len(params) == 2:
+            if len(params) == 3 and params[1] == params[2]:
+                # chunked: (canonical, root, root)
                 left = self.hits.get(key, 0)
                 n = min(left, 50_000)
                 self.hits[key] = left - n
@@ -279,3 +280,19 @@ def test_the_budget_stops_a_long_rewrite_between_chunks() -> None:
     )
     assert out["option_daily"] == 50_000  # one chunk landed and stayed landed
     assert conn.commits == 1
+
+
+def test_the_chunk_filters_on_underlying_and_not_ctid_alone() -> None:
+    """option_daily is partitioned by bar_date and a ctid is unique only within
+    a partition.
+
+    Filtering on ctid alone matched the same physical slot in every other
+    partition. Run against the real table on 2026-09-10 it reported 2,200,677
+    rows rewritten where 598,438 were owed — roughly 1.6M rows moved to an
+    underlying that was not theirs.
+    """
+    cur = _Cur([("O:SPXW260918C05000000", "SPX")], {("option_daily", "SPXW"): 10})
+    repair_adjusted_underlyings(_Conn(cur), tables=("option_daily",))
+    chunk = next(q for q, _ in cur.statements if q.startswith("UPDATE") and "ctid" in q)
+    assert "d.underlying = %s" in chunk, "the ctid list is not a filter on its own"
+    assert chunk.index("d.underlying") < chunk.index("d.ctid")

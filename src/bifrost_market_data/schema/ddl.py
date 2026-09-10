@@ -23,6 +23,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     retire_data_ops_compat_schema,
 )
 from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
+from bifrost_market_data.schema.ctid_damage_restore import restore_ctid_damage
 from bifrost_market_data.schema.wave9_migrations import migrate_option_snapshot_observed_time
 
 
@@ -63,6 +64,16 @@ def apply_wave8_migrations(conn: _Connection) -> None:
     # the run, and what it does not finish carries to the next deploy. It must
     # never fail the migration — measured 2026-09-10, a timeout in here is what
     # made a successful deploy print "DDL failed" as its last line.
+    # First, undo what 0.31.6's chunked rewrite put in the wrong place. It runs
+    # before the repair so a single deploy cannot damage and then re-damage.
+    try:
+        restored = restore_ctid_damage(conn)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ctid damage restore skipped: {exc}")
+    else:
+        if restored:
+            print(f"ctid damage restored: {restored}")
+
     try:
         repaired = repair_adjusted_underlyings(conn)
     except Exception as exc:  # noqa: BLE001 — a data fix must not fail a schema deploy
