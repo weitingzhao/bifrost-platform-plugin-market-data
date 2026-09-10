@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry apply-roles ownership-sql apply-ownership rollback-ownership run-api kustomize-check verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
+.PHONY: install-dev test lint db-init db-init-dry apply-roles ownership-sql apply-ownership rollback-ownership run-api kustomize-check deploy verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
 
 install-dev:
 	pip install -e ".[dev]"
@@ -40,6 +40,18 @@ run-api:
 
 kustomize-check:
 	kubectl kustomize k8s/base >/dev/null
+
+# A Job's pod template is immutable, and this one carries the release tag, so a
+# plain `kubectl apply -k` fails whenever the previous migration Job is still
+# inside its TTL. Deleting first is not a workaround: re-running the idempotent
+# migrations on every release is what the Job is for, and the ten releases it
+# spent pinned to 0.11.1 are what happens when it does not.
+deploy:
+	kubectl -n plugin-market-data delete job job-wave8-schema-migrate --ignore-not-found
+	kubectl apply -k k8s/base
+	kubectl -n plugin-market-data rollout status deploy/market-data-api --timeout=180s
+	kubectl -n plugin-market-data wait --for=condition=complete --timeout=300s job/job-wave8-schema-migrate
+	kubectl -n plugin-market-data logs job/job-wave8-schema-migrate --tail=20
 
 verify-market-data:
 	bash scripts/verify-market-data.sh
