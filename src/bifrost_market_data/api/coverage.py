@@ -874,6 +874,21 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
     what the vendor returns for a contract nothing has quoted. It belongs to
     this panel, so this panel gets to state it — for every underlying, not the
     first five hundred.
+
+    Bounded to one session, which is the correction that matters. The first cut
+    of this took ``DISTINCT ON (option_ticker)`` over all of option_snapshot, so
+    a contract last seen in August contributed its August row: measured
+    2026-09-10, 244,548 contracts had ever been snapshotted while only 187,456
+    were in that evening's chain, and the 57,092 that had dropped out carried
+    most of the missing greeks. The all-history ratio read 86.1% and the
+    session's own read 93.8%.
+
+    This is C-B1 again — a ratio's numerator must come from its own
+    denominator's population — and it was copied in from
+    ``query_greeks_coverage``, which still has it and has no console consumer.
+    Both halves come from the same session now, so a half-written session (the
+    intraday chain's benchmarks at 14:30, before the evening sweep) gives a
+    smaller sample rather than a false reading; ``session`` says which one it is.
     """
     out: dict[str, Any] = {"ok": True, "contracts": None, "greeks": None}
     if table_exists(conn, "market", "option_contract"):
@@ -898,10 +913,16 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                WITH latest AS (
+                WITH bound AS (
+                    SELECT max((snapshot_ts AT TIME ZONE 'America/New_York')::date) AS d
+                    FROM raw_market.option_snapshot
+                    WHERE snapshot_ts >= now() - interval '10 days'
+                ),
+                latest AS (
                     SELECT DISTINCT ON (option_ticker)
                         UPPER(TRIM(underlying)) AS symbol, delta, gamma, theta, vega
-                    FROM raw_market.option_snapshot
+                    FROM raw_market.option_snapshot s, bound b
+                    WHERE (s.snapshot_ts AT TIME ZONE 'America/New_York')::date = b.d
                     ORDER BY option_ticker, snapshot_ts DESC
                 ),
                 per AS (
@@ -916,7 +937,8 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
                        SUM(complete)::bigint,
                        COUNT(*) FILTER (WHERE complete::numeric / NULLIF(n, 0) >= 0.9)::int,
                        COUNT(*) FILTER (WHERE complete::numeric / NULLIF(n, 0) >= 0.7
-                                          AND complete::numeric / NULLIF(n, 0) < 0.9)::int
+                                          AND complete::numeric / NULLIF(n, 0) < 0.9)::int,
+                       (SELECT d FROM bound)
                 FROM per
                 """
             )
@@ -925,6 +947,10 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
             n = int(row[1] or 0)
             complete = int(row[2] or 0)
             out["greeks"] = {
+                # Which session these contracts were observed in. A reader has
+                # to be able to see when it is the intraday chain's handful of
+                # benchmarks rather than the evening's full sweep.
+                "session": iso_value(row[5]),
                 "underlyings": int(row[0] or 0),
                 "contracts": n,
                 "with_full_greeks": complete,

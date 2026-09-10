@@ -112,6 +112,10 @@ def test_db_summary_carries_the_tables_the_retired_panel_held(monkeypatch) -> No
 # ── the headline is over the whole population ─────────────────────────────
 
 
+def _headline(conn_answer) -> Any:
+    return mod.query_chain_headline(_Conn(conn_answer))
+
+
 def test_the_headline_does_not_carry_a_page_limit() -> None:
     """The console asked for 500 underlyings and drew "301/500" while the estate
     held 570 with 379 at target — numerator and denominator both truncated by
@@ -119,16 +123,17 @@ def test_the_headline_does_not_carry_a_page_limit() -> None:
     def answer(s: str) -> Any:
         if "option_contract" in s:
             return (570, 769_363, "2026-08-05", "2031-12-19")
-        return (570, 236_644, 203_750, 379, 96)
+        return (570, 187_456, 175_800, 379, 96, "2026-09-10")
 
     conn = _Conn(answer)
     out = mod.query_chain_headline(conn)
     assert out["contracts"]["underlyings"] == 570
     assert out["greeks"] == {
+        "session": "2026-09-10",
         "underlyings": 570,
-        "contracts": 236_644,
-        "with_full_greeks": 203_750,
-        "pct_full": 86.1,
+        "contracts": 187_456,
+        "with_full_greeks": 175_800,
+        "pct_full": 93.8,
         "at_90": 379,
         "at_70": 96,
     }
@@ -188,3 +193,34 @@ def test_the_retired_route_is_gone(monkeypatch) -> None:
     monkeypatch.setattr(mod, "require_db", lambda: _DummyConn())
     client = TestClient(create_app())
     assert client.get("/market/coverage/sepa-stats").status_code == 404
+
+
+def test_the_greeks_pass_is_bounded_to_one_session() -> None:
+    """C-B1, again: a ratio's numerator must come from its own denominator's
+    population.
+
+    The first cut took DISTINCT ON over all of option_snapshot, so a contract
+    last seen in August contributed its August row. Measured 2026-09-10:
+    244,548 contracts had ever been snapshotted against 187,456 in that
+    evening's chain, and the 57,092 that had dropped out carried most of the
+    missing greeks — the all-history ratio read 86.1%, the session's own 93.8%.
+    """
+    conn = _Conn(lambda _s: (570, 187_456, 175_800, 379, 96, "2026-09-10"))
+    mod.query_chain_headline(conn)
+    greeks_sql = [sql for sql, _ in conn.sql if "option_snapshot" in sql]
+    assert greeks_sql, "the greeks pass did not run"
+    sql = greeks_sql[-1]
+    # Both halves are counted inside one session, and the payload says which.
+    assert "max((snapshot_ts" in sql
+    assert "= b.d" in sql
+
+
+def test_the_session_is_reported_so_a_half_written_one_is_visible() -> None:
+    """Between the intraday chain at 14:30 and the evening sweep, the newest
+    session holds a handful of benchmarks. Bounding keeps the ratio honest —
+    both halves are from that session — but the sample is small, and only the
+    date on the payload lets a reader tell."""
+    conn = _Conn(lambda _s: (26, 4_100, 3_990, 24, 2, "2026-09-11"))
+    out = mod.query_chain_headline(conn)
+    assert out["greeks"]["session"] == "2026-09-11"
+    assert out["greeks"]["underlyings"] == 26
