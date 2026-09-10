@@ -13,9 +13,10 @@ Read-only.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
@@ -179,6 +180,11 @@ UNJUDGED_DEPTH_KINDS = frozenset({"since"})
 #: every one of them for a figure nobody needs to that precision.
 ACCRUAL_WALK_LIMIT = 2000
 
+#: How far back to look when asking whether an accrual is still moving. Long
+#: enough to survive a holiday week, short enough that a stall three weeks old
+#: is not diluted by the month of healthy days before it.
+ACCRUAL_RATE_DAYS = 14
+
 _ACCRUAL_SQL = """
 /* accrual */
 WITH RECURSIVE walk AS (
@@ -187,7 +193,8 @@ WITH RECURSIVE walk AS (
     SELECT (SELECT min({col}) FROM {table} WHERE {col} >= ((walk.t)::date + 1))
     FROM walk WHERE walk.t IS NOT NULL
 )
-SELECT count(*)::bigint, min(t)::date, max(t)::date
+SELECT count(*)::bigint, min(t)::date, max(t)::date,
+       count(*) FILTER (WHERE t::date > (CURRENT_DATE - {recent}))::bigint
 FROM (SELECT t FROM walk WHERE t IS NOT NULL LIMIT {limit}) d
 """
 
@@ -199,12 +206,31 @@ def _rollback_quietly(conn: Any) -> None:
         pass
 
 
-def _accrual(conn: Any, c: DatasetContract) -> dict[str, Any] | None:
-    """Sessions held and the first of them, or None when it cannot be read."""
+def _accrual(
+    conn: Any,
+    c: DatasetContract,
+    expected_days: Sequence[date] | None = None,
+    today: date | None = None,
+) -> dict[str, Any] | None:
+    """Sessions held, and whether the pile is still growing.
+
+    A fraction alone cannot be acted on. "60% of the way to 90 sessions" reads
+    the same whether the dataset gained a session last night or stopped three
+    weeks ago, and those are the only two states worth telling apart when the
+    goal is growing the estate: one needs patience, the other needs a look.
+
+    The rate is sessions gained in the last ``ACCRUAL_RATE_DAYS`` against the
+    trading days that actually fell in that window — a holiday week must not
+    read as a stall. It comes from the same skip scan as the count, so asking
+    costs nothing extra.
+    """
     if c.date_column is None:
         return None
     sql = _ACCRUAL_SQL.format(
-        col=c.date_column, table=c.dataset, limit=ACCRUAL_WALK_LIMIT
+        col=c.date_column,
+        table=c.dataset,
+        limit=ACCRUAL_WALK_LIMIT,
+        recent=int(ACCRUAL_RATE_DAYS),
     )
     try:
         rows = _rows(conn, sql)
@@ -216,6 +242,7 @@ def _accrual(conn: Any, c: DatasetContract) -> dict[str, Any] | None:
             return None
         held = int(rows[0][0] or 0)
         first, last = rows[0][1], rows[0][2]
+        gained = int(rows[0][3] or 0) if len(rows[0]) > 3 else 0
     except Exception as exc:  # noqa: BLE001 — the boundary still stands without it
         logger.warning("accrual read failed for %s: %s", c.dataset, exc)
         try:
@@ -229,9 +256,63 @@ def _accrual(conn: Any, c: DatasetContract) -> dict[str, Any] | None:
         "newest": last.isoformat() if last else None,
         "capped": held >= ACCRUAL_WALK_LIMIT,
     }
+    out.update(_accrual_rate(c, held, gained, expected_days, today))
     if c.depth.accrues_to_sessions:
         out["accrues_to"] = c.depth.accrues_to_sessions
         out["pct"] = round(100.0 * held / c.depth.accrues_to_sessions, 1)
+    return out
+
+
+def _accrual_rate(
+    c: DatasetContract,
+    held: int,
+    gained: int,
+    expected_days: Sequence[date] | None,
+    today: date | None,
+) -> dict[str, Any]:
+    """How fast the pile is growing, and how long it has left at that speed.
+
+    Divided by the trading days in the window rather than by the window — a
+    week the market was shut is not a week of standing still, and a rate that
+    says so would put every dataset on report each Christmas.
+
+    Reported as trading days remaining, not a date: projecting a date needs the
+    forward calendar, and inventing one from a five-day week would be a guess
+    dressed as a measurement.
+    """
+    today = today or _today()
+    window_start = today - timedelta(days=int(ACCRUAL_RATE_DAYS))
+    due = (
+        len([d for d in expected_days if window_start < d <= today])
+        if expected_days
+        else None
+    )
+    out: dict[str, Any] = {
+        "rate_window_days": ACCRUAL_RATE_DAYS,
+        "gained_recent": gained,
+        "sessions_due_recent": due,
+    }
+    if not due:
+        # No calendar, or a window with no trading days in it. Either way there
+        # is no rate to report, and reporting one anyway is how a quiet holiday
+        # becomes a false alarm.
+        out["rate"] = None
+        out["stalled"] = None
+        out["sessions_remaining"] = None
+        return out
+
+    rate = min(1.0, gained / due)
+    out["rate"] = round(rate, 2)
+    target = c.depth.accrues_to_sessions
+    short_of_target = bool(target) and held < int(target)
+    # Only a pile that has somewhere left to reach can stall. One sitting at its
+    # ceiling is not growing because there is nothing left to grow into, and
+    # whether it is still being *written* is the freshness axis's question.
+    out["stalled"] = short_of_target and gained == 0
+    if target and short_of_target and rate > 0:
+        out["sessions_remaining"] = math.ceil((int(target) - held) / rate)
+    else:
+        out["sessions_remaining"] = None
     return out
 
 
@@ -401,7 +482,7 @@ def _one(
         accrual = None
         if c.depth.kind == "forward_only":
             try:
-                accrual = _accrual(conn, c)
+                accrual = _accrual(conn, c, expected_days, today)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("accrual failed for %s: %s", c.dataset, exc)
                 _rollback_quietly(conn)
