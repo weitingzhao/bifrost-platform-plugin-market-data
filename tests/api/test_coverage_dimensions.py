@@ -882,3 +882,30 @@ def test_the_void_symbols_stay_server_side(wired: dict[str, Any], monkeypatch) -
     monkeypatch.setattr(mod, "load_voided_symbols", lambda conn, dt: {"MSFT"})
     body = mod.get_dimensions(tier=None, refresh=True)["data"]
     assert "voids" not in body["denominators"]
+
+
+def test_the_payload_publishes_the_session_so_no_panel_derives_a_second_one(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-F1: one definition of "the session the tables should hold".
+
+    The overview strips were comparing last_run_at's UTC calendar date against
+    today's, which reads Missing every weekday between 00:00 UTC and the next
+    evening's batch — 2026-09-11 01:52 UTC is 21:52 in New York on the 10th,
+    the 10th's data is complete, and the strip said Missing.
+    """
+    # Pinned to the resolver, not to a date: the point is that the payload
+    # republishes the one definition rather than deriving a second one.
+    monkeypatch.setattr(mod, "_session", lambda conn: date(2026, 9, 10))
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    assert body["session"] == "2026-09-10"
+
+
+def test_a_session_that_cannot_be_resolved_is_null_not_today(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """None means "do not bound" everywhere else in this module; publishing
+    today instead would hand a panel a confident wrong answer."""
+    monkeypatch.setattr(mod, "_session", lambda conn: None)
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    assert body["session"] is None

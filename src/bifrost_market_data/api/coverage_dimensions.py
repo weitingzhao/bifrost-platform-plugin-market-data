@@ -793,6 +793,13 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # The one definition of "the session the tables should hold" (C-F1),
+        # published so a panel never has to derive a second one. The overview
+        # strips were comparing `last_run_at`'s UTC calendar date against
+        # today's, which reads Missing for every weekday between 00:00 UTC and
+        # the next evening's batch — the data for the last completed session is
+        # there, and the clock the question was asked on is the wrong one.
+        "session": session.isoformat() if session else None,
         "denominators": public_denominators,
         "datasets": rows,
         "memory": _remember(key, rows),

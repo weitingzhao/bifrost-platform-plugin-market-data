@@ -1,5 +1,5 @@
 ---
-version: 2026-09-11.2
+version: 2026-09-11.3
 updated: 2026-09-10
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过）
 ---
@@ -780,6 +780,50 @@ void 集合每次 compute 只读一次（按品类，不按数据集），且和
 ### 一个测试当场抓住的漏
 
 我加了 slot 分支却没把 `ticker-details` 注册进 `SLOT_NAMES`，`enqueue_slot` 会直接抛 `unknown slot`——**发出去就是死的**。测试第一次跑就撞出来了。这正是「测试要驱动真入口而不是断言内部形状」的价值：我原本写了个带条件回退的版本，那个版本会绿着通过。
+
+## 2r. Overview 那两条也收敛了（0.34.0）
+
+Owner 在盘后看到总览页三个红：`Market batch MISSED` · `Research OLAP DEGRADED` · `Stock Summary Missing`，问「数据没 ready 的情况下 Research 怎么给分析」。
+
+**先答问题：Research 没被挡住，也不该被挡住。** 闸门是 `husbandry_gate` 读的 `doctor.eod_critical`：
+
+```
+eod_critical = healthy
+  checks: option_snapshot · option_open_interest · stock_daily · stock_daily_watchlist
+  detail: 4 EOD checks complete for 2026-09-10
+```
+
+`plugin_batch_assets.py` 的 docstring 就是为这个问题写的：市场侧按 **这一场的表里实际持有什么** 判，**不按 cron 依从性**，所以一个滞后的 rotate 不再挡 dbt。
+
+### ① Stock Summary 的 Missing：拿 UTC 日历日当 session
+
+```js
+const today = utcToday(now)               // "2026-09-11"
+const lastDate = lastRunAt?.slice(0,10)   // "2026-09-10"
+if (lastDate === today) return 'Today OK'
+// 周末豁免只覆盖 周六/周日/周一22UTC前；'Scheduled' 只在 next_run 12h 内
+return 'Missing'
+```
+
+2026-09-11 01:52 UTC 是纽约 09-10 的 21:52——那一场的批次早已跑完、表里 1,375 万行、doctor 说 EOD 四项齐全，而条上写 `Missing`。**每个工作日 00:00 UTC 到次日傍晚的批次之间都是这样**，也就是一天里的大半。
+
+这是校准 §3.1 记的「四套 session 定义」里的一套，`dataVitalsModel.ts:9-10` 被点过名。Coverage 早已收敛到 `session.py` 的唯一定义（C-F1），Overview 没有。
+
+修法**不是在 TS 里再实现一遍规则**——那正是 C-G1 禁止的。插件把它算好的 session 发在 `dimensions` 载荷顶层，Console 渲染它。`DataVitalsStrip` 用的是 Coverage tab 同一个 queryKey，共享缓存，不多一次读取。无 session 时退回旧行为而不是编一个出来。
+
+### ② SEPA Technical 的 blocked：把「没测到」当成「测到是零」
+
+`scoreInputs` 里 `count == null || count <= 0` 一视同仁。而 SEPA Technical 唯一的必需输入取自 `breadthOf(dimensions, …)`，dimensions 冷算要约 220 秒。
+
+实测：01:52 那份 pack 生成时，API pod 刚在 01:36 因 0.33.0 重启，dimensions 到 01:55 才算完——**那八分钟里 SEPA Technical 报 `blocked — Stock daily`，而表里一直有 1,370 万行**。
+
+`pending` 那个守卫的注释「**Absent is unknown**」写对了，只是它只护住 inventory 这一个源。我第一版修法是给它加上 dimensions，**被既有测试当场否决**：那两个用例传的是显式 `0`，期望 `blocked`，而我的守卫把它们也变成了 unknown。
+
+所以改的是根因不是守卫：**`null` 是没测到，`0` 是测到是零，两者不再同义**。全部必需输入未测 → `unknown`；全部测到为零 → `blocked`；部分未测 → `thin`（不是 ready，但也不该派人去查）。
+
+### 这一节的形状
+
+两条都不是数据问题，是**问法问题**——而它们都出现在总览页，也就是第一眼看到的地方。一个每天有大半时间报红的页面，会训练人忽略它；那才是真正的代价，而不是某一格的颜色。
 
 ## 3. 已知差距与最小改动
 
