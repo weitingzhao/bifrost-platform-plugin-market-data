@@ -461,3 +461,23 @@ def test_the_dashboard_is_cached_for_a_short_while() -> None:
     mod.build_queue_dashboard(conn, now=now, grace_minutes=15)
     assert len(conn.statements) > queries_after_first
     mod._CACHE.clear()
+
+
+def test_every_schedulable_slot_declares_its_evidence() -> None:
+    """A slot absent from SLOT_EVIDENCE can only ever be judged `missed`.
+
+    `ticker-details` shipped in 0.33.0 without an entry: kinds=[] and
+    freshness=None, so the adherence judge had nothing to look for. On
+    2026-09-11 the Dagster run succeeded at 03:30:17 and the board still
+    waited for evidence it could never find.
+    """
+    from bifrost_market_data.api.ingest_dashboard import SLOT_EVIDENCE
+    from bifrost_market_data.scheduler.daily import SLOT_NAMES
+
+    missing = sorted(set(SLOT_NAMES) - set(SLOT_EVIDENCE))
+    assert not missing, f"slots with no declared evidence: {missing}"
+    for slot in SLOT_NAMES:
+        ev = SLOT_EVIDENCE[slot]
+        judged = bool(ev.get("kinds")) or bool(ev.get("freshness"))
+        exempt = ev.get("migrated") or ev.get("retired")
+        assert judged or exempt, f"{slot}: declares neither kinds nor freshness"

@@ -77,6 +77,11 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "kinds": ["treasury_yields"],
         "freshness": "treasury_yields",
     },
+    # Shares its kind with `reference` (the whole-market list); this slot is the
+    # per-symbol detail rotation. Missing from this map from 0.33.0 until 0.34.1,
+    # so the judge looked for no evidence at all and could only ever say
+    # "missed" -- even the night the Dagster run succeeded.
+    "ticker-details": {"kinds": ["ticker_sync"], "freshness": "ticker_sync"},
     "option-backfill": {
         "kinds": ["option_backfill_plan"],
         "freshness": "option_daily",
