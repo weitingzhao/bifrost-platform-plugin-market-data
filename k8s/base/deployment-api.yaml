@@ -77,10 +77,14 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              # Steady state sits near 154Mi once the four background caches
+              # (inventory / dimensions / quality-score / chain-headline) are warm.
+              memory: 256Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              # 256Mi OOMKilled the pod on 2026-09-11 02:29 during a cold cache
+              # warm-up; the dimensions compute walks 19 datasets x 4 axes.
+              memory: 512Mi
           livenessProbe:
             httpGet:
               path: /health
