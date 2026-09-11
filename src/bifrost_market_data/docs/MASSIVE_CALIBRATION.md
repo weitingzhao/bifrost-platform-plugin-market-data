@@ -1,5 +1,5 @@
 ---
-version: 2026-09-11.1
+version: 2026-09-11.2
 updated: 2026-09-10
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过）
 ---
@@ -756,6 +756,30 @@ void 集合每次 compute 只读一次（按品类，不按数据集），且和
 样例（ACB / AEG / AEM / AER / AFYA）看着全是外国发行人，但 `raw_market.ticker` 里**两组在每个字段上都一样**：`locale=us`、`currency=usd` 各 100%，交易所分布同形（无财报 XNAS 630 / XNYS 209 / XASE 62，有财报 XNAS 2703 / XNYS 1541 / XASE 171）。Polygon 因为它们在美国交易所挂牌就标 `locale: us`。
 
 所以理由只写**实测到的事**（vendor 对这些符号返回空），不写成因。今晚第三个从样本认出来的模式，第三个证实不了。
+
+## 2q. 两条都是「机器造好了，没接上」（0.33.0）
+
+### treasury：不猜发布时刻，改成一天两次
+
+`treasury_yield` 新鲜度报 partial——我们最新 2026-09-08，而 **Polygon 现在已有 09-09**（10y=4.83），09-10 它自己也还没有。09-10 12:00 UTC 那次 job 跑成功、拉了 08-11→09-10、写了 20 行，只是那一刻 vendor 还没发 09-09。
+
+**vendor 的发布时刻测不出来。** 第一反应是查 `treasury_yield.fetched_at`——结果全部 20 行都是 `09-10 12:00`：**它是最后写入时间，不是首次抓到时间**，因为 30 天 lookback 每次重写整个窗口。"这一行什么时候第一次可得"这个信息在我们的库里不存在。
+
+所以不挪到某个猜出来的小时，改成 **`0 12,23 * * 1-5`**：一天两次，每次一页二十行，代价近乎为零，而且不依赖猜对。真正点火的是 Dagster（`market_slot_schedules.py`），Plugin 的 `schedule.yaml` 是声明源——**两边都改了**。
+
+### ticker-details：handler 早就在，只是从来没人 enqueue
+
+`list_date` 对全部 5,317 个活跃 ticker 为空（§2o）。查下去发现 `ticker_sync` **早就有 `mode: "detail"` 分支**，它打 `/v3/reference/tickers/{ticker}` 并 upsert 全部 overview 列——`list_date` / `sector` / `market_cap` / `description`。`_UNIVERSE_UPDATE_COLS` 那行注释「列表 API 不返回 overview 字段，冲突时永不覆盖」，说明这条路径当初就是这么设计的。
+
+**缺的只是没有任何东西发这种 job。**
+
+新增 slot `ticker-details`：`30 3 * * *`，每次 200 个，选批规则是 `ORDER BY (list_date IS NOT NULL), updated_at NULLS FIRST`——**从没取过详情的排在取过的前面**，积压清完之后同一条查询自动变成「refresh 最旧的那批」，一个轮转而不是两个。5,317 个约四周填满。
+
+它是参考数据不是 session 数据，所以**不进假日门**：一家公司的上市日期不取决于市场开不开门。
+
+### 一个测试当场抓住的漏
+
+我加了 slot 分支却没把 `ticker-details` 注册进 `SLOT_NAMES`，`enqueue_slot` 会直接抛 `unknown slot`——**发出去就是死的**。测试第一次跑就撞出来了。这正是「测试要驱动真入口而不是断言内部形状」的价值：我原本写了个带条件回退的版本，那个版本会绿着通过。
 
 ## 3. 已知差距与最小改动
 

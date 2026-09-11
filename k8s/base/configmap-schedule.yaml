@@ -129,8 +129,23 @@ data:
           # the cron here is the first fire, for dashboard display only.
           cron: "30 14 * * 1-5"
           priority: 3
+        ticker-details:
+          # /v3/reference/tickers/{ticker} only. The list endpoint does not carry
+          # list_date / sector / market_cap / description, which is why they are
+          # null for all 5,317 active tickers. 200 a day drains the backlog in about
+          # four weeks and then keeps refreshing the stalest.
+          cron: "30 3 * * *"
+          priority: 1
+          batch_size: 200
         treasury:
-          cron: "0 12 * * 1-5"
+          # Twice, because the vendor's publication hour could not be measured.
+          # Measured 2026-09-11: our newest was 2026-09-08 while Polygon already had
+          # 09-09, so the 12:00 run had preceded its arrival — and `fetched_at` is a
+          # last-write column (the 30-day lookback rewrites the whole window), so
+          # when a row *first* became available is not recoverable from history.
+          # A second late-day poll costs one page of twenty rows and removes the
+          # need to guess the hour right.
+          cron: "0 12,23 * * 1-5"
           priority: 2
           lookback_days: 30
         option-backfill:

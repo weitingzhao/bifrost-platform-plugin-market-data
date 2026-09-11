@@ -56,6 +56,9 @@ SLOT_NAMES = (
     "intraday-chain",
     "treasury",
     "option-backfill",
+    # Reference data, not session data: it has no holiday gate because a
+    # company's listing date does not depend on the market being open.
+    "ticker-details",
 )
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
@@ -872,6 +875,42 @@ def load_snapshot_windows(
     return out
 
 
+TICKERS_NEEDING_DETAIL_QUERY = """
+SELECT symbol
+FROM raw_market.ticker
+WHERE active
+ORDER BY (list_date IS NOT NULL), updated_at NULLS FIRST, symbol
+LIMIT %s
+"""
+
+
+def tickers_needing_detail(conn: Any, *, limit: int = 200) -> list[str]:
+    """Active tickers whose overview fields are missing, stalest first.
+
+    ``(list_date IS NOT NULL)`` sorts false before true, so every ticker that
+    has never had a detail fetch comes before every one that has. Once the
+    backlog is gone the same query keeps the refresh honest by taking the
+    stalest ``updated_at`` — one rotation rather than two.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(TICKERS_NEEDING_DETAIL_QUERY, (int(limit),))
+            rows = cur.fetchall() or []
+    except Exception as exc:  # noqa: BLE001 — a slot that cannot pick a batch enqueues nothing
+        logger.warning("ticker detail rotation query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+    out: list[str] = []
+    for r in rows:
+        v = tuple(r.values())[0] if hasattr(r, "values") else (r[0] if r else None)
+        if v:
+            out.append(str(v).strip().upper())
+    return out
+
+
 def load_option_tickers_near_spot(
     conn: Any,
     underlyings: Sequence[str],
@@ -1530,6 +1569,25 @@ def enqueue_slot(
                 _add("short_interest", {"symbol": sym}, pri=priority)
             if include_short_volume:
                 _add("short_volume", {"symbol": sym}, pri=priority)
+
+    elif slot_key == "ticker-details":
+        # The overview fields — list_date, sector, market_cap, description —
+        # come only from /v3/reference/tickers/{ticker}. The list endpoint does
+        # not carry them, which is why ticker_sync declares them
+        # never-overwrite-on-conflict and why `list_date` is null for all 5,317
+        # active tickers (measured 2026-09-11).
+        #
+        # The handler for this has existed since ticker_sync gained its
+        # `mode: "detail"` branch. Nothing ever enqueued it. That absence is
+        # what blocks declaring "an instrument listed after the window opened
+        # cannot reach a five-year target", which is three of the four depth
+        # partials on the board.
+        #
+        # Null list_date first, then the stalest: the backlog drains before the
+        # refresh starts competing with it.
+        batch_size = int(scfg.get("batch_size") or 200)
+        for sym in tickers_needing_detail(conn, limit=batch_size):
+            _add("ticker_sync", {"mode": "detail", "symbol": sym}, pri=priority)
 
     elif slot_key == "related-rotate":
         # Per-symbol related-companies with deterministic daily rotation.
