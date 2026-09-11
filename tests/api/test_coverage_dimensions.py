@@ -836,3 +836,49 @@ def test_a_per_symbol_dataset_is_never_judged_as_one_series() -> None:
     out = mod._depth(c, [("AAPL", date(2019, 1, 1))], TODAY, None, None, span=9999)
     assert out.get("single_series") is None
     assert out["of"] == 1 and out["at_target"] == 1
+
+
+# ── what the vendor does not sell is not a gap ────────────────────────────
+
+
+def test_a_voided_symbol_leaves_the_denominator(wired: dict[str, Any], monkeypatch) -> None:
+    """The financials read 83.1% of 5,317 active tickers.
+
+    Measured 2026-09-11: the endpoint returns nothing for all 331 of the
+    five-year-old common stocks among the missing, and ops_jobs.symbol_source_void
+    had already recorded 902 of them. Dividing by instruments the vendor sells no
+    filings for asks for filings that do not exist — C-B1 in its plainest form.
+    """
+    monkeypatch.setattr(mod, "load_voided_symbols", lambda conn, dt: {"MSFT"})
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    by_ds = {d["dataset"]: d for d in body["datasets"]}
+
+    fin = by_ds["raw_market.income_statement"]["breadth"]
+    # AAPL and MSFT are the fixture's whole market; MSFT is voided, so the
+    # denominator is the one instrument the vendor actually sells filings for.
+    assert fin["of"] == 1
+    assert fin["voided"] == 1
+    assert fin["void_data_type"] == "financials"
+
+    # And it touches nothing else: stock_daily keeps both.
+    assert by_ds["raw_market.stock_daily"]["breadth"]["of"] == 2
+    assert by_ds["raw_market.stock_daily"]["breadth"]["voided"] is None
+
+
+def test_the_void_set_is_read_once_per_collection_not_per_dataset(
+    wired: dict[str, Any], monkeypatch
+) -> None:
+    """Three financials tables share one void set."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mod, "load_voided_symbols", lambda conn, dt: calls.append(dt) or set()
+    )
+    mod.get_dimensions(tier=None, refresh=True)
+    assert calls == ["financials"]
+
+
+def test_the_void_symbols_stay_server_side(wired: dict[str, Any], monkeypatch) -> None:
+    """Like `scopes`: the counts travel, the symbol lists do not."""
+    monkeypatch.setattr(mod, "load_voided_symbols", lambda conn, dt: {"MSFT"})
+    body = mod.get_dimensions(tier=None, refresh=True)["data"]
+    assert "voids" not in body["denominators"]

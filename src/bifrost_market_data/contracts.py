@@ -121,6 +121,18 @@ class DatasetContract:
     #: instruments they could have happened to — both rendered red at 0.4% and
     #: 14.2% on 2026-09-10 with nothing wrong.
     breadth_unjudged: str | None = None
+    #: Which ``ops_jobs.symbol_source_void.data_type`` records "the vendor has
+    #: nothing for this symbol" for this dataset. Declared, never inferred: the
+    #: void table is keyed by the *collection* the vendor refused, and three
+    #: tables share one collection.
+    #:
+    #: Breadth subtracts these from the tier scope. Without it the financials
+    #: read 83.1% of 5,317 active tickers — measured 2026-09-11, the endpoint
+    #: returns nothing for all 331 of the five-year-old common stocks among the
+    #: missing, and the void table had already recorded 902 of them. Dividing by
+    #: instruments the vendor does not sell filings for asks for filings that do
+    #: not exist, which is C-B1 in its plainest form.
+    void_data_type: str | None = None
 
     #: The ops_jobs.ingest_freshness dimension that evidences this dataset,
     #: declared here so the doctor's staleness table and the quality gate stop
@@ -251,6 +263,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
         cadence="filing",
+        void_data_type="financials",
     ),
     DatasetContract(
         "raw_market.balance_sheet",
@@ -265,6 +278,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
         cadence="filing",
+        void_data_type="financials",
     ),
     DatasetContract(
         "raw_market.cash_flow",
@@ -279,6 +293,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         grain="filing",
         refill=Refill("lookback", "fundamentals-rotate", why="the slot walks the whole CS universe every day, so a missed filing lands on the next run"),
         cadence="filing",
+        void_data_type="financials",
     ),
     DatasetContract(
         "raw_market.ratios",

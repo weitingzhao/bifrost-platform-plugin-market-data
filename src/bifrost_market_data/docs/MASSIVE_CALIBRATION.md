@@ -1,5 +1,5 @@
 ---
-version: 2026-09-10.18
+version: 2026-09-11.1
 updated: 2026-09-10
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过）
 ---
@@ -60,7 +60,7 @@ status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四�
 |---|---|---|
 | C-B1 | ✅ | 契约表（`contracts.py`，19 个数据集各自声明档位与分母）是唯一事实源，`scopes.py` 是唯一读它的地方。四套旧分母已收敛：**doctor** 改读 `load_research_universe()`——**检查用的名单就是采集用的那一份**，28 → 575；**quality** 的常数 4000 与 doctor 的 12000 是同一个量的两个门槛，合并为 `contracts.STOCK_DAILY_MIN_SESSION_SYMBOLS = 12000`（19 个 session 实测 12,396–12,576，2026-08-11 的失败 session 只有 18 行）；**readiness** 的 `tickers_active_count` 改读 `scopes.active_tickers`（`universe_count` 保留 `v_us_equity_universe`，因为 SEPA 排名的是美股普通股，是另一个问题——今天两者都是 5,317）；`api/coverage.py:253` 的 `limit=80` **不是分母**，是一份抽样清单（见 C-D2）。收敛后第一次实测又抓到 benchmark 档自己的分母是错的：`benchmark_scope` 给 watchlist 加载器传了空的 scheduler 配置，加载器于是走 DB 路径去查 Golden Source 没有的 `public.watchlist`，警告进了日志、分母悄悄缩回 11 个基准（0.19.4 修，26）。 |
 | C-B2 | ✅ | `GET /market/coverage/dimensions` 同时报意图达成率与口径利用率，两者分列不合并。`/market/capabilities`（`subscription.py:105`）回答的是"哪些能力被实现了"，不是"持有了多少"；Console 的 Capability 面板 `capPct` 是手工标注的 implemented/partial 计数。 |
-| C-B3 | ⚠️ | Doctor 已区分"计划不覆盖"（error 含 `not entitled` 时不给 retry 处方）与可重试失败，**并新增了第三类**：期权链的存在性检查只对"vendor 列出了未到期合约"的标的判定——2026-09-08 的 session 里 CIX / EA / ISTR / NVR / SENEA 五个名字没有任何快照行，但它们本来就没有活合约，报成缺口是误判。仍是 ⚠️：`ops_jobs.symbol_source_void`（`ddl.py:644`）记的"vendor 无此数据"还不在任何覆盖率分母里体现。 |
+| C-B3 | ✅ | Doctor 已区分"计划不覆盖"（error 含 `not entitled` 时不给 retry 处方）与可重试失败，**并新增了第三类**：期权链的存在性检查只对"vendor 列出了未到期合约"的标的判定——2026-09-08 的 session 里 CIX / EA / ISTR / NVR / SENEA 五个名字没有任何快照行，但它们本来就没有活合约，报成缺口是误判。**2026-09-11 转 ✅**：`ops_jobs.symbol_source_void` 现在进分母了——契约声明 `void_data_type`，广度把该 collection 的 void 从档位口径里扣掉，并在载荷里报出扣了多少（`voided` / `void_data_type`），不静默。见 §2p。 |
 | C-D1 | ✅ | 每个数据集在 `contracts.py` 的 `DepthTarget` 里声明窗口，取自订阅口径（stocks 5 年 / options 2 年 / financials 2009）或 tier 要求（24/12 个月），并带上"为什么是这个数"。旧的散落常量（`coverage.py:660` `years=5`、`schedule.yaml:117` `months: 24`）仍在各自的调用点，但不再是深度的事实源。 |
 | C-D2 | ✅ | `/market/coverage/dimensions` 按标的度量并汇总：达标标的数、深度中位数、最浅的是谁（§2b）。查询形状按基数选——跳跃扫描只在不同值少时才划算（option_daily 60 个 0.85 秒，stock_daily 20,695 个则要 152 秒，而一次分组扫描 24 秒）。`StockDepthSection.tsx` 仍只覆盖 80 个 watchlist 标的且主视觉是缺口数，应由三维表取代——**更正**：它的 `Math.max(rows.length, 1)` 是 `ScoreRing` 的分区总数（ready + thin + blocked 三块加起来就是取回的行数），不是覆盖率分母，不该被当成假分母；真正的问题是页面没说这 80 个是 20,695 个里的抽样。 |
 | C-D3 | ⚠️ | `doctor.py` 已正确表达"vendor snapshot 是 point-in-time，补跑会落到今天"；`SNAPSHOT_COVERAGE_MIN=0.90` 也正确记录了"95% 结构上不可达"。**ratios 端点忽略 `date`、历史只能向前累积**这条边界现在写在契约里（`DepthTarget("forward_only", why=...)`）。仍是 ⚠️，而且原因变了：**这条边界曾被错误地推广**——`short_volume` 也标了 `forward_only`，是从 ratios 抄的，实测它认 `?date` 且有两年窗口，已改为 `rolling_days` 并补齐。计划边界必须逐个实测，不能按邻居推定。 |
@@ -716,6 +716,46 @@ handler 没写错，它映射的是列表端点从不发送的字段。要让这
 ### 这一节的意义
 
 三条假设，两条被自己的数据否决，而且否决得很干净：一条缺的是**字段**（vendor 不在那个端点发），一条缺的是**证据**（类型和年限都解释不了）。如果按原计划直接声明，`8/19` 会变好看，而两个数字会是假的。
+
+## 2p. 财报那 17% 不是缺口，而系统早就记着（0.32.0）
+
+§2o 说「vendor 覆盖边界」没有建立，不能声明。Owner 让我去问 vendor。**331 个五年历史、零财报的普通股，全部询问，用时 47 秒**：
+
+```
+vendor 有数据  0
+vendor 空    331
+调用出错       0
+```
+
+零例外。我们持有的是 vendor 卖的全部，83.1% 不是我们的缺口。
+
+### 但顺序反了
+
+`ops_jobs.symbol_source_void` 里**早就有 902 条 `data_type='financials'`**——就是我刚用 47 秒重新测出来的那批。而本文档 C-B3 那一行自己写着：「`symbol_source_void` 记的『vendor 无此数据』**还不在任何覆盖率分母里体现**」。
+
+**该先看自己的库，再去问 vendor。** 探测不算白做（它独立确认了那些 void 仍然有效，不是陈年记录），但它回答的是一个数据库里已有答案的问题。
+
+### 为什么不是标成 unjudged
+
+第一直觉是给这三张表加 `breadth_unjudged`。查下去发现**不行**：它们的另外三个轴已经全是 boundary——`cadence=filing` 让新鲜度不判，`depth=since` 让深度不判，`since` 不在 `CONTINUITY_KINDS` 里让厚度不判。**广度是唯一还在判的轴**，把它也关掉，这三张表就四轴全 boundary，从此没有任何东西看着它们。
+
+所以不是停止判定，是**换对分母**。
+
+### 做法
+
+契约新增声明字段 `void_data_type`——哪一个 `symbol_source_void.data_type` 记录着「vendor 对这个符号没有东西」。**声明，不推断**：void 表是按 vendor 拒绝的**采集品类**记的，三张表共用一个品类。
+
+广度把该品类的 void 从档位口径里扣掉，并在载荷里报 `voided` 与 `void_data_type`——**扣了多少必须说出来**，一个会自己变动而不声明的分母，和一个错的分母是同一种缺陷。
+
+void 集合每次 compute 只读一次（按品类，不按数据集），且和 `scopes` 一样**留在服务端**：数字过河，符号清单不过河。
+
+**C-B3 由此从 ⚠️ 转 ✅**——它当初标 ⚠️ 的理由恰好就是这一条。
+
+### 附带确认：外国发行人这个解释，仍然没有建立
+
+样例（ACB / AEG / AEM / AER / AFYA）看着全是外国发行人，但 `raw_market.ticker` 里**两组在每个字段上都一样**：`locale=us`、`currency=usd` 各 100%，交易所分布同形（无财报 XNAS 630 / XNYS 209 / XASE 62，有财报 XNAS 2703 / XNYS 1541 / XASE 171）。Polygon 因为它们在美国交易所挂牌就标 `locale: us`。
+
+所以理由只写**实测到的事**（vendor 对这些符号返回空），不写成因。今晚第三个从样本认出来的模式，第三个证实不了。
 
 ## 3. 已知差距与最小改动
 

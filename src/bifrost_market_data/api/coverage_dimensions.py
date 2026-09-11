@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import connect_db
 from bifrost_market_data.continuity import measure as measure_continuity
+from bifrost_market_data.symbol_void import load_voided_symbols
 from bifrost_market_data.coverage_history import record as record_verdicts
 from bifrost_market_data.contracts import CONTRACTS, UNIVERSE_MONTHS, DatasetContract
 from bifrost_market_data.verdicts import unread_datasets, verdict_map, verdicts_for
@@ -566,6 +567,14 @@ def _one(
             _close_quietly(conn)
 
     scope: set[str] = denominators["scopes"].get(c.tier) or set()
+    # A symbol the vendor sells no filings for is not a filing we are missing.
+    # Declared per dataset (`void_data_type`), so this narrows the financials
+    # and touches nothing else.
+    voided: set[str] = set()
+    if c.void_data_type:
+        voided = (denominators.get("voids") or {}).get(c.void_data_type) or set()
+        if voided:
+            scope = scope - voided
     of_n = 1 if c.symbol_column is None else len(scope)
     # The numerator is what we hold *of what this tier asked for*. Held rows
     # outside that scope are reported separately rather than inflating a ratio.
@@ -597,6 +606,12 @@ def _one(
             "held": in_scope,
             "held_total": held_total,
             "outside_scope": max(0, held_total - in_scope),
+            # How many instruments the vendor has told us it has nothing for,
+            # and which are therefore not in the denominator. Named rather than
+            # silently subtracted: a denominator that moves without saying so is
+            # the same defect as one that is wrong.
+            "voided": len(voided) or None,
+            "void_data_type": c.void_data_type,
             "of": of_n or None,
             # Intent fulfilment: how much of what this tier asked for we hold.
             "pct": round(100.0 * in_scope / of_n, 1) if of_n else None,
@@ -709,7 +724,15 @@ def _denominators(conn: Any) -> dict[str, Any]:
         scheduler_cfg=sched,
         statement_timeout=STATEMENT_TIMEOUT,
     )
+    # What the vendor has already told us it does not sell, by collection. Read
+    # once for the page: three financials tables share one void set, and asking
+    # per dataset would ask the same question three times.
+    voids: dict[str, set[str]] = {}
+    for data_type in sorted({c.void_data_type for c in CONTRACTS if c.void_data_type}):
+        voids[data_type] = load_voided_symbols(conn, data_type)
+
     return {
+        "voids": voids,
         "whole-market": len(active),
         "universe": {"total": len(universe_syms), "by_tier": by_tier, "months": UNIVERSE_MONTHS},
         "benchmark-only": len(bench),
@@ -765,7 +788,9 @@ def _compute(key: str, wanted: list[DatasetContract]) -> dict[str, Any]:
                 rows = [f.result() for f in futures]
     finally:
         _close_quietly(probe)
-    public_denominators = {k: v for k, v in denominators.items() if k != "scopes"}
+    public_denominators = {
+        k: v for k, v in denominators.items() if k not in ("scopes", "voids")
+    }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "denominators": public_denominators,
