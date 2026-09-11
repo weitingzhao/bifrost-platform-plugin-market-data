@@ -160,6 +160,34 @@ def _newest(conn: Any, c: DatasetContract) -> date | None:
     return rows[0][0] if rows else None
 
 
+def _oldest(conn: Any, c: DatasetContract) -> date | None:
+    """The first day a dataset with no symbol column holds.
+
+    Only for the single-series case. ``treasury_yield`` is one series with a
+    date primary key and no instrument to spread across, so per-symbol depth had
+    nothing to count and the axis answered `unknown` — not because the read
+    failed but because it was asked the wrong question. The series *span* is the
+    answer, and it is one index probe.
+    """
+    if c.date_column is None or c.symbol_column is not None:
+        return None
+    rows = _rows(conn, f"SELECT min({_date_expr(c.date_column)}) FROM {c.dataset}")
+    value = rows[0][0] if rows else None
+    # Coerced rather than trusted. A driver that hands back a string here would
+    # otherwise subtract it from a date and take the whole page down — the
+    # single-series span is a nicety, and a nicety must not be able to do that.
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
 #: Depth targets that describe a distribution rather than a bar to clear. An
 #: absolute start cannot be judged per symbol without knowing when each
 #: instrument began: a company that listed in 2020 can never reach 2009, and
@@ -322,6 +350,7 @@ def _depth(
     today: date,
     scope: set[str] | None = None,
     accrual: dict[str, Any] | None = None,
+    span: int | None = None,
 ) -> dict[str, Any]:
     """Depth as the contract defines it, or the plan boundary that replaces it."""
     target = {
@@ -330,6 +359,26 @@ def _depth(
         "why": c.depth.why,
         "accrues_to_sessions": c.depth.accrues_to_sessions,
     }
+    # One series, no instrument to spread across: the span is the depth. Without
+    # this, treasury_yield fell through to the boundary branch with an empty
+    # population and read `unknown` — the axis saying "I could not look" where
+    # the truth was "you asked for a per-symbol answer from something that has
+    # no symbols". Measured 2026-09-10 its span was 1,833 days against a
+    # 30-day target.
+    if span is not None and c.symbol_column is None and c.depth.kind == "rolling_days":
+        need = int(c.depth.value or 0)
+        return {
+            "target": target,
+            "measured": True,
+            "judged": True,
+            "single_series": True,
+            "need_days": need,
+            "at_target": 1 if span >= need else 0,
+            "of": 1,
+            "median_days": span,
+            "oldest_days": span,
+        }
+
     if c.depth.kind in BOUNDARY_KINDS or not per_symbol:
         out: dict[str, Any] = {
             "target": target,
@@ -465,6 +514,8 @@ def _one(
             if c.symbol_column and c.date_column and c.depth.kind not in BOUNDARY_KINDS:
                 per_symbol = _per_symbol_oldest(conn, c)
             newest = _newest(conn, c)
+            # Only for the single-series case; None everywhere else.
+            oldest = _oldest(conn, c)
             error = None
         except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the page
             logger.warning("coverage dimensions failed for %s: %s", c.dataset, exc)
@@ -473,6 +524,7 @@ def _one(
             except Exception:
                 pass
             per_symbol, held_symbols, held_total, newest = [], set(), 0, None
+            oldest = None
             error = str(exc)[:160]
 
         # In a guard of its own, and only for a forward-only depth. A catalogue
@@ -556,7 +608,14 @@ def _one(
                 else None
             ),
         },
-        "depth": _depth(c, per_symbol, today, scope, accrual),
+        "depth": _depth(
+            c,
+            per_symbol,
+            today,
+            scope,
+            accrual,
+            span=(today - oldest).days if oldest else None,
+        ),
         "freshness": _freshness(
             c, newest, today, interval_days=continuity.get("median_interval_days")
         ),

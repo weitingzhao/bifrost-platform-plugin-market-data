@@ -15,7 +15,7 @@ import pytest
 
 from bifrost_market_data.api import coverage_dimensions as mod
 from bifrost_market_data.verdicts import AXES
-from bifrost_market_data.contracts import CONTRACTS, BY_DATASET
+from bifrost_market_data.contracts import CONTRACTS, contract_for, BY_DATASET
 
 
 class _Cur:
@@ -787,3 +787,52 @@ def test_a_failed_record_does_not_sink_the_page(
     assert len(body["datasets"]) == len(CONTRACTS)
     assert body["memory"]["recorded"] is False
     assert "no such table" in body["memory"]["why"]
+
+
+# ── one series has a depth too ────────────────────────────────────────────
+
+
+def test_a_dataset_with_no_symbols_is_judged_on_its_span() -> None:
+    """treasury_yield is one series with a date primary key.
+
+    Per-symbol depth had nothing to count, so it fell through to the boundary
+    branch with an empty population and the axis read `unknown` — the axis
+    saying "I could not look" where the truth was "you asked a per-symbol
+    question of something that has no symbols". Measured 2026-09-10 its span
+    was 1,833 days against a 30-day target.
+    """
+    c = contract_for("raw_market.treasury_yield")
+    assert c.symbol_column is None, "the fixture assumes a single-series contract"
+    out = mod._depth(c, [], TODAY, None, None, span=1833)
+    assert out["measured"] is True and out["judged"] is True
+    assert out["single_series"] is True
+    assert out["at_target"] == 1 and out["of"] == 1
+    assert out["median_days"] == 1833
+    from bifrost_market_data.verdicts import depth_verdict
+
+    assert depth_verdict({"depth": out, "error": None}) == "ok"
+
+
+def test_a_short_single_series_is_thin_not_unknown() -> None:
+    """The point is that it becomes judgeable, in both directions."""
+    c = contract_for("raw_market.treasury_yield")
+    out = mod._depth(c, [], TODAY, None, None, span=5)
+    assert out["at_target"] == 0 and out["of"] == 1
+    from bifrost_market_data.verdicts import depth_verdict
+
+    assert depth_verdict({"depth": out, "error": None}) == "thin"
+
+
+def test_without_a_span_it_still_falls_back_rather_than_guessing() -> None:
+    c = contract_for("raw_market.treasury_yield")
+    out = mod._depth(c, [], TODAY, None, None, span=None)
+    assert out["measured"] is False
+
+
+def test_a_per_symbol_dataset_is_never_judged_as_one_series() -> None:
+    """stock_daily has 5,317 instruments; collapsing it to a span would hide
+    every symbol that is short."""
+    c = contract_for("raw_market.stock_daily")
+    out = mod._depth(c, [("AAPL", date(2019, 1, 1))], TODAY, None, None, span=9999)
+    assert out.get("single_series") is None
+    assert out["of"] == 1 and out["at_target"] == 1
