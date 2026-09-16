@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from bifrost_market_data.api.deps import get_polygon_client, polygon_error_to_http
 from bifrost_market_data.polygon import endpoints as ep
@@ -12,6 +12,45 @@ from bifrost_market_data.polygon.client import PolygonClient
 from bifrost_market_data.polygon.errors import PolygonAPIError
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
+
+#: Resources that live next to /market/stocks, not under it. ``/{symbol:path}``
+#: swallows anything, so /market/stocks/corporate-actions used to reach the vendor
+#: as a ticker and come back "Invalid ticker" — a true statement about the wrong
+#: thing. Each key here is checked against a real route by the tests.
+RESERVED_SEGMENTS: dict[str, str] = {
+    "analytics": "/market/analytics/...",
+    "capabilities": "/market/capabilities",
+    "corporate-actions": "/market/corporate-actions",
+    "coverage": "/market/coverage/...",
+    "daily-checklist": "/market/daily-checklist",
+    "doctor": "/market/doctor",
+    "ingest": "/market/ingest/...",
+    "instrument-types": "/market/instrument-types",
+    "market-ops": "/market/market-ops/...",
+    "options": "/market/options/...",
+    "readiness": "/market/readiness/...",
+    "reference": "/market/reference/...",
+    "related-companies": "/market/related-companies/{ticker}",
+    "status": "/market/status",
+    "technical-indicators": "/market/technical-indicators/...",
+    "tickers": "/market/tickers",
+}
+
+
+def guard_reserved_segment(symbol: str) -> None:
+    """404 naming the real path when a sibling resource was addressed as a ticker.
+
+    Declared ahead of the Polygon client in the routes below so the answer is the
+    same with or without a vendor key: without one, building the client raises 503
+    first and buries the actual mistake.
+    """
+    first = str(symbol or "").strip().strip("/").split("/")[0].lower()
+    target = RESERVED_SEGMENTS.get(first)
+    if target is not None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{first!r} is not a ticker; use {target}",
+        )
 
 
 @router.get("/bars/range")
@@ -126,6 +165,7 @@ async def stock_search(
 @router.get("/{symbol:path}/related")
 async def stock_related(
     symbol: str,
+    _reserved: None = Depends(guard_reserved_segment),
     client: PolygonClient = Depends(get_polygon_client),
 ) -> dict[str, Any]:
     """GET /v1/related-companies/{ticker}."""
@@ -138,6 +178,7 @@ async def stock_related(
 @router.get("/{symbol:path}")
 async def stock_detail(
     symbol: str,
+    _reserved: None = Depends(guard_reserved_segment),
     client: PolygonClient = Depends(get_polygon_client),
 ) -> dict[str, Any]:
     """GET /v3/reference/tickers/{ticker} — ticker details."""
