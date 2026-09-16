@@ -23,7 +23,7 @@ from bifrost_market_data.scheduler import daily
 from bifrost_market_data.scheduler.daily import SLOT_NAMES, enqueue_slot
 from bifrost_market_data.scheduler.enqueue import trim_option_snapshots
 
-from tests.test_daily import _DailyConn
+from test_daily import _DailyConn
 
 
 def _no_pins(monkeypatch: pytest.MonkeyPatch) -> None:
