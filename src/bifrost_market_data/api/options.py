@@ -10,12 +10,13 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from bifrost_market_data.api.deps import (
     as_date,
     iso_value,
     normalize_symbol,
+    reject_unknown_params,
     require_db,
     resolve_market_schema,
     row_dict,
@@ -43,6 +44,19 @@ def _norm_expiry(value: str | date | None) -> date | None:
     if len(s) == 8 and s.isdigit():
         return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
     return as_date(s)
+
+
+def _norm_session(value: str | None) -> date | None:
+    """A session parameter is a calendar date; anything else is the caller's mistake."""
+    if value is None or not str(value).strip():
+        return None
+    parsed = _norm_expiry(value)
+    if parsed is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"as_of must be a date (YYYY-MM-DD), got {value!r}",
+        )
+    return parsed
 
 
 def query_expirations(conn: Any, symbol: str) -> dict[str, Any]:
@@ -132,13 +146,26 @@ def query_snapshots(
     symbol: str,
     expiration: date | None = None,
     limit: int = 500,
+    as_of: date | None = None,
 ) -> list[dict[str, Any]]:
-    """Latest snapshot per option_ticker for an underlying (optional expiry filter)."""
+    """Latest snapshot per option_ticker for an underlying (optional expiry filter).
+
+    ``as_of`` pins the answer to one session: the last snapshot of that New York
+    calendar day, which is the session's EOD anchor. A session with no rows comes
+    back empty — never the newest session instead, because a reader asking what
+    the chain looked like on the 10th cannot use the 15th and not notice.
+    """
     sym = normalize_symbol(symbol)
     if not table_exists(conn, "market", "option_snapshot"):
         return []
 
     params: list[Any] = [sym]
+    session_filter = ""
+    if as_of is not None:
+        # The session of a snapshot row is the NY date of its timestamp — the same
+        # definition pcr, coverage and chain/eod already group by.
+        session_filter = "AND DATE(timezone('America/New_York', snapshot_ts)) = %s"
+        params.append(as_of)
     join_sql = ""
     where_extra = ""
     if expiration is not None:
@@ -163,6 +190,7 @@ def query_snapshots(
             SELECT DISTINCT ON (option_ticker) *
             FROM raw_market.option_snapshot
             WHERE underlying = %s
+            {session_filter}
             ORDER BY option_ticker, snapshot_ts DESC
         ) s
         {join_sql}
@@ -253,26 +281,48 @@ def option_expirations(
         conn.close()
 
 
+#: Parameters callers reach for on the snapshots route, and what they are called here.
+SNAPSHOT_PARAM_ALIASES = {
+    "date": "as_of",
+    "trade_date": "as_of",
+    "session": "as_of",
+    "expiry": "expiration",
+}
+
+
 @router.get("/snapshots")
 def option_snapshots(
+    request: Request,
     symbol: str = Query(..., description="Underlying symbol"),
     expiration: str | None = Query(None, description="Expiry YYYY-MM-DD or YYYYMMDD"),
     limit: int = Query(500, ge=1, le=5000),
+    as_of: str | None = Query(
+        None,
+        description="Session YYYY-MM-DD: the EOD anchor of that day, never a later one",
+    ),
 ) -> dict[str, Any]:
-    """Latest option chain snapshots from ``market.option_snapshot``."""
+    """Option chain snapshots — latest, or the EOD anchor of one session."""
+    reject_unknown_params(request, SNAPSHOT_PARAM_ALIASES)
     exp = _norm_expiry(expiration)
+    session = _norm_session(as_of)
     conn = require_db()
     try:
-        rows = query_snapshots(conn, symbol=symbol, expiration=exp, limit=limit)
+        rows = query_snapshots(
+            conn, symbol=symbol, expiration=exp, limit=limit, as_of=session
+        )
     finally:
         conn.close()
-    return {
+    out: dict[str, Any] = {
         "symbol": normalize_symbol(symbol),
         "expiration": exp.isoformat() if exp else None,
+        "as_of": session.isoformat() if session else None,
         "rows": rows,
         "count": len(rows),
         "source": "market.option_snapshot",
     }
+    if session is not None and not rows:
+        out["note"] = f"no EOD snapshot for session {session.isoformat()}"
+    return out
 
 
 @router.get("/oi")

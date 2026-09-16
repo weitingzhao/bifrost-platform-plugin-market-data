@@ -218,6 +218,21 @@ def normalize_symbol(value: str | None) -> str:
     return str(value or "").strip().upper()
 
 
+def reject_unknown_params(request: Request, aliases: Mapping[str, str]) -> None:
+    """422 naming the right parameter when a caller uses one this route does not have.
+
+    FastAPI drops query parameters it does not declare, so ``?expiration=…`` on a
+    route that filters by ``expiry`` used to return the unfiltered answer and look
+    like the filter had matched everything. Silence is the worst of the options.
+    """
+    for wrong, right in aliases.items():
+        if wrong in request.query_params:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown parameter {wrong!r} for this route; use {right!r}",
+            )
+
+
 def as_date(value: Any) -> date | None:
     if value is None:
         return None
