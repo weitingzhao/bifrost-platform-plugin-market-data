@@ -41,10 +41,11 @@ def query_corporate_actions(
             f"""
             SELECT
                 id, symbol, action_type, ex_date, record_date, payment_date,
-                ratio_from, ratio_to, amount, currency, description, fetched_at
+                ratio_from, ratio_to, amount, currency, description, fetched_at,
+                distribution_type, frequency
             FROM raw_market.corporate_action
             WHERE {where}
-            ORDER BY ex_date DESC NULLS LAST, id DESC
+            ORDER BY ex_date DESC NULLS LAST, distribution_type NULLS LAST, currency, amount DESC, id DESC
             LIMIT %s
             """,
             (*params, limit),
@@ -63,6 +64,11 @@ def query_corporate_actions(
         "currency",
         "description",
         "fetched_at",
+        # One ex-date can carry several rows — a special beside the regular, the
+        # same dividend in CAD and in USD. Sum within one currency, and read
+        # `special` apart from what the regular schedule pays.
+        "distribution_type",
+        "frequency",
     )
     return [row_dict(r, cols) for r in raw]
 

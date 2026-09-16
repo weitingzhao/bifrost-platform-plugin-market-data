@@ -24,6 +24,11 @@ from bifrost_market_data.schema.wave8_migrations import (
 )
 from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
 from bifrost_market_data.schema.ctid_damage_restore import restore_ctid_damage
+from bifrost_market_data.schema.corporate_action_identity import (
+    CONSTRAINT_NAME as CORPORATE_ACTION_KEY,
+    IDENTITY as CORPORATE_ACTION_IDENTITY,
+    migrate_corporate_action_identity,
+)
 from bifrost_market_data.schema.wave9_migrations import migrate_option_snapshot_observed_time
 
 
@@ -50,6 +55,7 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         migrate_stock_financials_split(cur)
         retire_data_ops_compat_schema(cur)
         create_option_contract_staleness_index(cur)
+        migrate_corporate_action_identity(cur)
         # In ops_jobs, which the plugin's role owns — so a new table of its own
         # can be created on this path rather than waiting for a superuser run.
         create_coverage_sample(cur)
@@ -109,6 +115,7 @@ def apply_ddl(conn: _Connection) -> None:
         add_financials_filing_date(cur)
         retire_data_ops_compat_schema(cur)
         migrate_option_snapshot_observed_time(cur)
+        migrate_corporate_action_identity(cur)
         _create_views(cur)
         _ensure_partitions(cur)
     conn.commit()
@@ -491,9 +498,11 @@ def _create_market_tables(cur: _Cursor) -> None:
             currency     text,
             description  text,
             fetched_at   timestamptz DEFAULT now(),
-            UNIQUE (symbol, action_type, ex_date)
+            distribution_type text,
+            frequency    integer,
+            CONSTRAINT {key} UNIQUE NULLS NOT DISTINCT ({identity})
         )
-        """
+        """.format(key=CORPORATE_ACTION_KEY, identity=", ".join(CORPORATE_ACTION_IDENTITY))
     )
     cur.execute(
         """

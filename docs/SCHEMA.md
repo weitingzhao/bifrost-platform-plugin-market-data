@@ -296,7 +296,45 @@ documents.
 
 Replaces `public.massive_corporate_action`.
 
-**Unique:** `(symbol, action_type, ex_date)`
+One row per distribution as the vendor classifies it — **not** one row per ex-date.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | bigserial | PK |
+| symbol / action_type | text | `dividend` / `split` |
+| ex_date | date | dividends: `ex_dividend_date`; splits: `execution_date` |
+| record_date / payment_date | date | dividends only |
+| ratio_from / ratio_to | double precision | splits only |
+| amount | double precision | per share, **in `currency`** |
+| currency | text | `USD`, but also `CAD` / `NOK` … for cross-listed issuers |
+| description | text | splits: `adjustment_type=…`; dividends: the vendor frequency as text (legacy, prefer `frequency`) |
+| distribution_type | text | dividends: `recurring` / `special` / `supplemental` / `irregular` / `unknown`; NULL for splits and for rows written before 0.36.0 |
+| frequency | integer | dividends: payments per year, `0` = non-recurring; NULL for splits |
+| fetched_at | timestamptz | stamped on every write |
+
+**Unique:** `corporate_action_identity_key` —
+`UNIQUE NULLS NOT DISTINCT (symbol, action_type, ex_date, distribution_type, frequency, currency, amount)`
+(since 0.36.0; was `(symbol, action_type, ex_date)`).
+
+Why this key, measured 2026-09-16 on the 604 `corporate-backfill` names: the old key
+kept 26,745 of the vendor's 27,108 dividends. The 363 it folded were 154 second
+distributions (special or variable beside the regular: MSFT 2004-11-15 kept $0.08
+and lost $3.00), 40 CAD/USD pairs of the same CNQ dividend, 10 same-type pairs with
+different amounts (PGR's annual variable beside its quarterly), and 159 vendor
+duplicates that differ only in `historical_adjustment_factor`. The new key folds
+exactly the duplicates. Splits keep NULL in the four new parts, so their key is
+unchanged.
+
+**Readers:** an ex-date can carry several rows. Sum `amount` within one `currency`;
+read `special` apart from the regular schedule.
+
+**Writers:** a corrected amount or a relabelled type is a new key, so the `dividends`
+and `dividends_market` handlers delete, in the same transaction as the upsert, the
+dividend rows in their scope (the symbol / the ex-date window) that a complete,
+non-empty fetch did not list. Truncated or empty fetches delete nothing.
+
+Migration: `schema/corporate_action_identity.py`, on both `apply_wave8_migrations`
+(the cluster Job; `raw_market` is owned by the plugin role since 0.19.20) and `apply_ddl`.
 
 ### `market.us_market_holiday`
 

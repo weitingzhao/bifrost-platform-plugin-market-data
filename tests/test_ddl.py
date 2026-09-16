@@ -221,6 +221,59 @@ def test_filing_date_migration_not_on_bifrost_role_path() -> None:
     assert "add_financials_filing_date(cur)" in inspect.getsource(ddl_mod.apply_ddl)
 
 
+def test_corporate_action_identity_migration_is_additive_and_swaps_the_key() -> None:
+    """Two nullable columns, the new key in, the (symbol, action_type, ex_date) key out.
+
+    The old key kept one row per ex-date: MSFT's $3.00 special of 2004-11-15 was
+    overwritten by the $0.08 regular it shares the day with.
+    """
+    from bifrost_market_data.schema.corporate_action_identity import (
+        CONSTRAINT_NAME,
+        IDENTITY,
+        migrate_corporate_action_identity,
+    )
+
+    cur = _FakeCursor()
+    migrate_corporate_action_identity(cur)
+    sql = "\n".join(cur.statements)
+
+    assert "ADD COLUMN IF NOT EXISTS distribution_type text" in cur.statements[0]
+    assert "ADD COLUMN IF NOT EXISTS frequency integer" in cur.statements[1]
+    assert "DEFAULT" not in cur.statements[0] + cur.statements[1]  # no rewrite
+    assert f"ADD CONSTRAINT {CONSTRAINT_NAME} UNIQUE NULLS NOT DISTINCT ({', '.join(IDENTITY)})" in sql
+    # The old key is found by its definition, not by a generated name.
+    assert "pg_get_constraintdef(oid) = 'UNIQUE (symbol, action_type, ex_date)'" in sql
+    assert "DROP CONSTRAINT %I" in sql
+    # The plugin role's 2s statement_timeout is lifted for the swap and handed back.
+    assert cur.statements.index("SET LOCAL statement_timeout = '120s'") < cur.statements.index(
+        "SET LOCAL statement_timeout TO DEFAULT"
+    )
+    # Splits carry NULL in every new part; without NULLS NOT DISTINCT they would
+    # stop deduplicating altogether.
+    assert set(IDENTITY) >= {"symbol", "action_type", "ex_date", "distribution_type", "frequency", "currency", "amount"}
+
+
+def test_corporate_action_identity_runs_on_the_deploy_path_and_matches_fresh_ddl() -> None:
+    """The cluster only ever runs the --wave8-only Job, so that is where the swap must be."""
+    import inspect
+
+    from bifrost_market_data.ingest import corporate_action as ingest_mod
+    from bifrost_market_data.schema import ddl as ddl_mod
+    from bifrost_market_data.schema.corporate_action_identity import CONSTRAINT_NAME, IDENTITY
+
+    assert "migrate_corporate_action_identity(cur)" in inspect.getsource(ddl_mod.apply_wave8_migrations)
+    assert "migrate_corporate_action_identity(cur)" in inspect.getsource(ddl_mod.apply_ddl)
+
+    conn = _FakeConn()
+    apply_ddl(conn)
+    create = next(s for s in conn.cur.statements if "CREATE TABLE IF NOT EXISTS raw_market.corporate_action" in s)
+    assert f"CONSTRAINT {CONSTRAINT_NAME} UNIQUE NULLS NOT DISTINCT ({', '.join(IDENTITY)})" in create
+    assert "UNIQUE (symbol, action_type, ex_date)" not in create
+    # The writer's ON CONFLICT target is the constraint, column for column.
+    assert ingest_mod.IDENTITY is IDENTITY
+    assert set(IDENTITY) <= set(ingest_mod._COLS)
+
+
 def test_partition_provisioning_has_one_list_and_two_callers() -> None:
     """It lived only in apply_ddl, which nothing re-runs, so the forward window
     never advanced: four tables sat 83 days from having nowhere to insert."""
