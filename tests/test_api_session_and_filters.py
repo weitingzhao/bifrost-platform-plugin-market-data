@@ -192,6 +192,23 @@ def test_daily_names_the_parameter_it_actually_has(monkeypatch) -> None:
         assert wrong in res.json()["detail"] and right in res.json()["detail"]
 
 
+def test_a_contract_says_its_own_underlying() -> None:
+    """The pinned list is 12 tickers; making the caller restate DDOG is a trap."""
+    conn = _Conn([DAILY_ROW])
+    out = od.query_option_daily(conn, option_ticker="O:DDOG260731C00222500")
+    _sql, params = _reads(conn)[0]
+    assert out["symbol"] == "DDOG" and "DDOG" in params
+    assert od.underlying_of_ticker("O:BDX1261016P00350000") == "BDX"
+    assert od.underlying_of_ticker("NVDA") is None
+
+
+def test_neither_a_symbol_nor_a_contract_is_a_question_with_no_subject(monkeypatch) -> None:
+    monkeypatch.setattr(od, "require_db", lambda: pytest.fail("must not open a connection"))
+    client = TestClient(create_app())
+    res = client.get("/market/options/daily")
+    assert res.status_code == 422 and "symbol or option_ticker" in res.json()["detail"]
+
+
 def test_a_right_that_is_not_a_right_is_the_callers_mistake(monkeypatch) -> None:
     monkeypatch.setattr(od, "require_db", lambda: pytest.fail("must not open a connection"))
     client = TestClient(create_app())

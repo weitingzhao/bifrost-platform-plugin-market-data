@@ -655,6 +655,34 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
     return out
 
 
+#: Column order of the two ``chain/eod`` statements. The plugin opens plain
+#: psycopg connections — no dict factory anywhere — so every row arrives as a
+#: tuple. Reading them as mappings dropped all of them and the endpoint answered
+#: 200 with an empty list for contracts whose snapshots were right there:
+#: `chain/latest` had its own tuple decoder and worked, which is why the fault
+#: read as "chain/eod has no data".
+_EOD_COLS: tuple[str, ...] = (
+    "snap_day",
+    "iv",
+    "underlying_price",
+    "snapshot_ts",
+    "_option_ticker",
+    "_underlying",
+    "_expiry",
+    "_strike",
+    "_option_right",
+)
+
+
+def _eod_tuple_to_dict(row: Any, *, has_ib_key: bool) -> Dict[str, Any]:
+    cols = list(_EOD_COLS) + (["_req_ib_key"] if has_ib_key else [])
+    try:
+        values = list(row)
+    except TypeError:
+        return {}
+    return {cols[i]: values[i] for i in range(min(len(cols), len(values)))}
+
+
 def _fetch_chain_eod(
     conn: Any,
     keys: List[str],
@@ -688,9 +716,9 @@ def _fetch_chain_eod(
 
     out: List[Dict[str, Any]] = []
 
-    def _append_mapped(raw_rows: list) -> None:
+    def _append_mapped(raw_rows: list, *, has_ib_key: bool) -> None:
         for row in raw_rows:
-            d = dict(row) if isinstance(row, Mapping) else {}
+            d = dict(row) if isinstance(row, Mapping) else _eod_tuple_to_dict(row, has_ib_key=has_ib_key)
             req_ib_key = d.pop("_req_ib_key", None)
             underlying = d.pop("_underlying", None)
             expiry = d.pop("_expiry", None)
@@ -748,7 +776,7 @@ def _fetch_chain_eod(
                 """,
                 (polygon, since_ts),
             )
-            _append_mapped(cur.fetchall() or [])
+            _append_mapped(cur.fetchall() or [], has_ib_key=False)
 
         if ib_parts:
             underlyings = [p.underlying for p in ib_parts]
@@ -782,7 +810,7 @@ def _fetch_chain_eod(
                 """,
                 (underlyings, expiries, rights, strikes, ib_keys, since_ts),
             )
-            _append_mapped(cur.fetchall() or [])
+            _append_mapped(cur.fetchall() or [], has_ib_key=True)
 
     return out
 

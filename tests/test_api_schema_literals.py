@@ -104,6 +104,44 @@ def test_chain_eod_names_the_schema_the_snapshot_relation_lives_in() -> None:
     assert rows and rows[0]["contract_key"] == "NVDA|OPT|20261120|245.0|C"
 
 
+#: What the database actually hands back. No connection in this plugin sets a
+#: dict row factory, so a test that feeds mappings tests a shape production never
+#: sees — which is how chain/eod stayed empty after the schema fix.
+EOD_TUPLE_IB = (
+    date(2026, 9, 14),
+    0.37,
+    245.0,
+    datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc),
+    "O:NVDA261120C00245000",
+    "NVDA",
+    date(2026, 11, 20),
+    245.0,
+    "C",
+    "NVDA|OPT|20261120|245.0|C",
+)
+
+EOD_TUPLE_POLYGON = EOD_TUPLE_IB[:-1]
+
+
+def test_chain_eod_reads_the_tuple_rows_the_database_returns() -> None:
+    conn = _ResolvingConn([EOD_TUPLE_IB])
+    rows = opt._fetch_chain_eod(
+        conn, ["NVDA|OPT|20261120|245.0|C"], datetime(2026, 9, 1, tzinfo=timezone.utc)
+    )
+    assert rows, "a tuple row is a row"
+    assert rows[0]["contract_key"] == "NVDA|OPT|20261120|245.0|C"
+    assert rows[0]["iv"] == 0.37 and rows[0]["snap_day"] == "2026-09-14"
+    assert rows[0]["underlying_price"] == 245.0
+
+
+def test_chain_eod_reads_a_polygon_keyed_tuple_row_too() -> None:
+    conn = _ResolvingConn([EOD_TUPLE_POLYGON])
+    rows = opt._fetch_chain_eod(
+        conn, ["O:NVDA261120C00245000"], datetime(2026, 9, 1, tzinfo=timezone.utc)
+    )
+    assert rows and rows[0]["contract_key"] == "NVDA|OPT|20261120|245.0|C"
+
+
 def test_chain_latest_takes_its_materialised_path_when_the_view_is_there() -> None:
     conn = _ResolvingConn([])
     opt._fetch_chain_latest(conn, ["O:NVDA261120C00245000"])

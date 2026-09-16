@@ -51,10 +51,28 @@ def _norm_right(value: str | None) -> str | None:
     raise HTTPException(status_code=422, detail=f"right must be C or P, got {value!r}")
 
 
+def underlying_of_ticker(option_ticker: str | None) -> str | None:
+    """``O:NVDA261120C00245000`` → ``NVDA``.
+
+    A contract already says which underlying it belongs to, so asking the caller
+    to repeat it is asking them to get it wrong. The letters before the date are
+    the root, which is the stored underlying for ordinary and adjusted contracts
+    alike (``O:BDX1…`` belongs to BDX). An index root the catalogue stores under
+    another name still needs an explicit ``symbol``, which is why this only fills
+    in for a caller who gave none.
+    """
+    raw = (option_ticker or "").strip().upper()
+    if not raw.startswith("O:"):
+        return None
+    body = raw[2:]
+    root = body[: len(body) - len(body.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))]
+    return root or None
+
+
 def query_option_daily(
     conn: Any,
     *,
-    symbol: str,
+    symbol: str | None = None,
     expiry: str | None = None,
     days: int = 30,
     limit: int = 2000,
@@ -70,9 +88,9 @@ def query_option_daily(
     lookback used when neither is. A single contract is either its
     ``option_ticker`` or its ``strike`` + ``right`` (with ``expiry``).
     """
-    sym = normalize_symbol(symbol)
+    sym = normalize_symbol(symbol) if symbol else underlying_of_ticker(option_ticker)
     if not sym:
-        return {"ok": False, "error": "symbol is required"}
+        return {"ok": False, "error": "symbol is required (or an O:… option_ticker)"}
     if not table_exists(conn, "market", "option_daily"):
         return {"ok": True, "symbol": sym, "rows": [], "count": 0}
 
@@ -189,7 +207,9 @@ def query_option_daily_available_dates(
 @router.get("/daily")
 def options_daily(
     request: Request,
-    symbol: str = Query(..., description="Underlying symbol (e.g. NVDA)"),
+    symbol: str | None = Query(
+        None, description="Underlying symbol (e.g. NVDA); derived from option_ticker if omitted"
+    ),
     expiry: str | None = Query(None, description="Filter by expiry YYYY-MM-DD"),
     days: int = Query(30, ge=1, le=365, description="Lookback days when no from/to"),
     limit: int = Query(2000, ge=1, le=5000),
@@ -204,6 +224,8 @@ def options_daily(
     """Option daily OHLCV bars from market.option_daily."""
     reject_unknown_params(request, DAILY_PARAM_ALIASES)
     side = _norm_right(right)
+    if not symbol and not option_ticker:
+        raise HTTPException(status_code=422, detail="symbol or option_ticker is required")
     conn = require_db()
     try:
         return query_option_daily(
