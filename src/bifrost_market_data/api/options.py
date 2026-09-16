@@ -664,6 +664,7 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
 _EOD_COLS: tuple[str, ...] = (
     "snap_day",
     "iv",
+    "delta",
     "underlying_price",
     "snapshot_ts",
     "_option_ticker",
@@ -758,6 +759,7 @@ def _fetch_chain_eod(
                 )
                   DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
                   v.iv,
+                  v.delta,
                   {price_col},
                   v.snapshot_ts,
                   oc.option_ticker AS _option_ticker,
@@ -792,6 +794,7 @@ def _fetch_chain_eod(
                 )
                   DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
                   v.iv,
+                  v.delta,
                   {price_col},
                   v.snapshot_ts,
                   oc.option_ticker AS _option_ticker,

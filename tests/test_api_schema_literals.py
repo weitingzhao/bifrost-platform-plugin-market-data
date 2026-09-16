@@ -83,6 +83,7 @@ def _query_sql(conn: _Conn) -> list[str]:
 EOD_SNAPSHOT = {
     "snap_day": date(2026, 9, 14),
     "iv": 0.37,
+    "delta": 0.21,
     "underlying_price": 245.0,
     "snapshot_ts": datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc),
     "_option_ticker": "O:NVDA261120C00245000",
@@ -110,6 +111,7 @@ def test_chain_eod_names_the_schema_the_snapshot_relation_lives_in() -> None:
 EOD_TUPLE_IB = (
     date(2026, 9, 14),
     0.37,
+    0.21,
     245.0,
     datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc),
     "O:NVDA261120C00245000",
@@ -131,6 +133,7 @@ def test_chain_eod_reads_the_tuple_rows_the_database_returns() -> None:
     assert rows, "a tuple row is a row"
     assert rows[0]["contract_key"] == "NVDA|OPT|20261120|245.0|C"
     assert rows[0]["iv"] == 0.37 and rows[0]["snap_day"] == "2026-09-14"
+    assert rows[0]["delta"] == 0.21, "the caller asked for the greek, not only the vol"
     assert rows[0]["underlying_price"] == 245.0
 
 
