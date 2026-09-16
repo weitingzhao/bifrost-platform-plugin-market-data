@@ -17,9 +17,9 @@ from bifrost_market_data.api.deps import (
     iso_value,
     normalize_symbol,
     require_db,
+    resolve_market_schema,
     row_dict,
     table_exists,
-    view_exists,
 )
 from bifrost_market_data.api.options_bridge import (
     ib_contract_key_from_parts,
@@ -525,7 +525,10 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
     poly_requested = set(polygon)
     rows: List[Dict[str, Any]] = []
 
-    use_view = view_exists(conn, "market", "v_option_chain_latest")
+    # ``market`` is a logical alias; the view really lives in ``raw_market``, so
+    # asking for it under ``market`` was always false and this endpoint never took
+    # its own materialised path. Resolve the schema instead of naming one.
+    use_view = resolve_market_schema(conn, "market", "v_option_chain_latest") is not None
 
     with conn.cursor() as cur:
         if polygon:
@@ -618,12 +621,20 @@ def _fetch_chain_eod(
     }
     poly_requested = set(polygon)
 
-    use_view = (
-        table_exists(conn, "market", "v_option_snapshot_with_stock")
-        or view_exists(conn, "market", "v_option_snapshot_with_stock")
-    )
-    snapshot_table = "market.v_option_snapshot_with_stock" if use_view else "market.option_snapshot"
-    price_col = "v.underlying_price" if use_view else "NULL::double precision AS underlying_price"
+    # The snapshot relation is named from the schema it actually lives in. Writing
+    # ``market.`` into the SQL made every request 500 on "relation does not exist":
+    # the persisted tables moved to ``raw_market`` and ``market`` is only a logical
+    # alias the resolver understands, not a schema Postgres can find.
+    view_schema = resolve_market_schema(conn, "market", "v_option_snapshot_with_stock")
+    if view_schema is not None:
+        snapshot_table = f"{view_schema}.v_option_snapshot_with_stock"
+        price_col = "v.underlying_price"
+    else:
+        table_schema = resolve_market_schema(conn, "market", "option_snapshot")
+        if table_schema is None:
+            return []
+        snapshot_table = f"{table_schema}.option_snapshot"
+        price_col = "NULL::double precision AS underlying_price"
 
     out: List[Dict[str, Any]] = []
 

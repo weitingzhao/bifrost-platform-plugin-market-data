@@ -14,8 +14,8 @@ from fastapi import APIRouter, Query
 from bifrost_market_data.api.deps import (
     normalize_symbol,
     require_db,
+    resolve_market_schema,
     table_exists,
-    view_exists,
 )
 
 router = APIRouter(prefix="/options/analytics", tags=["options-analytics"])
@@ -52,7 +52,10 @@ def query_chain_by_expiry(
     chain: list[dict[str, Any]] = []
     basis: str | None = None
 
-    use_mv = view_exists(conn, "market", "v_option_chain_latest")
+    # Same fault as chain/eod and chain/latest: the relation moved to ``raw_market``,
+    # so a check naming ``market`` never matched and the LATERAL fallback ran every
+    # time. Both branches read the latest snapshot per ticker; only ``basis`` differs.
+    use_mv = resolve_market_schema(conn, "market", "v_option_chain_latest") is not None
 
     with conn.cursor() as cur:
         if use_mv:
