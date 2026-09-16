@@ -45,6 +45,12 @@ def _table_relkind(cur: _Cursor, schema: str, name: str) -> str | None:
 
 def create_financials_entity_tables(cur: _Cursor) -> None:
     for table in FINANCIALS_ENTITY_TABLES:
+        # filing_date is in the CREATE, not only in add_financials_filing_date's
+        # ALTER: on an empty database migrate_stock_financials_split builds the
+        # compat view straight after this, and that view selects filing_date.
+        # The ALTER runs later, so without it here apply_ddl failed every fresh
+        # install with UndefinedColumn (reproduced 2026-09-16). Last, matching
+        # the column order the ALTER gave the deployed tables.
         cur.execute(
             f"""
             CREATE TABLE IF NOT EXISTS raw_market.{table} (
@@ -55,6 +61,7 @@ def create_financials_entity_tables(cur: _Cursor) -> None:
                 fiscal_quarter integer,
                 data           jsonb   NOT NULL,
                 fetched_at     timestamptz DEFAULT now(),
+                filing_date    date,
                 PRIMARY KEY (symbol, period_date, period_type)
             )
             """

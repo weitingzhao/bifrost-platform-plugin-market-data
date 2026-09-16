@@ -202,6 +202,46 @@ def test_filing_date_migration_is_additive_and_indexed() -> None:
     assert sql.count("filing_date, fetched_at") == len(FINANCIALS_ENTITY_TABLES)
 
 
+def test_financials_compat_view_reads_only_columns_the_fresh_create_has() -> None:
+    """On an empty database the view is built straight after CREATE TABLE.
+
+    add_financials_filing_date — the ALTER that gave deployed tables the column —
+    runs after migrate_stock_financials_split, so a column the view names but the
+    CREATE lacks fails apply_ddl on every fresh install. The mock DDL tests cannot
+    see that; reproduced 2026-09-16 against postgres:16 as UndefinedColumn.
+    """
+    import re
+
+    from bifrost_market_data.schema.wave8_migrations import (
+        FINANCIALS_ENTITY_TABLES,
+        create_financials_entity_tables,
+        create_stock_financials_compat_view,
+    )
+
+    cur = _FakeCursor()
+    create_financials_entity_tables(cur)
+    created: dict[str, set[str]] = {}
+    for stmt in cur.statements:
+        m = re.search(r"CREATE TABLE IF NOT EXISTS raw_market\.(\w+) \((.*)\)", stmt, re.DOTALL)
+        if m:
+            # Column lines are lowercase; PRIMARY KEY is not.
+            created[m.group(1)] = set(re.findall(r"^\s*([a-z_]+)\s", m.group(2), re.MULTILINE))
+
+    view = _FakeCursor()
+    create_stock_financials_compat_view(view)
+    branches = re.findall(
+        r"SELECT symbol, '\w+'::text(?: AS report_type)?,\s*(.*?)\s*FROM raw_market\.(\w+)",
+        view.statements[-1],
+        re.DOTALL,
+    )
+
+    assert {table for _, table in branches} == set(FINANCIALS_ENTITY_TABLES)
+    for columns, table in branches:
+        read = {"symbol"} | {c.strip() for c in columns.split(",")}
+        assert "filing_date" in read
+        assert read <= created[table], f"{table} CREATE lacks {read - created[table]}"
+
+
 def test_filing_date_migration_not_on_bifrost_role_path() -> None:
     """apply_wave8_migrations runs as the bifrost role; the ALTER needs ownership.
 

@@ -289,6 +289,11 @@ and **not** from `apply_wave8_migrations` — `raw_market` tables are owned by
 `postgres`, so the ALTER needs the superuser path the schema-migrate job header
 documents.
 
+A fresh install gets the column from the entity-table `CREATE` itself (since
+0.36.1). Before that `apply_ddl` failed on every empty database: the compat view
+that names `filing_date` is built straight after `CREATE TABLE`, and the ALTER
+runs later.
+
 **PK:** `(symbol, report_type, period_date, period_type)`  
 (`period_type` defaults to `''` so NULL is not required in PK.)
 
