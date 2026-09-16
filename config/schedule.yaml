@@ -68,6 +68,11 @@ scheduler:
       # Renews the same 575 underlyings the P4 backfill bought history for;
       # the watchlist stays the fallback when research.option_universe is empty.
       universe: research
+      # research.option_pinned_contract is always priced on top of the near-spot
+      # window, and the first runs also buy each pinned contract's own history so
+      # a closed leg has bars from before it drifted away from spot. Jobs dedup
+      # on payload, so repeating the same window enqueues nothing.
+      pinned_history_days: 400
     # option-trades retired 0.10.3: option trades are not in Options Starter.
     minute-bars:
       cron: "15 23 * * *"
@@ -161,6 +166,22 @@ scheduler:
       universe: research
       strike_pct: 0.30
       dte: 90
+    corporate-backfill:
+      # Manual / one-off: the full dividend and split history of every symbol in
+      # research.option_universe union the watchlist. The daily `corporate` slot
+      # walks a -7/+60 day window of the whole market, which never reaches back,
+      # so a screen on dividend history had nothing to read.
+      # No cron: Owner-run, so the dashboard must not score it for adherence.
+      priority: 1
+    option-contract-expired:
+      # Manual / one-off: contracts that have already expired, which the live
+      # catalogue enumeration drops the day they do. Walked a quarter at a time
+      # per underlying so a page cap cannot truncate a decade into a month.
+      # Scope: research.option_universe union pinned underlyings union watchlist.
+      priority: 1
+      months: 24
+      months_per_batch: 3
+      universe: research
     fundamentals-market:
       # Ratios + short volume for the last completed session, short interest
       # for the latest settlement; whole market at 1,000 rows a page.

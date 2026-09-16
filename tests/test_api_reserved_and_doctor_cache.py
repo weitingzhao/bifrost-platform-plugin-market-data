@@ -25,11 +25,13 @@ def client() -> TestClient:
 
 def test_every_reserved_name_is_a_real_sibling_route() -> None:
     # The map must not rot into a list of paths that no longer exist.
-    app = create_app()
+    # From the schema: since FastAPI 0.116 an included router sits in
+    # ``app.routes`` as one lazy object with no ``path`` of its own, so reading
+    # routes there found no segments at all and the map could rot unnoticed.
     segments = {
-        p[len("/market/"):].split("/")[0]
-        for p in (getattr(r, "path", "") for r in app.routes)
-        if p.startswith("/market/")
+        path[len("/market/"):].split("/")[0]
+        for path in create_app().openapi()["paths"]
+        if path.startswith("/market/")
     }
     assert set(stocks.RESERVED_SEGMENTS) <= segments
     assert "stocks" not in stocks.RESERVED_SEGMENTS

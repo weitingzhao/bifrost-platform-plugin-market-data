@@ -233,6 +233,7 @@ WHERE (t.option_ticker, t.snapshot_ts) IN (
     SELECT option_ticker, snapshot_ts
     FROM raw_market.option_snapshot
     WHERE snapshot_ts < now() - make_interval(days => %s)
+    {spare}
     LIMIT %s
 )
 """
@@ -244,9 +245,37 @@ WHERE (t.option_ticker, t.snapshot_ts) IN (
     FROM raw_market.option_snapshot
     WHERE snapshot_ts < now() - make_interval(days => %s)
       AND (snapshot_ts AT TIME ZONE 'America/New_York')::time <> time '16:00'
+    {spare}
     LIMIT %s
 )
 """
+
+#: Contracts Research pinned keep every snapshot they have. A closed position's
+#: post-mortem is read months later, and 90 sessions of retention is measured
+#: from now, not from the day the leg was closed.
+_SPARE_PINNED = """
+      AND NOT EXISTS (
+          SELECT 1 FROM research.option_pinned_contract p
+          WHERE p.option_ticker = raw_market.option_snapshot.option_ticker
+            AND p.pin_until >= CURRENT_DATE
+      )
+"""
+
+
+def _pin_table_exists(conn: _Connection) -> bool:
+    """Whether Research has published a pin list at all.
+
+    Absent means no contract is pinned, so the plain statement is the right one.
+    Present but unreadable is not smoothed over: the trim fails and the Owner's
+    pinned history stays where it is.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('research.option_pinned_contract') IS NOT NULL")
+        row = cur.fetchone()
+    if row is None:
+        return False
+    value = next(iter(row.values()), None) if isinstance(row, Mapping) else row[0]
+    return bool(value)
 
 #: Rows per intraday-snapshot delete statement. Smaller than the job batch: each
 #: row is wider and the predicate has to read the whole candidate range.
@@ -284,17 +313,20 @@ def trim_option_snapshots(
     row only within one partition — 462,252 of them are shared by more than one
     row here, so a ctid batch would delete rows nobody selected. ``job_ingest``
     is an ordinary table, which is why its trim can use ctid.
+
+    Contracts in ``research.option_pinned_contract`` are spared while their pin
+    lasts, so a position closed six months ago still has its snapshots when the
+    post-mortem asks for them.
     """
+    template = _SNAPSHOT_DELETE_INTRADAY if intraday_only else _SNAPSHOT_DELETE_ALL
+    statement = template.format(spare=_SPARE_PINNED if _pin_table_exists(conn) else "")
     deleted = 0
     started = monotonic()
     try:
         while monotonic() - started < budget_sec:
             with conn.cursor() as cur:
                 cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
-                cur.execute(
-                    _SNAPSHOT_DELETE_INTRADAY if intraday_only else _SNAPSHOT_DELETE_ALL,
-                    (int(keep_days), int(batch_size)),
-                )
+                cur.execute(statement, (int(keep_days), int(batch_size)))
                 n = int(getattr(cur, "rowcount", 0) or 0)
             conn.commit()
             deleted += n

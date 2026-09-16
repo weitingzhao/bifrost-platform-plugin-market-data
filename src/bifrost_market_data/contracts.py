@@ -241,7 +241,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # Dividends and splits are sparse: a week without one is normal, and the
         # doctor has always allowed that. 48h would flag the calendar, not the feed.
         168.0,
-        ("corporate",),
+        ("corporate", "corporate-backfill"),
         "symbol",
         "ex_date",
         breadth_window="ever",
@@ -422,7 +422,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
             "catalogue", why="contracts alive now, plus expired ones the vendor still lists"
         ),
         12.0,
-        ("option-refresh",),
+        ("option-refresh", "option-contract-expired"),
         "underlying",
         None,
         low_cardinality=True,

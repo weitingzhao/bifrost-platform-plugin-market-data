@@ -325,7 +325,9 @@ def test_heal_reports_action_errors_and_continues(monkeypatch: pytest.MonkeyPatc
 def test_doctor_routes_are_registered() -> None:
     from bifrost_market_data.api.app import create_app
 
-    paths = {r.path for r in create_app().routes}
+    # From the schema, not from ``app.routes``: since FastAPI 0.116 an included
+    # router sits there as one lazy object with no ``path`` of its own.
+    paths = set(create_app().openapi()["paths"])
     assert "/market/doctor" in paths
     assert "/market/doctor/heal" in paths
 

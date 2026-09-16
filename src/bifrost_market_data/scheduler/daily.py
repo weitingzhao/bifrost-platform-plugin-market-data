@@ -28,6 +28,7 @@ from bifrost_market_data.scheduler.enqueue import (
     trim_option_snapshots,
     trim_old_jobs,
 )
+from bifrost_market_data.research_pins import load_pinned_contracts, load_pinned_underlyings
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.symbol_void import load_voided_symbols
 
@@ -59,6 +60,10 @@ SLOT_NAMES = (
     # Reference data, not session data: it has no holiday gate because a
     # company's listing date does not depend on the market being open.
     "ticker-details",
+    # Owner-run one-offs (no cron, like option-backfill): full corporate-action
+    # history per symbol, and the catalogue of contracts that have already expired.
+    "corporate-backfill",
+    "option-contract-expired",
 )
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
@@ -1249,6 +1254,8 @@ def enqueue_slot(
         "minute-bars",
         "fundamentals-rotate",
         "related-rotate",
+        "corporate-backfill",
+        "option-contract-expired",
     }
     if watchlist_symbols is not None:
         symbols = list(watchlist_symbols)
@@ -1264,7 +1271,14 @@ def enqueue_slot(
     tier_of: dict[str, str] = {}
     months_of: dict[str, int] = {}
     if (
-        slot_key in ("option-refresh", "option-backfill", "eod-pipeline", "option-bars")
+        slot_key
+        in (
+            "option-refresh",
+            "option-backfill",
+            "eod-pipeline",
+            "option-bars",
+            "option-contract-expired",
+        )
         and str(scfg.get("universe") or "").lower() == "research"
     ):
         universe = load_research_universe(conn)
@@ -1411,6 +1425,45 @@ def enqueue_slot(
                     pri=_tier_pri(sym),
                 )
 
+    elif slot_key == "corporate-backfill":
+        # Per-symbol full history, no date filter. The daily `corporate` slot walks
+        # a date window of the whole market, which is right for what is about to
+        # happen and blind to a company's older ex-dates — Research screens on
+        # dividend history it never had.
+        ruled = {u["symbol"] for u in load_research_universe(conn)}
+        for sym in sorted(ruled | set(symbols)):
+            _add("dividends", {"symbol": sym})
+            _add("splits", {"symbol": sym})
+
+    elif slot_key == "option-contract-expired":
+        # The catalogue only ever enumerated listed contracts, so a contract drops
+        # out of it the day it expires and the bars of a closed position have no
+        # row to hang from. Walk the expired catalogue a quarter at a time: one
+        # request per underlying-quarter pages sanely, one per underlying-decade
+        # does not.
+        months = int(scfg.get("months") or 24)
+        step = max(1, int(scfg.get("months_per_batch") or 3))
+        scope = sorted(
+            {u["symbol"] for u in load_research_universe(conn)}
+            | load_pinned_underlyings(conn)
+            | set(symbols)
+        )
+        for sym in scope:
+            storage = storage_underlying(sym)
+            for back in range(0, months, step):
+                newest = _month_start(day, back)
+                oldest = _month_start(day, min(months - 1, back + step - 1))
+                _add(
+                    "option_contract",
+                    {
+                        "underlying": storage,
+                        "expired": True,
+                        "expiration_date_gte": oldest.isoformat(),
+                        "expiration_date_lte": _month_end(newest).isoformat(),
+                    },
+                    pri=_tier_pri(sym),
+                )
+
     elif slot_key == "universe-daily":
         _add(
             "stock_daily_grouped",
@@ -1488,13 +1541,31 @@ def enqueue_slot(
             expiries=int(scfg.get("expiries") or 3),
             strikes_each_side=int(scfg.get("strikes_each_side") or 10),
         )
-        for ot, und in tickers:
+        # The contracts the Owner holds or closed recently, wherever they sit
+        # relative to spot. Without this a leg that drifted 30% away stops getting
+        # bars the day it leaves the near-spot window, and the position it belongs
+        # to has a gap exactly where the move happened. Jobs dedup on payload, so
+        # a pinned contract already in the near-spot list costs nothing.
+        pinned = load_pinned_contracts(conn)
+        for ot, und in list(tickers) + pinned:
             # The catalogue's underlying, not the ticker's root: an adjusted
             # contract reads O:BDX1… and belongs to BDX.
             _add(
                 "option_daily",
                 {"option_ticker": ot, "underlying": und, "from": day_s, "to": day_s},
             )
+        if pinned and int(scfg.get("pinned_history_days") or 0) > 0:
+            # One-off deepening: the pinned contract's own history, once. Jobs
+            # dedup on payload hash, so re-running the slot the next day asks for
+            # the same window and enqueues nothing new.
+            back = int(scfg["pinned_history_days"])
+            since = (day - timedelta(days=back)).isoformat()
+            for ot, und in pinned:
+                _add(
+                    "option_daily",
+                    {"option_ticker": ot, "underlying": und, "from": since, "to": day_s},
+                    pri=1,
+                )
 
     elif slot_key == "minute-bars":
         # Stock intraday: 1min / 5min / 1hour (replaces retired Trade stocks_ib Celery path).

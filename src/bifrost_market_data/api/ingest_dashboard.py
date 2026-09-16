@@ -87,6 +87,19 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "freshness": "option_daily",
         "maintenance": True,
     },
+    # Owner-run one-offs. Marked maintenance for the same reason option-backfill
+    # is: without a cron there is no session they could have missed, and an
+    # unscheduled slot must not be able to fail the Research gate.
+    "corporate-backfill": {
+        "kinds": ["dividends", "splits"],
+        "freshness": "dividends",
+        "maintenance": True,
+    },
+    "option-contract-expired": {
+        "kinds": ["option_contract"],
+        "freshness": "option_contract",
+        "maintenance": True,
+    },
     "max-pain": {
         "kinds": [],
         "freshness": None,
@@ -139,6 +152,8 @@ SLOT_NOTES: dict[str, str] = {
     "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",
+    "corporate-backfill": "Full dividend / split history per symbol (Owner-run)",
+    "option-contract-expired": "Expired option catalogue, a quarter at a time (Owner-run)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",
