@@ -609,3 +609,62 @@ def option_ticks_params(
     if timestamp_lte:
         params["timestamp.lte"] = timestamp_lte
     return params
+
+
+# ---- SEC filings (Stocks plan, vendor beta) ----
+#
+# The paths carry ``vX``, not ``v1``. 0.10.3 probed ``/stocks/filings/v1/...``,
+# got 404 on every one of them and recorded the whole family as "vendor
+# offline"; the endpoints had been answering under ``vX`` the whole time
+# (measured 2026-09-23 with this plugin's key: 200 with rows on all three, and
+# the old ``v1`` paths still 404). A 404 on a path is a statement about that
+# path, not about the dataset.
+
+
+def sec_8k_text_path() -> str:
+    return "/stocks/filings/8-K/vX/text"
+
+
+def sec_8k_disclosures_path() -> str:
+    return "/stocks/filings/8-K/vX/disclosures"
+
+
+def sec_10k_sections_path() -> str:
+    return "/stocks/filings/10-K/vX/sections"
+
+
+def sec_filing_params(
+    *,
+    ticker: str | None = None,
+    ticker_param: str = "ticker",
+    tickers_any_of: tuple[str, ...] | None = None,
+    filing_date_gte: str | None = None,
+    filing_date_lte: str | None = None,
+    limit: int = 1000,
+    sections: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Shared filter shape for the three filing endpoints.
+
+    ``ticker_param`` exists because the vendor spells it two ways: the text and
+    sections endpoints take ``ticker``, the disclosures endpoint takes
+    ``tickers`` (a filing can name several). No ``sort`` is sent: the sections
+    endpoint answers 400 to ``filing_date.asc`` (it sorts by ``period_end``
+    only), and page order does not matter to an upsert.
+
+    Page sizes as served, measured 2026-09-23: disclosures honour 1,000; the
+    8-K text endpoint returns about 100 a page whatever ``limit`` asks; the
+    sections endpoint caps at 100 and each row is a whole section of an annual
+    report — 54 rows for twenty names came to 6.8 MB.
+    """
+    params: dict[str, Any] = {"limit": int(limit)}
+    if ticker:
+        params[ticker_param] = str(ticker).strip().upper()
+    if tickers_any_of:
+        params[f"{ticker_param}.any_of"] = ",".join(str(t).strip().upper() for t in tickers_any_of)
+    if filing_date_gte:
+        params["filing_date.gte"] = filing_date_gte
+    if filing_date_lte:
+        params["filing_date.lte"] = filing_date_lte
+    if sections:
+        params["section.any_of"] = ",".join(sections)
+    return params

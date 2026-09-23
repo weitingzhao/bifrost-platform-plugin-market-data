@@ -868,13 +868,18 @@ def test_a_voided_symbol_leaves_the_denominator(wired: dict[str, Any], monkeypat
 def test_the_void_set_is_read_once_per_collection_not_per_dataset(
     wired: dict[str, Any], monkeypatch
 ) -> None:
-    """Three financials tables share one void set."""
+    """Three financials tables share one void set.
+
+    Each collection is read once however many datasets declare it; the SEC
+    filings (0.37.0) add two collections of their own, one per endpoint that
+    can answer empty for a name.
+    """
     calls: list[str] = []
     monkeypatch.setattr(
         mod, "load_voided_symbols", lambda conn, dt: calls.append(dt) or set()
     )
     mod.get_dimensions(tier=None, refresh=True)
-    assert calls == ["financials"]
+    assert sorted(calls) == ["financials", "sec_10k", "sec_8k"]
 
 
 def test_the_void_symbols_stay_server_side(wired: dict[str, Any], monkeypatch) -> None:

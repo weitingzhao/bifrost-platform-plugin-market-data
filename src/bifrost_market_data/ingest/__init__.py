@@ -19,6 +19,10 @@ from bifrost_market_data.ingest.financials_market import (
     handle_short_interest_market,
     handle_short_volume_market,
 )
+from bifrost_market_data.ingest.sec_filings import (
+    handle_sec_filings_market,
+    handle_sec_filings_symbol,
+)
 from bifrost_market_data.ingest.financials_ext import (
     handle_ratios,
     handle_short_interest,
@@ -74,6 +78,8 @@ _RAW_HANDLERS: dict[str, Any] = {
     "ratios_market": handle_ratios_market,
     "short_volume_market": handle_short_volume_market,
     "short_interest_market": handle_short_interest_market,
+    "sec_filings_market": handle_sec_filings_market,
+    "sec_filings_symbol": handle_sec_filings_symbol,
     "calendar": handle_calendar,
 }
 
@@ -124,6 +130,8 @@ __all__ = [
     "handle_dividends_market",
     "handle_ratios_market",
     "handle_short_volume_market",
+    "handle_sec_filings_market",
+    "handle_sec_filings_symbol",
     "handle_short_interest_market",
     "handle_calendar",
 ]

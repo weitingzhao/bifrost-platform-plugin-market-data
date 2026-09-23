@@ -66,7 +66,7 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "stock-snapshot": {"kinds": ["stock_snapshot"], "freshness": "stock_snapshot"},
     "stock-movers": {"kinds": ["stock_movers"], "freshness": "stock_movers"},
     "fundamentals-market": {
-        "kinds": ["ratios_market", "short_volume_market", "short_interest_market"],
+        "kinds": ["ratios_market", "short_volume_market", "short_interest_market", "sec_filings_market"],
         "freshness": "ratios",
     },
     "intraday-chain": {
@@ -93,6 +93,11 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     "corporate-backfill": {
         "kinds": ["dividends", "splits"],
         "freshness": "dividends",
+        "maintenance": True,
+    },
+    "filings-backfill": {
+        "kinds": ["sec_filings_symbol"],
+        "freshness": "sec_filings",
         "maintenance": True,
     },
     "option-contract-expired": {
@@ -148,11 +153,12 @@ SLOT_NOTES: dict[str, str] = {
     "related-rotate": "Related-companies rotate",
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
-    "fundamentals-market": "Ratios + short data, whole market by date",
+    "fundamentals-market": "Ratios + short data, whole market by date; SEC filings for the universe",
     "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",
     "corporate-backfill": "Full dividend / split history per symbol (Owner-run)",
+    "filings-backfill": "Two years of SEC 8-Ks and 10-K sections per universe name (Owner-run)",
     "option-contract-expired": "Expired option catalogue, a quarter at a time (Owner-run)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",

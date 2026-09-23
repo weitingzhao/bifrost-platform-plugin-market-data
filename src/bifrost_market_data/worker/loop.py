@@ -50,6 +50,8 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
         "ratios_market",
         "short_volume_market",
         "short_interest_market",
+        "sec_filings_market",
+        "sec_filings_symbol",
         "calendar",
         "ticker_related",
     ),

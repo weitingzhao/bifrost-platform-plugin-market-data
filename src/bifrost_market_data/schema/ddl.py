@@ -572,6 +572,109 @@ def _create_market_tables(cur: _Cursor) -> None:
         """
     )
 
+    _create_sec_filing_tables(cur)
+
+
+def _create_sec_filing_tables(cur: _Cursor) -> None:
+    """What companies filed with the SEC, as text (0.37.0).
+
+    The narrative lens reads what a company *said*, and until this release the
+    plugin held numbers only. Three tables, one per vendor endpoint, because
+    they are three different objects: a filing, the vendor's classification of
+    events inside it, and a section of an annual report.
+
+    Scope is the Research universe, two years deep (Owner 2026-09-23). The
+    8-K text is the complete record — every 8-K a universe company filed, with
+    the SEC item numbers parsed out of it — and ``'2.02' = ANY(items)`` is the
+    earnings print date. The disclosures table is a partial enrichment: the
+    vendor classifies about two 8-Ks in five (273 of 703 on 2026-08-06), so a
+    missing classification is the vendor's coverage, never evidence that
+    nothing happened.
+    """
+    # --- sec_8k_filing: one row per 8-K per ticker ---
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_market.sec_8k_filing (
+            accession_number text        NOT NULL,
+            symbol           text        NOT NULL,
+            cik              text,
+            form_type        text,
+            filing_date      date        NOT NULL,
+            filing_url       text,
+            items            text[]      NOT NULL DEFAULT '{}',
+            items_text       text,
+            fetched_at       timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (accession_number, symbol)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS sec_8k_filing_symbol_date
+        ON raw_market.sec_8k_filing (symbol, filing_date DESC)
+        """
+    )
+    cur.execute(
+        """
+        COMMENT ON COLUMN raw_market.sec_8k_filing.items IS
+          'SEC item numbers parsed from items_text, e.g. {2.02,9.01}; 2.02 is Results of Operations (an earnings print).'
+        """
+    )
+
+    # --- sec_8k_disclosure: the vendor's classification, replaced per filing ---
+    # No natural key: one filing can carry the same category twice with two
+    # different excerpts, and the vendor may reclassify. A pull replaces every
+    # row of the (accession, symbol) pairs it returned, so the table holds what
+    # the vendor says now rather than an accumulation of what it once said.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_market.sec_8k_disclosure (
+            id                 bigserial   PRIMARY KEY,
+            accession_number   text        NOT NULL,
+            symbol             text        NOT NULL,
+            cik                text,
+            filing_date        date        NOT NULL,
+            filing_url         text,
+            primary_category   text,
+            secondary_category text,
+            tertiary_category  text,
+            supporting_text    text,
+            fetched_at         timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS sec_8k_disclosure_symbol_date
+        ON raw_market.sec_8k_disclosure (symbol, filing_date DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS sec_8k_disclosure_accession
+        ON raw_market.sec_8k_disclosure (accession_number, symbol)
+        """
+    )
+
+    # --- sec_10k_section: annual-report sections as plain text ---
+    # filing_date is in the key because an amended 10-K/A restates the same
+    # period_end; both are kept, and the newest filing is the reading.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_market.sec_10k_section (
+            symbol       text        NOT NULL,
+            section      text        NOT NULL,
+            period_end   date        NOT NULL,
+            filing_date  date        NOT NULL,
+            cik          text,
+            filing_url   text,
+            text         text,
+            fetched_at   timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (symbol, section, period_end, filing_date)
+        )
+        """
+    )
+
 
 def create_coverage_sample(cur: _Cursor) -> None:
     """The coverage matrix's memory. Idempotent, and on the *migration* path.

@@ -53,6 +53,10 @@ CAPABILITIES: list[dict[str, Any]] = [
     {"id": "financial_statements", "label": "Income, balance sheet, cash flow", "status": "entitled", "subscription": "financials-ratios", "used_by": ["fundamentals-rotate"]},
     {"id": "ratios_short", "label": "Financial ratios, short interest, short volume", "status": "entitled", "subscription": "financials-ratios", "used_by": ["fundamentals-market"]},
     {"id": "treasury_yields", "label": "Treasury yields and inflation", "status": "entitled", "subscription": None, "used_by": []},
+    # Recorded as "unavailable, 404" from 0.10.3 until 0.37.0: that release
+    # probed /stocks/filings/v1/*, and the vendor serves vX. The data had been
+    # in the plan the whole time.
+    {"id": "sec_filings", "label": "SEC 8-K text and classification, 10-K sections", "status": "entitled", "subscription": "stocks-starter", "used_by": ["fundamentals-market", "filings-backfill"]},
     {
         "id": "option_trades",
         "label": "Option trades tape",
@@ -83,12 +87,20 @@ CAPABILITIES: list[dict[str, Any]] = [
         "used_by": ["eod-pipeline index spot", "Research GEX close"],
     },
     {
-        "id": "filings_float",
-        "label": "SEC filings and float",
+        "id": "float",
+        "label": "Free float",
         "status": "unavailable",
         "requires": None,
         "used_by": [],
-        "note": "The endpoints answer 404; not a plan question.",
+        "note": "/stocks/v1/float answers 404; not a plan question.",
+    },
+    {
+        "id": "benzinga",
+        "label": "Corporate guidance, earnings and news (Benzinga)",
+        "status": "planned",
+        "requires": "Benzinga expansion",
+        "used_by": ["Research narrative: guidance"],
+        "note": "Measured 2026-09-23: 403 not entitled. Structured guidance with prior values is the raised / held / cut reading the narrative lens asks for.",
     },
 ]
 

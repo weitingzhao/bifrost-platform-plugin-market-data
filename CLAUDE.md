@@ -71,6 +71,7 @@ make sync-write-auth-overlay    # ConfigMap overlay of deps.py (X-Market-Data-Wr
 ## 订阅事实（2026-09-06 实测）
 
 Owner 订阅 **Options Starter + Stocks Starter + Financials & Ratios**：无限调用（限流是自伤，`tier: starter` 已改为 8 req/s 软上限）；股票聚合滚动 5 年、期权聚合滚动 2 年；trades / quotes / last-trade / 指数行情 **403**（升级前不拉）。
+SEC 文件文本（8-K 正文 / 8-K 分类 / 10-K 章节）在 Stocks 计划内，路径是 **`vX`**（`v1` 是 404，0.10.3 曾据此误判为下线）；0.37.0 起按 universe 采两年。Benzinga（guidance / earnings / news）403；Massive 不卖电话会纪要。
 程序文档：`docs/SUBSCRIPTION_FOCUS_PROGRAM.md`。
 
 `option_snapshot.snapshot_ts` 是**观测时间**（EOD = 该 session 的 16:00 NY 锚点），不是最后成交时间——后者在 `last_trade_ts`。链快照只反映当前会话，所以补跑只在下一次开盘前有效（`trading_calendar.chain_session`）。

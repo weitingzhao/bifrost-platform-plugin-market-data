@@ -1355,6 +1355,67 @@ def test_reference_and_universe_skip_watchlist_lookup() -> None:
     assert uni["jobs"][0]["kind"] == "stock_daily_grouped"
 
 
+def test_fundamentals_market_reads_filings_over_a_window() -> None:
+    """SEC filings ride the same slot (0.37.0), four days back from the session.
+
+    A filing accepted after 17:30 ET carries the next business day's date, and a
+    run that did not happen is covered by the next; the writes are upserts.
+    """
+    result = enqueue_slot(
+        _DailyConn(["AAPL"]),
+        "fundamentals-market",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2}}},
+    )
+    by_kind = {j["kind"]: j["payload"] for j in result["jobs"]}
+    assert by_kind["sec_filings_market"] == {
+        "filing_date_gte": "2024-06-17",
+        "filing_date_lte": "2024-06-21",
+    }
+
+
+def test_fundamentals_market_backfills_universe_names_with_no_filings() -> None:
+    """A name that joined the universe after the backfill gets its history here."""
+    conn = _DailyConn(
+        ["AAPL"],
+        research_universe=[("NVDA", "core", 24), ("PLTR", "resident", 24), ("RKLB", "core", 24)],
+    )
+    result = enqueue_slot(
+        conn,
+        "fundamentals-market",
+        target_date=date(2024, 6, 21),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"fundamentals-market": {"priority": 2, "filings_catch_up": 2}}},
+    )
+    catch_up = [j["payload"] for j in result["jobs"] if j["kind"] == "sec_filings_symbol"]
+    # The fake answers the missing-names query with the universe; the limit is
+    # passed through as the query's own parameter.
+    assert {p["since"] for p in catch_up} == {"2022-06-01"}
+    probe = next(p for q, p in conn.statements if "raw_market.sec_8k_filing" in q)
+    assert probe == ("sec_8k", 2)
+
+
+def test_filings_backfill_walks_the_universe_minus_voids() -> None:
+    conn = _DailyConn(
+        ["AAPL"],
+        research_universe=[("NVDA", "core", 24), ("SPY", "resident", 24)],
+        voided=["SPY"],
+    )
+    result = enqueue_slot(
+        conn,
+        "filings-backfill",
+        target_date=date(2026, 9, 23),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"filings-backfill": {"priority": 1, "days": 730}}},
+    )
+    jobs = [(j["kind"], j["payload"]) for j in result["jobs"]]
+    assert jobs == [
+        ("sec_filings_symbol", {"symbol": "AAPL", "since": "2024-09-01"}),
+        ("sec_filings_symbol", {"symbol": "NVDA", "since": "2024-09-01"}),
+    ]
+
+
 def test_migrated_analytics_slots_rejected() -> None:
     """Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research."""
     conn = _DailyConn([])
@@ -1376,7 +1437,12 @@ def test_enqueue_fundamentals_market() -> None:
         },
     )
     by_kind = {j["kind"]: j["payload"] for j in result["jobs"]}
-    assert set(by_kind) == {"ratios_market", "short_volume_market", "short_interest_market"}
+    assert set(by_kind) == {
+        "ratios_market",
+        "short_volume_market",
+        "short_interest_market",
+        "sec_filings_market",
+    }
     assert by_kind["ratios_market"] == {"date": "2024-06-21"}
     assert by_kind["short_volume_market"] == {"date": "2024-06-21"}
     # The page cap rides in the payload: 120 (the client default) truncated the
@@ -1407,7 +1473,7 @@ def test_enqueue_fundamentals_market() -> None:
         watchlist_symbols=["AAPL"],
         scheduler_cfg={"slots": {"fundamentals-market": {}}},
     )
-    assert weekend["enqueued"] == 3
+    assert weekend["enqueued"] == 4  # ratios, short volume, short interest, SEC filings
 
 
 def test_fundamentals_rotate_skips_vendor_voids() -> None:

@@ -164,6 +164,13 @@ data:
           universe: research
           strike_pct: 0.30
           dte: 90
+        filings-backfill:
+          # Manual / one-off: two years of 8-K text, the vendor's 8-K classification
+          # and 10-K risk-factor / MD&A sections for every universe name. The daily
+          # window in fundamentals-market only sees new filings.
+          # No cron: Owner-run, so the dashboard must not score it for adherence.
+          priority: 1
+          days: 730
         corporate-backfill:
           # Manual / one-off: the full dividend and split history of every symbol in
           # research.option_universe union the watchlist. The daily `corporate` slot
@@ -189,6 +196,11 @@ data:
           # 120 pages truncated the 2026-09-09 pull mid-market and the job
           # correctly failed; short_interest then fell 27 days behind.
           short_interest_max_pages: 400
+          # SEC filings for the universe (0.37.0): a four-day filing-date window
+          # each run, plus up to 25 universe names with no filings yet backfilled.
+          filings_lookback_days: 4
+          filings_days: 730
+          filings_catch_up: 25
         # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
         # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
         # Wave 14G-A: readiness-refresh slot + CronJob retired (stock_readiness_daily gone).

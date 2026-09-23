@@ -135,7 +135,7 @@ status: 目标态 · 四轴（广度 / 深度 / 新鲜度 / 厚度）
 
 | 数据面 | 能解锁什么 |
 |---|---|
-| 新闻（`/v2/reference/news`） | 蓝图 §3.2 的事件面从"未测"变为可回测；Research 目前没有任何前瞻事件源 |
+| 新闻（`/v2/reference/news`） | 蓝图 §3.2 的事件面从"未测"变为可回测；Research 目前没有任何前瞻事件源。每篇带逐 ticker 的 `insights`（情绪 + 理由），是否作为叙事来源待 Owner 裁定（Vision §15 Q5） |
 | 技术指标（`/v1/indicators`） | 免去自算 SMA/EMA/RSI/MACD；与 vendor 口径一致 |
 | ticker events / IPO | 上市、更名、退市的时间线；回测里的幸存者偏差修正 |
 | `open_close` / `prev_agg` | 单日精确开收盘的独立校验源 |
@@ -147,5 +147,7 @@ status: 目标态 · 四轴（广度 / 深度 / 新鲜度 / 厚度）
 ## 7. 不在范围内
 
 - **订阅升级才能拿到的**：期权逐笔（Options Developer）、期权报价、指数（Indices Starter）。它们是 *planned*，不是缺口——在《Massive 校准》里按能力记账，不按覆盖率记账。
-- **vendor 已下线的**：`/stocks/v1/float`、`/stocks/filings/*`（404）。
+- **vendor 已下线的**：`/stocks/v1/float`（404）。
+- **更正（0.37.0，2026-09-23）**：`/stocks/filings/*` 曾记在这里，是错的。0.10.3 探测的是 `/stocks/filings/v1/...`，vendor 实际服务在 `vX`——8-K 正文、8-K 分类、10-K 章节、风险因子、文件索引在 Stocks 计划内全部 200 有数据，旧 `v1` 路径至今仍 404。0.37.0 起采 8-K 正文 + 分类 + 10-K 的 risk_factors / mda 章节，universe 范围、两年深（`raw_market.sec_8k_filing` / `sec_8k_disclosure` / `sec_10k_section`）；日窗口随 `fundamentals-market`，历史走 Owner 手动的 `filings-backfill`。**一个 404 说的是那条路径，不是那个数据集**——和 short_volume 抄 ratios 的边界是同一类错。
+- **订阅外、需要才买的**：结构化 guidance / 财报 / 新闻（Benzinga 扩展，实测 403）。**电话会纪要 Massive 任何档位都不卖。**
 - **调度本身**：Plugin 的 CronJob 全部挂起，排程归 Research 的 Dagster。本蓝图约束"应该持有什么"，不约束"谁来触发"。

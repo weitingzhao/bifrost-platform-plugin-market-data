@@ -169,6 +169,11 @@ UNIVERSE_MONTHS = {"resident": 24, "core": 24, "edge": 12}
 #: 2026-09-09: 2024-09-16 returns that day's rows, 2023-09-15 returns none.
 SHORT_VOLUME_WINDOW_DAYS = 2 * 365
 
+#: How far back the SEC filings reach. The Owner's scope (2026-09-23), not a
+#: vendor limit: the 8-K text endpoint answers back to 2010 and the filing index
+#: to 2000. Two years holds eight earnings prints, which is what History reads.
+SEC_FILINGS_WINDOW_DAYS = 2 * 365
+
 #: Below this many symbols, the whole-market grouped pull did not happen for the
 #: session — whatever the job status says. One number because there were two:
 #: the doctor asked for 12,000 rows and the quality gate for 4,000 symbols, of
@@ -466,6 +471,75 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="option_daily",
         grain="daily",
         refill=Refill("slot", "option-bars", why="near-spot contracts for the named session, at the universe scope"),
+    ),
+    # SEC filings as text (0.37.0). Universe tier because the Owner scoped the
+    # collection to Research's names (2026-09-23), though the 8-K pulls are
+    # whole-market by date and filtered on write. The daily window re-reads four
+    # days on every run, which is what repairs a missed one.
+    DatasetContract(
+        "raw_market.sec_8k_filing",
+        "universe",
+        DepthTarget(
+            "rolling_days",
+            SEC_FILINGS_WINDOW_DAYS,
+            "Owner 2026-09-23: two years of 8-Ks — eight earnings prints (Item 2.02) for History",
+        ),
+        30.0,
+        ("fundamentals-market", "filings-backfill"),
+        "symbol",
+        "filing_date",
+        breadth_window="ever",
+        freshness_dimension="sec_filings",
+        grain="filing",
+        cadence="filing",
+        refill=Refill("lookback", "fundamentals-market", lookback_days=4, why="the slot re-reads a four-day filing-date window on every run"),
+        # Funds and indices in the universe file no 8-Ks; the backfill records
+        # them here so the denominator is companies that could have filed.
+        void_data_type="sec_8k",
+    ),
+    DatasetContract(
+        "raw_market.sec_8k_disclosure",
+        "universe",
+        DepthTarget(
+            "rolling_days",
+            SEC_FILINGS_WINDOW_DAYS,
+            "rides with the 8-K text: same window, same pulls",
+        ),
+        30.0,
+        ("fundamentals-market", "filings-backfill"),
+        "symbol",
+        "filing_date",
+        breadth_window="ever",
+        freshness_dimension="sec_filings",
+        grain="filing",
+        cadence="filing",
+        refill=Refill("lookback", "fundamentals-market", lookback_days=4, why="the slot re-reads a four-day filing-date window on every run"),
+        # Measured 2026-09-23: 273 of 703 8-Ks filed on 2026-08-06 carry a
+        # classification. A universe name with none is the vendor's coverage;
+        # sec_8k_filing is the table that says whether the name filed.
+        breadth_unjudged=(
+            "the vendor classifies about two 8-Ks in five; an unclassified name "
+            "still has its filings in sec_8k_filing"
+        ),
+    ),
+    DatasetContract(
+        "raw_market.sec_10k_section",
+        "universe",
+        DepthTarget(
+            "rolling_days",
+            SEC_FILINGS_WINDOW_DAYS,
+            "the two most recent annual reports' risk factors and MD&A",
+        ),
+        30.0,
+        ("fundamentals-market", "filings-backfill"),
+        "symbol",
+        "filing_date",
+        breadth_window="ever",
+        freshness_dimension="sec_filings",
+        grain="filing",
+        cadence="filing",
+        refill=Refill("lookback", "fundamentals-market", lookback_days=4, why="the slot re-reads a four-day filing-date window on every run"),
+        void_data_type="sec_10k",
     ),
     # ── benchmark-only: too big to be worth more than a few names ──
     DatasetContract(

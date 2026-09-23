@@ -665,6 +665,61 @@ class PolygonClient:
             max_pages=max_pages,
         )
 
+    # ---- SEC filings (Stocks plan) ----
+    # Whole market by filing date for 8-K text and disclosures; the sections
+    # endpoint is always asked for named tickers, because a whole-market week
+    # of annual reports is too big to hold (a peak February week is ~2,900
+    # sections, and holding it killed a 512 MiB process on 2026-09-23).
+
+    async def fetch_sec_8k_text(
+        self,
+        *,
+        ticker: str | None = None,
+        filing_date_gte: str | None = None,
+        filing_date_lte: str | None = None,
+        max_pages: int = 80,
+    ) -> dict[str, Any]:
+        params = ep.sec_filing_params(
+            ticker=ticker, filing_date_gte=filing_date_gte, filing_date_lte=filing_date_lte
+        )
+        return await self._paginate(ep.sec_8k_text_path(), params, max_pages=max_pages)
+
+    async def fetch_sec_8k_disclosures(
+        self,
+        *,
+        ticker: str | None = None,
+        filing_date_gte: str | None = None,
+        filing_date_lte: str | None = None,
+        max_pages: int = 40,
+    ) -> dict[str, Any]:
+        params = ep.sec_filing_params(
+            ticker=ticker,
+            ticker_param="tickers",
+            filing_date_gte=filing_date_gte,
+            filing_date_lte=filing_date_lte,
+        )
+        return await self._paginate(ep.sec_8k_disclosures_path(), params, max_pages=max_pages)
+
+    async def fetch_sec_10k_sections(
+        self,
+        *,
+        sections: tuple[str, ...],
+        tickers: tuple[str, ...],
+        filing_date_gte: str | None = None,
+        filing_date_lte: str | None = None,
+        max_pages: int = 40,
+    ) -> dict[str, Any]:
+        if not tickers:
+            raise ValueError("fetch_sec_10k_sections needs tickers — the whole market does not fit")
+        params = ep.sec_filing_params(
+            tickers_any_of=tickers,
+            filing_date_gte=filing_date_gte,
+            filing_date_lte=filing_date_lte,
+            limit=100,
+            sections=sections,
+        )
+        return await self._paginate(ep.sec_10k_sections_path(), params, max_pages=max_pages)
+
     async def fetch_dividends_market(
         self, ex_dividend_date_gte: str, ex_dividend_date_lte: str, *, max_pages: int = 20
     ) -> dict[str, Any]:

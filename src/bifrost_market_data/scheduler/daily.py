@@ -20,6 +20,11 @@ import yaml
 from bifrost_market_data.logging_setup import configure_logging
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.ingest.index_options import storage_underlying
+from bifrost_market_data.ingest.sec_filings import (
+    VOID_8K,
+    filings_since,
+    universe_missing_filings,
+)
 from bifrost_market_data.freshness import update_freshness
 from bifrost_market_data.scheduler.enqueue import (
     TRIM_BUDGET_SEC,
@@ -64,6 +69,8 @@ SLOT_NAMES = (
     # history per symbol, and the catalogue of contracts that have already expired.
     "corporate-backfill",
     "option-contract-expired",
+    # Owner-run: two years of SEC filings for every universe name (0.37.0).
+    "filings-backfill",
 )
 
 # Wave 2.1: analytics upserts moved to bifrost_research.scheduler.volatility
@@ -1256,6 +1263,7 @@ def enqueue_slot(
         "related-rotate",
         "corporate-backfill",
         "option-contract-expired",
+        "filings-backfill",
     }
     if watchlist_symbols is not None:
         symbols = list(watchlist_symbols)
@@ -1434,6 +1442,16 @@ def enqueue_slot(
         for sym in sorted(ruled | set(symbols)):
             _add("dividends", {"symbol": sym})
             _add("splits", {"symbol": sym})
+
+    elif slot_key == "filings-backfill":
+        # Two years of 8-Ks and annual-report sections per universe name — the
+        # history the daily window never reaches. Names the vendor has already
+        # answered empty for (funds, indices) are skipped for a month.
+        since = filings_since(day, int(scfg.get("days") or 730))
+        voided = load_voided_symbols(conn, VOID_8K)
+        ruled = {u["symbol"] for u in load_research_universe(conn)}
+        for sym in sorted((ruled | set(symbols)) - voided):
+            _add("sec_filings_symbol", {"symbol": sym, "since": since})
 
     elif slot_key == "option-contract-expired":
         # The catalogue only ever enumerated listed contracts, so a contract drops
@@ -1695,6 +1713,25 @@ def enqueue_slot(
             },
             pri=priority,
         )
+        # SEC filings (0.37.0). The window reaches back past the session: a
+        # filing accepted after 17:30 ET is dated the next business day, and a
+        # run that did not happen is covered by the next one — the writes are
+        # upserts, so the overlap costs requests and nothing else.
+        f_back = int(scfg.get("filings_lookback_days") or 4)
+        _add(
+            "sec_filings_market",
+            {
+                "filing_date_gte": (session - timedelta(days=f_back)).isoformat(),
+                "filing_date_lte": day_s,
+            },
+            pri=priority,
+        )
+        # A name that joins the universe after the backfill has no history, and
+        # the daily window only ever sees new filings. A few a day close that
+        # gap without anyone re-running filings-backfill by hand.
+        since = filings_since(day, int(scfg.get("filings_days") or 730))
+        for sym in universe_missing_filings(conn, limit=int(scfg.get("filings_catch_up") or 25)):
+            _add("sec_filings_symbol", {"symbol": sym, "since": since}, pri=priority)
 
     elif slot_key == "stock-snapshot":
         # Full-market All Tickers Snapshot (D2=A); one job, mode=all.
