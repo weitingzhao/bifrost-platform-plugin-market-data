@@ -23,11 +23,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from bifrost_market_data.ingest._upsert import session_anchor
 from bifrost_market_data.ingest.index_options import storage_underlying
 from bifrost_market_data.quality import fetch_completed_trading_days, filter_optionable_underlyings
 from bifrost_market_data.scheduler.daily import (
     enqueue_slot,
     load_research_universe,
+    load_snapshot_windows,
     load_watchlist_symbols,
     union_iv_radar_benchmarks,
 )
@@ -111,6 +113,34 @@ POLICED_SLOTS: tuple[str, ...] = (
 STALENESS: dict[str, tuple[str, float]] = {
     slot: entry for slot, entry in staleness_by_slot().items() if slot in POLICED_SLOTS
 }
+# A session's chain can arrive whole and still be wrong. Measured by Research on
+# the 2026-09-22 session: twelve underlyings held about half their usual number
+# of IV-bearing contracts at an IV two to three times higher, with the sessions
+# on either side normal and the same day's large caps fine. AJG's own IV that
+# day solved to 0.337 out of option_daily, matching its neighbours -- so the
+# quotes were right and the snapshot of them was not. NET on 09-17 and SHW on
+# 09-11 look the same.
+#
+# Neither half of the signal is usable alone. A thin session is ordinary when
+# the vendor lists fewer contracts that day, and IV moves on its own. Both at
+# once, on one name, on one session, is not something a market does.
+#
+# Nothing here can be repaired later: the vendor's chain endpoint only ever
+# returns the current session, so this has to be found and refetched the same
+# evening. The self-heal runs 00:45 UTC, which is 20:45 in New York -- after the
+# 18:00 collection and before the next open -- so the window exists, and
+# ``fixable`` is what decides whether it is still open.
+DEGRADED_SNAPSHOT_BASELINE_SESSIONS = 5
+DEGRADED_SNAPSHOT_COUNT_RATIO = 0.60
+DEGRADED_SNAPSHOT_IV_RATIO = 1.80
+#: Under this many IV-bearing contracts on the baseline the two ratios are
+#: rounding noise, not a signal: half of six is three.
+DEGRADED_SNAPSHOT_MIN_BASELINE_ROWS = 20
+#: Six sessions of IV rows across the optionable universe is the widest read in
+#: the report, so it gets its own budget and answers `unprobed` when it runs out
+#: rather than a clean bill. A cancelled query is not a reading of zero.
+DEGRADED_SNAPSHOT_TIMEOUT = "25s"
+
 # Above this the worker loop is wedged behind synchronous batch writes.
 WORKER_LOOP_LAG_WARN_SEC = 60.0
 
@@ -251,6 +281,113 @@ def _coverage_finding(
         auto_fixable=bool(short) and fixable,
         missing_sample=[u for u, _h, _w, _p in worst],
     )
+
+
+#: One underlying whose EOD chain arrived thin and hot on a session.
+@dataclass
+class DegradedSnapshot:
+    underlying: str
+    iv_rows: int
+    iv_median: float
+    base_rows: float
+    base_iv_median: float
+
+    @property
+    def row_ratio(self) -> float:
+        return self.iv_rows / self.base_rows if self.base_rows else 1.0
+
+    @property
+    def iv_ratio(self) -> float:
+        return self.iv_median / self.base_iv_median if self.base_iv_median else 1.0
+
+
+def _degraded_snapshots(
+    conn: Any,
+    underlyings: Sequence[str],
+    *,
+    session: date,
+    baseline: Sequence[date],
+) -> list[DegradedSnapshot] | None:
+    """Names whose session chain is both much thinner and much hotter than usual.
+
+    ``None`` means the question could not be asked -- an unreadable calendar, a
+    cancelled query -- and the caller must report that rather than an empty list.
+
+    Only EOD rows are compared. Their ``snapshot_ts`` is exactly the session's
+    16:00 New York anchor, so the comparison is an equality on the
+    ``(underlying, snapshot_ts)`` index and the intraday observations, which
+    carry their own instants, cannot drift into the baseline.
+    """
+    syms = sorted({str(u).strip().upper() for u in underlyings if str(u).strip()})
+    base_days = [d for d in baseline if d != session]
+    if not syms or not base_days:
+        return None
+    anchors = [session_anchor(d) for d in [session, *base_days]]
+    this_anchor = session_anchor(session)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{DEGRADED_SNAPSHOT_TIMEOUT}'")
+            cur.execute(
+                """
+                /* doctor: degraded-snapshot */
+                SELECT underlying, snapshot_ts,
+                       count(*)::bigint AS iv_rows,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) AS iv_median
+                FROM raw_market.option_snapshot
+                WHERE underlying = ANY(%s) AND snapshot_ts = ANY(%s) AND iv > 0
+                GROUP BY 1, 2
+                """,
+                (syms, anchors),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 -- an unanswerable check is not a clean one
+        logger.warning("degraded-snapshot probe failed: %s", exc)
+        _rollback(conn)
+        return None
+
+    today: dict[str, tuple[int, float]] = {}
+    history: dict[str, list[tuple[int, float]]] = {}
+    for row in rows:
+        if isinstance(row, Mapping):
+            und, ts, n, med = (
+                row.get("underlying"), row.get("snapshot_ts"),
+                row.get("iv_rows"), row.get("iv_median"),
+            )
+        else:
+            und, ts, n, med = row[0], row[1], row[2], row[3]
+        if not und or med is None:
+            continue
+        key = str(und).strip().upper()
+        pair = (int(n or 0), float(med))
+        if ts == this_anchor:
+            today[key] = pair
+        else:
+            history.setdefault(key, []).append(pair)
+
+    def _median(xs: list[float]) -> float:
+        ordered = sorted(xs)
+        mid = len(ordered) // 2
+        return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+    out: list[DegradedSnapshot] = []
+    for und, (n_now, iv_now) in sorted(today.items()):
+        past = history.get(und) or []
+        # A name new to the universe has no baseline. Not arrived is not a
+        # finding, and inventing one out of one prior session would make every
+        # addition to research.option_universe look broken on its second day.
+        if len(past) < 2:
+            continue
+        base_n = _median([float(n) for n, _iv in past])
+        base_iv = _median([iv for _n, iv in past])
+        if base_n < DEGRADED_SNAPSHOT_MIN_BASELINE_ROWS or base_iv <= 0:
+            continue
+        d = DegradedSnapshot(und, n_now, iv_now, base_n, base_iv)
+        if (
+            d.row_ratio < DEGRADED_SNAPSHOT_COUNT_RATIO
+            and d.iv_ratio > DEGRADED_SNAPSHOT_IV_RATIO
+        ):
+            out.append(d)
+    return out
 
 
 def _presence_finding(
@@ -648,6 +785,59 @@ def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[st
     return fix
 
 
+def _snapshot_refetch_fix(
+    conn: Any,
+    names: Sequence[str],
+    *,
+    session: date,
+    tier_of: Mapping[str, str],
+    cfg: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Refetch just these underlyings' chains for this session.
+
+    Not ``_slot_fix("eod-pipeline")``: that re-enqueues all 662 underlyings to
+    repair twelve, and the whole point of a same-evening repair is that it has
+    to fit in the evening. Dedup is a partial index over pending and running
+    rows only, so an identical payload whose original job is ``done`` enqueues
+    again rather than folding onto it, and the handler upserts onto the same
+    session anchor -- the bad rows are replaced, not duplicated.
+
+    The window comes from the same function the slot uses, so a repair buys the
+    window the plan says these names get today, not whatever it was when the
+    bad rows were written.
+    """
+    syms = sorted({str(n).strip().upper() for n in names if str(n).strip()})
+    if not syms:
+        return None
+    scfg = dict((cfg.get("slots") or {}).get("eod-pipeline") or {})
+    bounded = [s for s in syms if tier_of.get(s) in WINDOWED_TIERS]
+    windows: dict[str, tuple[float, float, str]] = {}
+    if bounded:
+        try:
+            windows = load_snapshot_windows(
+                conn,
+                bounded,
+                as_of=session,
+                expiries=int(scfg.get("expiries") or 3),
+                strike_pct=float(scfg.get("strike_pct") or 0.15),
+                min_days=int(scfg.get("min_days") or 0),
+            )
+        except Exception as exc:  # noqa: BLE001 -- an unbounded refetch beats none
+            logger.warning("refetch window lookup failed; whole chains: %s", exc)
+            _rollback(conn)
+    payloads: list[dict[str, Any]] = []
+    for sym in syms:
+        payload: dict[str, Any] = {
+            "underlying": storage_underlying(sym),
+            "trade_date": session.isoformat(),
+        }
+        win = windows.get(sym)
+        if win is not None:
+            payload["strike_gte"], payload["strike_lte"], payload["expiration_lte"] = win
+        payloads.append(payload)
+    return {"action": "enqueue", "kind": "option_snapshot", "payloads": payloads}
+
+
 def _refill_fix(c: Any, day: date) -> dict[str, Any]:
     """The call that refills one named session for this dataset.
 
@@ -806,6 +996,90 @@ def run_doctor(
                         fixable=fixable,
                     )
                 )
+
+        # ── The chain arrived, and it is wrong ──
+        # Coverage above answers "did the rows come"; this answers "are they the
+        # session's". Deliberately outside EOD_CRITICAL_CHECKS: widening what
+        # blocks the Research batch is a decision about the gate, not a
+        # consequence of adding a check. Research already declines to project a
+        # session it judges this way (0.118.0, the same rule), so the value here
+        # is the refetch, which only this side can do and only tonight.
+        try:
+            baseline = fetch_completed_trading_days(
+                conn, DEGRADED_SNAPSHOT_BASELINE_SESSIONS + 1, as_of=session
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("degraded-snapshot calendar read failed: %s", exc)
+            _rollback(conn)
+            baseline = []
+        degraded = (
+            _degraded_snapshots(conn, optionable, session=session, baseline=baseline)
+            if baseline
+            else None
+        )
+        if degraded is None:
+            findings.append(
+                Finding(
+                    f"option_snapshot_degraded:{session_s}",
+                    "eod-pipeline",
+                    "warn",
+                    "Degraded option chain snapshots",
+                    f"IV rows >= {DEGRADED_SNAPSHOT_COUNT_RATIO:.0%} of the prior "
+                    f"{DEGRADED_SNAPSHOT_BASELINE_SESSIONS} sessions",
+                    None,
+                    "unprobed — the comparison could not be made, so no name was "
+                    "cleared and none was accused. See API log.",
+                    session=session_s,
+                )
+            )
+        else:
+            worst = sorted(degraded, key=lambda d: d.row_ratio)[:8]
+            detail = (
+                f"{len(degraded)} of {len(optionable)} underlyings hold under "
+                f"{DEGRADED_SNAPSHOT_COUNT_RATIO:.0%} of their usual IV-bearing "
+                f"contracts at over {DEGRADED_SNAPSHOT_IV_RATIO:.1f}x their usual IV "
+                f"for {session_s}."
+                if degraded
+                else f"No chain arrived thin and hot for {session_s}."
+            )
+            if worst:
+                detail += " Worst: " + ", ".join(
+                    f"{d.underlying} {d.iv_rows} rows vs {d.base_rows:.0f} "
+                    f"(IV {d.iv_median:.2f} vs {d.base_iv_median:.2f})"
+                    for d in worst
+                ) + "."
+            fix = (
+                _snapshot_refetch_fix(
+                    conn,
+                    [d.underlying for d in degraded],
+                    session=session,
+                    tier_of=tier_of,
+                    cfg=cfg,
+                )
+                if (degraded and fixable)
+                else None
+            )
+            if degraded and not fixable:
+                detail += (
+                    " The chain now reflects a later session, so this one can no"
+                    " longer be re-observed — it is lost, not pending."
+                )
+            findings.append(
+                Finding(
+                    f"option_snapshot_degraded:{session_s}",
+                    "eod-pipeline",
+                    "warn" if degraded else "ok",
+                    "Degraded option chain snapshots",
+                    f"IV rows >= {DEGRADED_SNAPSHOT_COUNT_RATIO:.0%} of the prior "
+                    f"{DEGRADED_SNAPSHOT_BASELINE_SESSIONS} sessions",
+                    len(degraded),
+                    detail,
+                    session=session_s,
+                    fix=fix,
+                    auto_fixable=fix is not None,
+                    missing_sample=[d.underlying for d in worst],
+                )
+            )
 
     # ── Stock EOD: whole market + watchlist for the session ──
     n_daily = _count(
@@ -1273,9 +1547,17 @@ def heal(
                 # would also fire ratios_market, whose endpoint ignores the
                 # date, and short_interest_market, whose own 45-day lookback
                 # already covers it — two wasted jobs per repaired session.
+                #
+                # ``payloads`` is the same thing for a named set of underlyings:
+                # the degraded-chain repair touches the twelve names that came
+                # back wrong, and re-running their slot to reach them would
+                # enqueue all 662. One prescription, because it is one decision.
+                bodies = [dict(b) for b in (pres.get("payloads") or [])]
+                if not bodies:
+                    bodies = [dict(pres.get("payload") or {})]
                 ids = insert_jobs_bulk(
                     conn,
-                    [(str(pres["kind"]), dict(pres.get("payload") or {}), 4, 3)],
+                    [(str(pres["kind"]), body, 4, 3) for body in bodies],
                 )
                 entry["result"] = {
                     "enqueued": sum(1 for i in ids if i is not None),

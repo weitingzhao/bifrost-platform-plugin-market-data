@@ -37,6 +37,17 @@ class _Cur:
             self._rows = list(d.get("universe", []))
         elif "from raw_market.option_contract" in q:
             self._rows = _scoped("live")
+        elif "/* doctor: degraded-snapshot */" in q:
+            # (underlying, snapshot_ts, iv_rows, iv_median) per session. The
+            # fixture gives one row-count and IV per name per session; absent
+            # names simply have no rows, as in the table.
+            anchors = params[1] if isinstance(params, (list, tuple)) and len(params) > 1 else []
+            self._rows = [
+                (u, ts, n, iv)
+                for ts in anchors
+                for u, n, iv in d.get("iv_by_session", {}).get(ts.date().isoformat(), [])
+                if scope is None or u in scope
+            ]
         elif "from raw_market.option_snapshot" in q:
             self._rows = _scoped("snapshot")
         elif "from raw_market.option_open_interest" in q:
@@ -94,12 +105,28 @@ class _Conn:
 
 UNIVERSE = ["AAPL", "MSFT", "NVDA", "SPY"]
 
+#: SESSION and the five completed sessions before it. The calendar stub used to
+#: answer ``[SESSION]`` whatever was asked, which was enough while every check
+#: looked at one session; the degraded-chain check compares against a baseline,
+#: and a one-day calendar left it permanently unable to ask its question.
+SESSIONS = [
+    date(2026, 8, 28),  # Friday
+    date(2026, 8, 31),
+    date(2026, 9, 1),
+    date(2026, 9, 2),
+    date(2026, 9, 3),
+    SESSION,  # Friday 2026-09-04
+]
+BASELINE_SESSIONS = [d.isoformat() for d in SESSIONS[:-1]]
+
 
 @pytest.fixture(autouse=True)
 def _pin_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doc, "is_trading_day", lambda conn, d: d.weekday() < 5)
     monkeypatch.setattr(doc, "chain_session", lambda conn, now=None: SESSION)
-    monkeypatch.setattr(doc, "fetch_completed_trading_days", lambda conn, n, as_of=None: [SESSION])
+    monkeypatch.setattr(
+        doc, "fetch_completed_trading_days", lambda conn, n, as_of=None: SESSIONS[-int(n):]
+    )
     monkeypatch.setattr(doc, "union_iv_radar_benchmarks", lambda syms, cfg=None: list(syms))
     monkeypatch.setattr(doc, "filter_optionable_underlyings", lambda conn, syms: list(syms))
 
@@ -108,11 +135,28 @@ def _fresh(hours: float) -> datetime:
     return NOW - timedelta(hours=hours)
 
 
+
+def _steady_iv(
+    *, rows: int = 400, iv: float = 0.45, today: dict[str, tuple[int, float]] | None = None
+) -> dict[str, list[tuple[str, int, float]]]:
+    """Every name the same shape every session, with named exceptions today."""
+    out = {
+        day: [(u, rows, iv) for u in UNIVERSE]
+        for day in [*BASELINE_SESSIONS, SESSION.isoformat()]
+    }
+    if today:
+        out[SESSION.isoformat()] = [
+            (u, *today.get(u, (rows, iv))) for u in UNIVERSE  # type: ignore[misc]
+        ]
+    return out
+
+
 def _healthy_data() -> dict[str, Any]:
     return {
         "live": {u: 1000 for u in UNIVERSE},
         "snapshot": {u: 1000 for u in UNIVERSE},
         "oi": {u: 1000 for u in UNIVERSE},
+        "iv_by_session": _steady_iv(),
         "daily": 12496,
         "daily_watch": UNIVERSE,
         "snap_rows": 13157,
@@ -646,3 +690,151 @@ def test_owning_every_table_raises_nothing() -> None:
     data["partitions"] = [("option_snapshot", True, _bound("2027-06-01"))]
     rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
     assert not [x for x in rep["findings"] if x["id"] == "partition_ownership"]
+
+
+# ── The chain arrived, and it is wrong ────────────────────────────────────────
+
+
+def _degraded_report(today: dict[str, tuple[int, float]], **over: Any) -> dict[str, Any]:
+    data = _healthy_data()
+    data["iv_by_session"] = _steady_iv(today=today)
+    data.update(over)
+    return doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+
+
+def _by_id(rep: dict[str, Any]) -> dict[str, Any]:
+    return {f["id"].split(":", 1)[0]: f for f in rep["findings"]}
+
+
+def test_a_chain_that_is_thin_and_hot_is_flagged_the_same_evening() -> None:
+    """Both halves of the signal, on one name, on one session.
+
+    Measured by Research on 2026-09-22: twelve underlyings held about half
+    their usual IV-bearing contracts at two to three times the usual IV, with
+    the sessions either side normal. AJG's own IV that day solved to 0.337 out
+    of option_daily, matching its neighbours, so the quotes were right and the
+    snapshot of them was not.
+    """
+    rep = _degraded_report({"MSFT": (180, 1.28)})  # 45% of 400 rows, 2.8x the IV
+    f = _by_id(rep)["option_snapshot_degraded"]
+    assert f["severity"] == "warn"
+    assert f["actual"] == 1
+    assert f["missing_sample"] == ["MSFT"]
+    assert "180 rows vs 400" in f["detail"]
+
+
+def test_neither_half_of_the_signal_fires_alone() -> None:
+    """A thin session is ordinary, and IV moves on its own. Only both is a fault."""
+    thin = _by_id(_degraded_report({"MSFT": (180, 0.46)}))["option_snapshot_degraded"]
+    hot = _by_id(_degraded_report({"MSFT": (395, 1.28)}))["option_snapshot_degraded"]
+    assert thin["severity"] == "ok" and hot["severity"] == "ok"
+
+
+def test_a_name_with_no_baseline_is_not_accused() -> None:
+    """Not arrived is not a finding.
+
+    A name added to research.option_universe yesterday has one prior session,
+    and judging it against that would make every addition look broken on its
+    second day.
+    """
+    data = _healthy_data()
+    iv = _steady_iv()
+    for day in BASELINE_SESSIONS[:-1]:
+        iv[day] = [row for row in iv[day] if row[0] != "NVDA"]
+    iv[SESSION.isoformat()] = [
+        (u, 40, 1.40) if u == "NVDA" else (u, 400, 0.45) for u in UNIVERSE
+    ]
+    data["iv_by_session"] = iv
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert _by_id(rep)["option_snapshot_degraded"]["severity"] == "ok"
+
+
+def test_a_tiny_baseline_is_noise_not_a_signal() -> None:
+    """Half of six is three. Under the floor the two ratios mean nothing."""
+    data = _healthy_data()
+    data["iv_by_session"] = _steady_iv(rows=6, today={"MSFT": (2, 1.40)})
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    assert _by_id(rep)["option_snapshot_degraded"]["severity"] == "ok"
+
+
+def test_an_unanswerable_comparison_is_unprobed_not_clean() -> None:
+    """A cancelled query is not a reading of zero.
+
+    The widest read in the report runs on its own budget, and when it does not
+    come back no name is cleared and none is accused.
+    """
+    class _Blind(_Conn):
+        def cursor(self) -> Any:
+            cur = super().cursor()
+            real = cur.execute
+
+            def execute(query: str, params: Any = None) -> None:
+                if "/* doctor: degraded-snapshot */" in " ".join(query.lower().split()):
+                    raise RuntimeError("canceling statement due to statement timeout")
+                real(query, params)
+
+            cur.execute = execute  # type: ignore[method-assign]
+            return cur
+
+    rep = doc.run_doctor(_Blind(_healthy_data()), now=NOW, watchlist=UNIVERSE)
+    f = _by_id(rep)["option_snapshot_degraded"]
+    assert f["severity"] == "warn"
+    assert "unprobed" in f["detail"]
+    assert f["actual"] is None
+    assert f["fix"] is None, "an unanswered question prescribes nothing"
+
+
+def test_the_repair_refetches_only_the_names_that_came_back_wrong() -> None:
+    """Re-running the slot to reach twelve names would enqueue all 662.
+
+    The whole point of a same-evening repair is that it has to fit in the
+    evening. Dedup is a partial index over pending and running rows, so an
+    identical payload whose original job is done enqueues again, and the
+    handler upserts onto the same session anchor.
+    """
+    rep = _degraded_report({"MSFT": (180, 1.28), "SPY": (100, 1.50)})
+    fix = _by_id(rep)["option_snapshot_degraded"]["fix"]
+    assert fix["action"] == "enqueue" and fix["kind"] == "option_snapshot"
+    assert [p["underlying"] for p in fix["payloads"]] == ["MSFT", "SPY"]
+    assert {p["trade_date"] for p in fix["payloads"]} == {SESSION.isoformat()}
+    assert fix in [
+        {k: v for k, v in p.items() if k != "finding_ids"} for p in rep["prescriptions"]
+    ]
+
+
+def test_a_session_the_chain_no_longer_reflects_prescribes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor only ever returns the current chain, so this one is lost.
+
+    Saying so is the finding; handing over a call that would write today's
+    greeks under a past session's key would be worse than silence.
+    """
+    monkeypatch.setattr(doc, "chain_session", lambda conn, now=None: SESSION + timedelta(days=3))
+    rep = _degraded_report({"MSFT": (180, 1.28)})
+    f = _by_id(rep)["option_snapshot_degraded"]
+    assert f["severity"] == "warn" and f["fix"] is None
+    assert "no longer be re-observed" in f["detail"]
+
+
+def test_the_degraded_check_does_not_gate_the_research_batch() -> None:
+    """Widening what blocks dbt is a decision about the gate, not a side effect."""
+    rep = _degraded_report({"MSFT": (180, 1.28)})
+    assert rep["verdict"] == "degraded"
+    assert rep["eod_critical"]["verdict"] == "healthy"
+    assert "option_snapshot_degraded" not in doc.EOD_CRITICAL_CHECKS
+
+
+def test_heal_enqueues_one_job_per_named_underlying(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[Any] = []
+    monkeypatch.setattr(
+        doc, "insert_jobs_bulk", lambda conn, specs: sent.append(specs) or [1, 2]
+    )
+    rep = _degraded_report({"MSFT": (180, 1.28), "SPY": (100, 1.50)})
+    out = doc.heal(_Conn(_healthy_data()), report=rep, finding_ids=[
+        f"option_snapshot_degraded:{SESSION.isoformat()}"
+    ])
+    assert len(sent) == 1 and len(sent[0]) == 2
+    assert [spec[1]["underlying"] for spec in sent[0]] == ["MSFT", "SPY"]
+    assert all(spec[0] == "option_snapshot" for spec in sent[0])
+    assert out["enqueued"] == 2
