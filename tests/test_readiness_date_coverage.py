@@ -2,8 +2,11 @@
 
 The check used to end in ``HAVING count < threshold``, which ranks only dates
 the table already has rows for. A session with no row could not appear in its
-own answer, so the whole-market check reported "no low-coverage dates" for the
-fourteen sessions (2025-06-02 … 06-20) that every per-symbol gap report named.
+own answer at all — so the answer could not distinguish "held thinly" from
+"not held", and only ever spoke about the first.
+
+Measured 2026-09-25 against the live store: no session in 500 days is fully
+absent. The fix closes the blind spot before something moves into it.
 """
 
 from __future__ import annotations

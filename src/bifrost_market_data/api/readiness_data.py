@@ -385,14 +385,18 @@ def query_date_coverage(
 
     The ``HAVING`` this replaced ranked only the dates the table already had rows
     for, so a session with no row at all could never reach the answer: the check
-    could see a thin day and was blind to an absent one. Measured 2026-09-25,
-    fourteen consecutive sessions (2025-06-02 … 06-20) hold no ``stock_daily``
-    row for any symbol — every per-symbol ``stock-day-gap`` report named them
-    while this whole-market check answered "no low-coverage dates".
+    could see a thin day and was blind to an absent one.
 
     So the denominator is the trading calendar, not the table's own dates. When
     that calendar is unreadable ``absent_dates`` is ``None`` rather than empty:
     a session we cannot place is unknown, and an unknown is not a finding.
+
+    Measured 2026-09-25, right after the change: ``absent_count`` is 0 over 500
+    days. Nothing was hiding in the blind spot today — this closes a hole in the
+    instrument, not one in the data. The fourteen thin June 2025 sessions (one
+    symbol each against ~11,050 on either side) were always inside what the
+    ``HAVING`` could report; what never reached a screen is the console's
+    ``days_back=30`` window.
 
     Used by readiness_snapshot.get_sepa_grouped_backfill_dates.
     """
