@@ -450,8 +450,33 @@ def query_gaps(
         s = str(r["symbol"] if isinstance(r, dict) else r[0]).strip().upper()
         if s:
             syms.append(s)
-    return {"count": len(syms), "symbols": syms}
 
+    # ``count`` is how many rows came back, and the route caps ``limit`` at
+    # 5,000 against a universe of ~5,411 — so it can be a floor even at the
+    # maximum a caller is allowed to ask for. A reader that takes it for a
+    # total renders a number that is really the limit, and one that stores it
+    # (the source-void acknowledgement does) makes every later comparison
+    # against that row wrong. The same statement counted without the cap
+    # answers what was actually asked.
+    total = len(syms)
+    if total >= limit:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*)::bigint FROM ({gap_sql}) t", (_UNCAPPED,))
+            row = cur.fetchone()
+        if row is not None:
+            total = int((row["count"] if isinstance(row, dict) else row[0]) or 0)
+
+    return {
+        "count": len(syms),
+        "symbols": syms,
+        "total": total,
+        "truncated": total > len(syms),
+    }
+
+
+#: A limit large enough to be none: the gap statements all end in ``LIMIT %s``,
+#: so counting them without a cap means passing one no universe can reach.
+_UNCAPPED = 2_147_483_647
 
 _INSTRUMENT_TYPES = "('CS', 'ADRC', 'PFD')"
 

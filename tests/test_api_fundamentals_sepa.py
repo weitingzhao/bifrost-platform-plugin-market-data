@@ -708,3 +708,75 @@ class TestQueryGapsSchemaAlias:
         result = sepa_mod.query_gaps(conn, report_type="income_statement")
         assert result["count"] == 0
         assert result["note"] == "v_us_equity_universe view not found"
+
+
+class TestQueryGapsTotal:
+    """``count`` is how many rows came back; the route caps ``limit`` at 5,000.
+
+    Against a universe of ~5,411 that cap can bite even at the maximum a caller
+    may ask for, so a reader taking ``count`` for a total renders the limit as
+    if it were a finding — and the source-void acknowledgement *stores* it.
+    """
+
+    @staticmethod
+    def _conn(relations: set[tuple[str, str]], rows: list[tuple[str]], total: int) -> Any:
+        class _Cursor:
+            def __init__(self) -> None:
+                self._rows: list[Any] = []
+
+            def execute(self, query: str, params: Any = None) -> None:
+                if "information_schema.tables" in query:
+                    self._rows = [(1,)] if tuple(params or ()) in relations else []
+                elif query.strip().lower().startswith("select count(*)"):
+                    self._rows = [(total,)]
+                else:
+                    limit = int((params or (0,))[0])
+                    self._rows = list(rows[:limit])
+
+            def fetchone(self) -> Any:
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self) -> list[Any]:
+                return self._rows
+
+            def __enter__(self) -> "_Cursor":
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+        class _Conn:
+            def cursor(self) -> "_Cursor":
+                return _Cursor()
+
+            def close(self) -> None:
+                return None
+
+        return _Conn()
+
+    _RELATIONS = {("raw_market", "stock_financials"), ("raw_market", "v_us_equity_universe")}
+
+    def test_truncated_answer_carries_the_real_total(self) -> None:
+        rows = [(f"SYM{i:04d}",) for i in range(20)]
+        conn = self._conn(self._RELATIONS, rows, total=3_136)
+        result = sepa_mod.query_gaps(conn, report_type="income_statement", limit=5)
+        assert result["count"] == 5
+        assert result["total"] == 3_136
+        assert result["truncated"] is True
+
+    def test_a_complete_answer_does_not_count_twice(self) -> None:
+        rows = [("AAPL",), ("MSFT",)]
+        # The count query would answer 999; reaching for it here would mean the
+        # cheap path was skipped when the rows already are the whole answer.
+        conn = self._conn(self._RELATIONS, rows, total=999)
+        result = sepa_mod.query_gaps(conn, report_type="income_statement", limit=50)
+        assert result["count"] == 2
+        assert result["total"] == 2
+        assert result["truncated"] is False
+
+    def test_exactly_at_the_limit_is_still_checked(self) -> None:
+        rows = [("AAPL",), ("MSFT",)]
+        conn = self._conn(self._RELATIONS, rows, total=2)
+        result = sepa_mod.query_gaps(conn, report_type="income_statement", limit=2)
+        assert result["total"] == 2
+        assert result["truncated"] is False
