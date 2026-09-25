@@ -1,7 +1,7 @@
 ---
-version: 2026-09-11.3
-updated: 2026-09-10
-status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过）
+version: 2026-09-25.1
+updated: 2026-09-25
+status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点：SEPA gaps 的闸门查错 schema（六格假绿），全市场日期检查看不见完全缺席的 session（14 天空洞，§2s）
 ---
 
 # Massive 校准
@@ -825,6 +825,41 @@ return 'Missing'
 
 两条都不是数据问题，是**问法问题**——而它们都出现在总览页，也就是第一眼看到的地方。一个每天有大半时间报红的页面，会训练人忽略它；那才是真正的代价，而不是某一格的颜色。
 
+## 2s. Trade 交接照出的两个盲点（2026-09-25，0.38.0）
+
+Trade 侧执行 System 收敛，把两项能力交给 Ops：参考指数的 K 线覆盖视图，和「把某个缺口标记为供应商侧缺失」的开关。核对这两项时，交接单里的两条前提都被实测推翻，另外挖出两个本地盲点。
+
+### 参考指数不需要自己的档
+
+交接单说 Trade 的 Refresh Index「由 trade-core 直接从 Polygon 拉指数写进 `stock_day`，绕过了插件」。已经不是这样了：`index_data_client.py` 现在走 `post_ingest_enqueue("stock_daily", …)`，文件头写着 *via Plugin Market Data ingest（P7 retired）*。
+
+四条 `reference_indices` 逐条实测（5 年窗口）：
+
+| 条目 | polygon_ticker | 覆盖 | 判定 |
+|---|---|---|---|
+| `^GSPC` | SPY | 1240 / 1255 | whole-market 普通成员 |
+| `^DJI` | DIA | 1240 / 1255 | 同上 |
+| `^VIX` | VIXY | 1240 / 1255 | 同上 |
+| `^IXIC` | **I:COMP** | **0 / 1255** | 指数行情，§7 订阅边界内，永久为 0 |
+
+对照 AAPL / MSFT / TSLA：**同样是 1240 / 1255，连缺的 15 天都一样**。所以参考指数不声明自己的分母、不在 Coverage 里单列一档——三条是 whole-market 的普通成员，一条是 boundary。给它建一张覆盖表，会画出三行与任意股票无异、一行永远填不上的表（Owner 2026-09-25 决定：登记为边界，不建表）。
+
+### 六个绿 OK 是假的（C-G2 违例）
+
+`GET /market/stocks/fundamentals/sepa/gaps` 对六个 report_type 全部返回 `count: 0` 加一条 `note: "v_us_equity_universe view not found"`，Console 的 Financials 面板因此六格全绿。
+
+视图是存在的，在 `raw_market` 里，5,321 行——`/readiness/summary` 的 `universe_count` 就是从它数出来的。真凶是 `fundamentals_sepa.py` 里一份**本地的** `_view_or_table_exists`，做 `to_regclass('market.v_us_equity_universe')`，不带 `market → raw_market` 别名；同一个文件另外七处用的 `deps.table_exists` 是带别名的，底下的 gap SQL 自己写的也是正确的 `raw_market.`。闸门查错 schema，于是问题根本没被问出口。
+
+与 `chain/eod` 那两个 500（SQL 字面量 `market.`）是同一类缺陷，换了个位置。**`unknown` 被渲染成 `ok`，比渲染成 `missing` 更危险**——后者会让人去查，前者让人以为查过了。
+
+### 全市场检查看不见完全缺席的 session
+
+`query_date_coverage` 以 `HAVING count(...) < threshold` 结尾，而 `GROUP BY bar_date` 只会产出**表里已经有行**的日期。一个一行都没有的 session 进不了自己的答案：这条检查能看见稀薄的一天，对完全缺席的一天是瞎的。
+
+实测 2026-09-25：**2025-06-02 … 06-20 共 14 个连续交易日，`stock_daily` 里没有任何标的的任何一行**（AAPL / MSFT / TSLA / SPY / DIA / VIXY / QQQ / IWM 全部命中同一段，节假日历已正确排除 6/19）。每一份逐标的 `stock-day-gap` 报告都点名了它们，而这条全市场检查回答「没有低覆盖日期」。
+
+改法是换分母：交易日历，不是表自己的日期。新增 `absent_dates` / `absent_count`；日历读不到时它们是 `null` 而不是空数组——**放不进日历的 session 是未知，未知不是 finding**。
+
 ## 3. 已知差距与最小改动
 
 ### 3.1 重复与冲突（最大的一类）
@@ -909,6 +944,7 @@ return 'Missing'
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-25.1 | 2026-09-25 | §2s：Trade 交接的两项能力核对。参考指数集实测后定为「不建档」——三条是 whole-market 普通成员（1240/1255，与 AAPL 完全相同），一条是订阅边界（`I:COMP` 0/1255）。另挖出两个盲点并修：SEPA gaps 的闸门查错 schema，六个 report_type 全部短路成 0（Console 六格假绿）；全市场日期检查以 `HAVING` 结尾，看不见完全缺席的 session——2025-06-02…06-20 共 14 个交易日 `stock_daily` 一行都没有，逐标的报告全都点名，全市场检查说「没有低覆盖日期」。|
 | 2026-09-10.8 | 2026-09-10 | §2h：五类度量偏差全部修完（财报节奏、深度 population、绝对起点、不该问的广度、轮转口径），`5/19 clean` → `8/19`。含一个被数据否定并撤回的假设（`common-stock` 档位）、`ratios` 缺口的结论（两个重叠集合，非缺口）、以及档位定义的声明化。|
 | 2026-09-10.7 | 2026-09-10 | 广度改为按 session 界定（曾把盘中的 26 个除以 575）；`backfill_slot` 的三义 `None` 改为显式 `Refill`。新增 §2g：矩阵照出 14 条 not clean 里只有约 4 条是真缺口，其余是分母/目标/节奏定义错。|
 | 2026-09-10.6 | 2026-09-10 | `option_snapshot` / `option_open_interest` 深度改为 `forward_only` 计划边界（Owner 决定）：链快照只能向前累积，`sessions/90` 把爬坡报成了缺陷。厚度轴仍量它们，爬坡进度不丢。|

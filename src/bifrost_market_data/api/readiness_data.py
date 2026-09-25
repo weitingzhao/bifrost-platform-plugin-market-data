@@ -6,6 +6,7 @@ replace embedded market.* SQL with Plugin API HTTP calls.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -380,12 +381,32 @@ def query_date_coverage(
     days_back: int = 420,
     min_symbol_threshold: int = 1000,
 ) -> dict[str, Any]:
-    """Dates with fewer than `min_symbol_threshold` distinct symbols in stock_daily.
+    """Sessions ``stock_daily`` holds too thinly — and the ones it holds nothing for.
+
+    The ``HAVING`` this replaced ranked only the dates the table already had rows
+    for, so a session with no row at all could never reach the answer: the check
+    could see a thin day and was blind to an absent one. Measured 2026-09-25,
+    fourteen consecutive sessions (2025-06-02 … 06-20) hold no ``stock_daily``
+    row for any symbol — every per-symbol ``stock-day-gap`` report named them
+    while this whole-market check answered "no low-coverage dates".
+
+    So the denominator is the trading calendar, not the table's own dates. When
+    that calendar is unreadable ``absent_dates`` is ``None`` rather than empty:
+    a session we cannot place is unknown, and an unknown is not a finding.
 
     Used by readiness_snapshot.get_sepa_grouped_backfill_dates.
     """
     if not table_exists(conn, "market", "stock_daily"):
-        return {"ok": True, "low_coverage_dates": [], "count": 0}
+        return {
+            "ok": True,
+            "low_coverage_dates": [],
+            "count": 0,
+            "absent_dates": None,
+            "absent_count": None,
+        }
+
+    end = date.today() - timedelta(days=1)
+    start = date.today() - timedelta(days=days_back)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -394,24 +415,45 @@ def query_date_coverage(
                 bar_date::text AS dt,
                 COUNT(DISTINCT UPPER(TRIM(symbol)))::int AS symbol_count
             FROM raw_market.stock_daily
-            WHERE bar_date >= (CURRENT_DATE - %s)::date
-              AND bar_date <= (CURRENT_DATE - 1)::date
+            WHERE bar_date >= %s
+              AND bar_date <= %s
             GROUP BY bar_date
-            HAVING COUNT(DISTINCT UPPER(TRIM(symbol))) < %s
             ORDER BY bar_date
             """,
-            (days_back, min_symbol_threshold),
+            (start, end),
         )
         raw = cur.fetchall() or []
 
-    dates: list[dict[str, Any]] = []
+    held: dict[str, int] = {}
     for r in raw:
         if hasattr(r, "keys"):
-            dates.append({"date": r["dt"], "symbol_count": r["symbol_count"]})
+            held[str(r["dt"])] = int(r["symbol_count"] or 0)
         else:
-            dates.append({"date": str(r[0]), "symbol_count": int(r[1] or 0)})
+            held[str(r[0])] = int(r[1] or 0)
 
-    return {"ok": True, "low_coverage_dates": dates, "count": len(dates)}
+    dates: list[dict[str, Any]] = [
+        {"date": d, "symbol_count": n}
+        for d, n in sorted(held.items())
+        if n < min_symbol_threshold
+    ]
+
+    absent: list[str] | None = None
+    if table_exists(conn, "market", "us_market_holiday"):
+        from bifrost_market_data.trading_calendar import expected_trading_days
+
+        absent = [
+            d.isoformat()
+            for d in expected_trading_days(conn, start=start, end=end)
+            if d.isoformat() not in held
+        ]
+
+    return {
+        "ok": True,
+        "low_coverage_dates": dates,
+        "count": len(dates),
+        "absent_dates": None if absent is None else absent[:120],
+        "absent_count": None if absent is None else len(absent),
+    }
 
 
 def query_financials_by_instrument_type(
@@ -526,7 +568,11 @@ def readiness_date_coverage(
     days_back: int = Query(420, ge=1, le=800),
     min_symbols: int = Query(1000, ge=1),
 ) -> dict[str, Any]:
-    """Dates with low symbol coverage in stock_daily."""
+    """Sessions stock_daily holds thinly, plus the ones it holds nothing for.
+
+    ``absent_dates`` is ``null``, not ``[]``, when the trading calendar cannot be
+    read — no denominator, no verdict.
+    """
     conn = require_db()
     try:
         return query_date_coverage(conn, days_back=days_back, min_symbol_threshold=min_symbols)

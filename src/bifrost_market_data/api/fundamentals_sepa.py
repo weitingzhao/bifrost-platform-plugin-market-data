@@ -427,7 +427,14 @@ def query_gaps(
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {"count": 0, "symbols": []}
-    if not _view_or_table_exists(conn, "market", "v_us_equity_universe"):
+    # ``table_exists`` carries the ``market`` → ``raw_market`` alias, which the
+    # local ``to_regclass`` gate this replaced did not: it asked for
+    # ``market.v_us_equity_universe``, a name nothing has held since the Wave
+    # relocate, so all six report types short-circuited here. Measured
+    # 2026-09-25 — six green "OK" tags on the Console for six questions the
+    # plugin never asked, over a view holding 5,321 rows in ``raw_market``,
+    # which the gap SQL below has been naming correctly the whole time.
+    if not table_exists(conn, "market", "v_us_equity_universe"):
         return {"count": 0, "symbols": [], "note": "v_us_equity_universe view not found"}
 
     gap_sql = _GAP_SQLS.get(report_type)
@@ -444,21 +451,6 @@ def query_gaps(
         if s:
             syms.append(s)
     return {"count": len(syms), "symbols": syms}
-
-
-def _view_or_table_exists(conn: Any, schema: str, name: str) -> bool:
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT to_regclass(%s) IS NOT NULL AS ok",
-                (f"{schema}.{name}",),
-            )
-            row = cur.fetchone()
-            if row is None:
-                return False
-            return bool(row["ok"] if isinstance(row, dict) else row[0])
-    except Exception:
-        return False
 
 
 _INSTRUMENT_TYPES = "('CS', 'ADRC', 'PFD')"

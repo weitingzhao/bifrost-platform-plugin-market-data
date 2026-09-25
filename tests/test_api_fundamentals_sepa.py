@@ -646,6 +646,65 @@ class TestQueryGapsUnit:
 
     def test_unsupported_report_type(self, monkeypatch) -> None:
         monkeypatch.setattr(sepa_mod, "table_exists", lambda *_a, **_k: True)
-        monkeypatch.setattr(sepa_mod, "_view_or_table_exists", lambda *_a, **_k: True)
         result = sepa_mod.query_gaps(None, report_type="comprehensive_income")
         assert "error" in result
+
+
+class TestQueryGapsSchemaAlias:
+    """The universe view lives in ``raw_market``; the gate has to follow the alias.
+
+    A local ``to_regclass('market.…')`` check stood here and did not carry the
+    ``market`` → ``raw_market`` alias, so every report type short-circuited to
+    zero with a "view not found" note while the gap SQL below it named
+    ``raw_market.v_us_equity_universe`` correctly. Measured 2026-09-25: six green
+    "OK" tags on the Console for six questions the plugin never asked.
+    """
+
+    @staticmethod
+    def _conn(relations: set[tuple[str, str]], gap_rows: list[tuple[str]]) -> Any:
+        class _Cursor:
+            def __init__(self) -> None:
+                self._rows: list[Any] = []
+
+            def execute(self, query: str, params: Any = None) -> None:
+                if "information_schema.tables" in query:
+                    self._rows = [(1,)] if tuple(params or ()) in relations else []
+                else:
+                    self._rows = list(gap_rows)
+
+            def fetchone(self) -> Any:
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self) -> list[Any]:
+                return self._rows
+
+            def __enter__(self) -> "_Cursor":
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+        class _Conn:
+            def cursor(self) -> "_Cursor":
+                return _Cursor()
+
+            def close(self) -> None:
+                return None
+
+        return _Conn()
+
+    def test_universe_view_in_raw_market_is_found(self) -> None:
+        conn = self._conn(
+            {("raw_market", "stock_financials"), ("raw_market", "v_us_equity_universe")},
+            [("AAPL",), ("MSFT",)],
+        )
+        result = sepa_mod.query_gaps(conn, report_type="income_statement")
+        assert "note" not in result
+        assert result["count"] == 2
+        assert result["symbols"] == ["AAPL", "MSFT"]
+
+    def test_absent_universe_view_still_says_so(self) -> None:
+        conn = self._conn({("raw_market", "stock_financials")}, [])
+        result = sepa_mod.query_gaps(conn, report_type="income_statement")
+        assert result["count"] == 0
+        assert result["note"] == "v_us_equity_universe view not found"
