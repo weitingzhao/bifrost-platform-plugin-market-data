@@ -36,6 +36,18 @@ data:
           universe: research
           expiries: 3
           strike_pct: 0.15
+          # The bound is the later of the `expiries`-th expiry and the first one
+          # `min_days` out, because counting expiries buys a different depth for
+          # every name: measured 2026-09-25, the third listed expiry is +5 days
+          # for AMD, AVGO and GOOGL and +84 days for CDW, AJG, KNX, THC and
+          # VRSN. The three weekly names had held nothing at 7-90 DTE since
+          # 08-28 and so had no IV30 at all. Sixty days is what Research asked
+          # for: IV30 needs a quote either side of thirty. Monthly names do not
+          # move (their third is already past the floor); weekly names go from 3
+          # expiries to 10-12, which on this slot is one job per underlying
+          # either way — 662 in the 30-hour window measured that day — and
+          # roughly doubles the table.
+          min_days: 60
         universe-daily:
           cron: "0 22 * * *"
           priority: 3
@@ -67,6 +79,14 @@ data:
           # At-the-money: next 3 expiries × ±10 strikes per right, per underlying.
           expiries: 3
           strikes_each_side: 10
+          # The same floor eod-pipeline runs at 60, deliberately off here. This
+          # slot enqueues one job per contract, not per underlying: 79,215 jobs
+          # in the 30-hour window measured 2026-09-25, 93% of the entire queue.
+          # Tripling the weekly names' expiries would take it to roughly 200,000
+          # a night. Turning it on is a one-line change once that cost has been
+          # decided; until then option_daily keeps the near-spot ladder and
+          # option_snapshot is the deep read.
+          min_days: 0
           # Renews the same 575 underlyings the P4 backfill bought history for;
           # the watchlist stays the fallback when research.option_universe is empty.
           universe: research

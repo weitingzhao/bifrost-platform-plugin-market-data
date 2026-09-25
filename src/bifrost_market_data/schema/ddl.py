@@ -812,6 +812,30 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
         """
     )
 
+    # Every row on this table is written once, UPDATEd at least twice as it
+    # moves pending -> running -> done, and DELETEd within 48 hours by the trim
+    # slot. Each of those leaves a dead tuple across nine indexes, and the
+    # default autovacuum only wakes at 20% of the table's own size, which a
+    # queue this busy reaches long after the bloat has been paid for.
+    # Measured 2026-09-25: 1,000 MB of storage holding 40 MB of live payload and
+    # result, 175,114 rows, while the trim was working correctly and had removed
+    # 83,941 rows the previous night. The retention was never the problem.
+    #
+    # A low scale factor with a flat threshold makes the trigger a row count
+    # rather than a fraction, so vacuum keeps pace with the churn instead of
+    # chasing it. This reclaims space for reuse; it does not return the existing
+    # 960 MB to the filesystem, which needs a one-off VACUUM FULL or pg_repack.
+    cur.execute(
+        """
+        ALTER TABLE ops_jobs.job_ingest SET (
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_threshold = 2000,
+            autovacuum_analyze_scale_factor = 0.02,
+            autovacuum_vacuum_cost_delay = 0
+        )
+        """
+    )
+
     # Queue history. job_ingest is a work queue, not a record: the trim caps
     # finished rows at a few tens of thousands, which at 600 jobs a minute is
     # about an hour, and ingest_freshness is keyed by dimension and overwritten.

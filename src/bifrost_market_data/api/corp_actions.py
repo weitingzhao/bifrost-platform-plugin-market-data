@@ -98,6 +98,24 @@ def query_daily_checklist(
                     "rows_written": row[3],
                 }
 
+    # Three point probes per symbol, against three tables that each carry an
+    # index leading with exactly this column: stock_daily (symbol, bar_date),
+    # option_open_interest (underlying, trade_date) and corporate_action
+    # (symbol, ex_date). Wrapping the column in ``UPPER(TRIM())`` made an
+    # equality probe unusable by all three, so the panel above — 40 watchlist
+    # symbols, refetching every 60 seconds — put 120 sequential full scans a
+    # minute on the shared database. Research measured a batch of them beside
+    # the snapshot-coverage join on 2026-09-25.
+    #
+    # Normalising the *input* is enough because the columns already hold
+    # normalised values: ``underlying <> UPPER(TRIM(underlying))`` returned 0
+    # on 2026-09-08 and the ingest path has upper-cased and stripped since.
+    # ``normalize_symbol`` above does the same to what the caller asked for.
+    #
+    # This is not a general rule about the wrapper. On the whole-table
+    # aggregates it is harmless and removing it measured *slower* (401s against
+    # 151s on 2026-09-09) because either way every row is read. It only costs
+    # something where an index could otherwise have been probed.
     for sym in syms:
         item: dict[str, Any] = {"symbol": sym, "trade_date": trade_date}
         if table_exists(conn, "market", "stock_daily"):
@@ -105,7 +123,7 @@ def query_daily_checklist(
                 cur.execute(
                     """
                     SELECT COUNT(*)::bigint FROM raw_market.stock_daily
-                    WHERE UPPER(TRIM(symbol)) = %s AND bar_date = %s::date
+                    WHERE symbol = %s AND bar_date = %s::date
                     """,
                     (sym, trade_date),
                 )
@@ -115,7 +133,7 @@ def query_daily_checklist(
                 cur.execute(
                     """
                     SELECT COUNT(*)::bigint FROM raw_market.option_open_interest
-                    WHERE UPPER(TRIM(underlying)) = %s AND trade_date = %s::date
+                    WHERE underlying = %s AND trade_date = %s::date
                     """,
                     (sym, trade_date),
                 )
@@ -125,7 +143,7 @@ def query_daily_checklist(
                 cur.execute(
                     """
                     SELECT COUNT(*)::bigint FROM raw_market.corporate_action
-                    WHERE UPPER(TRIM(symbol)) = %s AND ex_date = %s::date
+                    WHERE symbol = %s AND ex_date = %s::date
                     """,
                     (sym, trade_date),
                 )

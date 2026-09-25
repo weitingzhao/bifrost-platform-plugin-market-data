@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -148,11 +148,12 @@ class _DailyCursor:
             self.parent._fetchall = [(e,) for e in exps]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
-            # (syms, as_of, syms, as_of, n_exp, per_right)
+            # (syms, as_of, syms, as_of, n_exp, floor_date, per_right)
             syms = set(params[0])
             as_of = params[1]
             n_exp = int(params[4])
-            per_right = int(params[5])
+            floor_date = params[5]
+            per_right = int(params[6])
             # (option_ticker, underlying) — the catalogue's underlying, which for
             # an adjusted contract is not the ticker's root.
             picked: list[tuple[str, str]] = []
@@ -161,7 +162,9 @@ class _DailyCursor:
                 if spot is None:
                     continue
                 mine = [c for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of]
-                expiries = sorted({c[2] for c in mine})[:n_exp]
+                # erank <= n_exp OR expiry <= floor_date
+                listed = sorted({c[2] for c in mine})
+                expiries = sorted(set(listed[:n_exp]) | {e for e in listed if e <= floor_date})
                 for exp in expiries:
                     for right in ("C", "P"):
                         cands = [c for c in mine if c[2] == exp and c[0][-9] == right]
@@ -1859,6 +1862,129 @@ def test_snapshot_windows_use_one_spot_query_and_a_point_query_per_name() -> Non
     assert len(spot_lookups) == 1, "one spot query for every name"
     assert len(expiry_lookups) == 100, "one indexed point query per name"
     assert any("statement_timeout" in q.lower() for q, _p in conn.statements)
+
+
+def _weekly_chain(und: str, start: date, weeks: int) -> list[tuple[str, str, date, float]]:
+    """A name that lists an expiry every week, like AMD, AVGO and GOOGL."""
+    return [
+        (f"O:{und}{i:06d}C00100000", und, start + timedelta(days=7 * i), 100.0)
+        for i in range(weeks)
+    ]
+
+
+#: What a monthly-only name actually lists, measured 2026-09-25 on CDW: four
+#: expiries, the third +84 days out and only two inside sixty. The shape is the
+#: whole point of the test below, so it is the measured one and not a tidy
+#: 28-day ladder, which would put the third expiry inside the floor and prove
+#: nothing.
+MONTHLY_OFFSETS_MEASURED = (24, 52, 84, 115)
+
+
+def _monthly_chain(und: str, start: date) -> list[tuple[str, str, date, float]]:
+    """A name that lists only monthlies, like CDW, AJG, KNX, THC and VRSN."""
+    return [
+        (f"O:{und}{i:06d}C00100000", und, start + timedelta(days=d), 100.0)
+        for i, d in enumerate(MONTHLY_OFFSETS_MEASURED)
+    ]
+
+
+def test_the_expiry_bound_reaches_the_floor_for_a_weekly_name() -> None:
+    """Counting expiries bought a different depth for every underlying.
+
+    Measured against the listed catalogue on 2026-09-25: the third expiry is
+    +5 days for AMD, AVGO and GOOGL and +84 days for CDW, AJG and VRSN. The
+    weekly names' EOD chain therefore stopped six days out, they held nothing
+    at 7-90 DTE, and Research had had no IV30 for them since 08-28.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    conn = _DailyConn(
+        option_contracts=_weekly_chain("AMD", as_of + timedelta(days=1), 20),
+        spots={"AMD": 100.0},
+    )
+    without = dmod.load_snapshot_windows(conn, ["AMD"], as_of=as_of, expiries=3)
+    assert without["AMD"][2] == "2026-10-10", "the third weekly is 15 days out"
+
+    conn = _DailyConn(
+        option_contracts=_weekly_chain("AMD", as_of + timedelta(days=1), 20),
+        spots={"AMD": 100.0},
+    )
+    with_floor = dmod.load_snapshot_windows(conn, ["AMD"], as_of=as_of, expiries=3, min_days=60)
+    bound = date.fromisoformat(with_floor["AMD"][2])
+    assert (bound - as_of).days >= 60, "the window has to cross the floor, not stop short of it"
+    # Strikes are untouched: this is a depth fix, not a width one.
+    assert with_floor["AMD"][:2] == without["AMD"][:2]
+
+
+def test_the_floor_never_narrows_a_monthly_name() -> None:
+    """Those names list only two expiries inside sixty days.
+
+    Bounding on the floor alone would have cut their window from three expiries
+    to two — a loss dressed as the fix for a gap. The bound is the later of the
+    two rules, so a name whose third expiry is already past the floor keeps
+    exactly the window it had.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    contracts = _monthly_chain("CDW", as_of)
+    conn = _DailyConn(option_contracts=contracts, spots={"CDW": 100.0})
+    without = dmod.load_snapshot_windows(conn, ["CDW"], as_of=as_of, expiries=3)
+    conn = _DailyConn(option_contracts=contracts, spots={"CDW": 100.0})
+    with_floor = dmod.load_snapshot_windows(conn, ["CDW"], as_of=as_of, expiries=3, min_days=60)
+    assert with_floor["CDW"] == without["CDW"]
+
+
+def test_the_floor_falls_back_to_the_deepest_listed_expiry() -> None:
+    """Nothing listed reaches sixty days, so the deepest there is, is the bound.
+
+    Falling back to the n-th expiry would have left the shallow bound in place
+    for exactly the names that have least to give.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    conn = _DailyConn(
+        option_contracts=_weekly_chain("TINY", as_of + timedelta(days=1), 4),
+        spots={"TINY": 100.0},
+    )
+    w = dmod.load_snapshot_windows(conn, ["TINY"], as_of=as_of, expiries=3, min_days=60)
+    assert w["TINY"][2] == "2026-10-17", "the fourth and last weekly"
+
+
+def test_a_name_with_too_few_expiries_still_gets_no_window() -> None:
+    """No window means the whole chain, which is the safer failure and stays."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    conn = _DailyConn(
+        option_contracts=_weekly_chain("THIN", as_of + timedelta(days=1), 2),
+        spots={"THIN": 100.0},
+    )
+    assert dmod.load_snapshot_windows(conn, ["THIN"], as_of=as_of, expiries=3, min_days=60) == {}
+
+
+def test_the_near_spot_ladder_leaves_the_queue_alone_by_default() -> None:
+    """option-bars enqueues one job per contract, not one per underlying.
+
+    It created 79,215 of the queue's 84,878 jobs in the 30-hour window measured
+    2026-09-25, so the same floor that costs eod-pipeline nothing would roughly
+    triple the busiest slot in the system. Off by default; the mechanism is
+    here so turning it on is a config change.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    contracts = _weekly_chain("AMD", as_of + timedelta(days=1), 20)
+    conn = _DailyConn(option_contracts=contracts, spots={"AMD": 100.0})
+    default = dmod.load_option_tickers_near_spot(conn, ["AMD"], as_of=as_of, expiries=3)
+    conn = _DailyConn(option_contracts=contracts, spots={"AMD": 100.0})
+    floored = dmod.load_option_tickers_near_spot(
+        conn, ["AMD"], as_of=as_of, expiries=3, min_days=60
+    )
+    assert len(default) == 3, "three expiries, one call contract each"
+    assert len(floored) > len(default), "the floor is wired through and does widen the ladder"
 
 
 def test_intraday_rows_do_not_count_as_the_eod_snapshot() -> None:

@@ -371,3 +371,31 @@ def test_the_deploy_path_creates_every_ops_jobs_table_it_is_responsible_for() ->
             "add it to apply_wave8_migrations, or to FRESH_INSTALL_ONLY if it "
             "genuinely predates that Job"
         )
+
+
+def test_the_job_queue_vacuums_on_a_row_count_not_a_fraction() -> None:
+    """1,000 MB of storage held 40 MB of live data, and retention was fine.
+
+    Measured 2026-09-25: ``ops_jobs.job_ingest`` carried 175,114 rows, 1,000 MB
+    on disk against 40 MB of payload and result, while the trim slot was
+    working correctly and had deleted 83,941 rows the night before. Every row
+    is INSERTed once, UPDATEd through pending → running → done and DELETEd
+    inside 48 hours, each step leaving a dead tuple across nine indexes — and
+    the default autovacuum only wakes at 20% of the table's own size, which a
+    queue this busy reaches long after the bloat is paid for.
+
+    A low scale factor with a flat threshold turns the trigger into a row count
+    so vacuum keeps pace with the churn. It reclaims space for reuse; the 960 MB
+    already on disk needs a one-off VACUUM FULL or pg_repack.
+    """
+    conn = _FakeConn()
+    apply_ddl(conn)
+    blob = "\n".join(conn.cur.statements)
+    stmt = next(
+        (s for s in conn.cur.statements if "ALTER TABLE ops_jobs.job_ingest SET (" in s),
+        None,
+    )
+    assert stmt is not None, "the queue table must carry its own autovacuum settings"
+    assert "autovacuum_vacuum_scale_factor = 0.01" in stmt
+    assert "autovacuum_vacuum_threshold = 2000" in stmt, "a flat floor, so the trigger is a count"
+    assert "job_ingest_dedup" in blob, "the settings did not replace the indexes"

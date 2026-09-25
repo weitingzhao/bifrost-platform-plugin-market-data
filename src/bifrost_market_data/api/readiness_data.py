@@ -6,12 +6,16 @@ replace embedded market.* SQL with Plugin API HTTP calls.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from bifrost_market_data.api.deps import iso_value, require_db, table_exists
+from bifrost_market_data.api.deps import connect_db, iso_value, require_db, table_exists
+from bifrost_market_data.api.slow_cache import BackgroundCache
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/readiness", tags=["readiness-data"])
 
@@ -810,14 +814,60 @@ def query_vendor_gap(
     return result
 
 
-@router.get("/snapshot-coverage")
-def readiness_snapshot_coverage() -> dict[str, Any]:
-    """Snapshot row count and instrument-type breakdown for latest session."""
-    conn = require_db()
+#: The breakdown is a LEFT JOIN of the whole equity universe against the
+#: session's snapshot rows, and it cannot be made cheap: measured through the
+#: gateway on 2026-09-25 it answered in 60s (which the 60-second proxy gave up
+#: on, HTTP 502), 34s and 33s. The Readiness panel polls it every 60 seconds —
+#: a shorter interval than the query's own runtime, so one open tab keeps a
+#: copy permanently in flight, and platform-api's status probe adds another.
+#: Research measured six concurrent copies of this one statement on
+#: ``bifrost_golden_source`` at 16:45 UTC that day, slowing an unrelated
+#: row-by-row repair job by three to four times.
+#:
+#: So it joins the four reads that already answer this way: serve the last
+#: answer at once, recompute behind it, and let a caller ask for a recompute
+#: with ``?refresh``. No request ever runs the join again.
+SNAPSHOT_COVERAGE_CACHE = BackgroundCache("snapshot-coverage")
+#: No gateway sits in front of the background pass, so it gets a real budget.
+SNAPSHOT_COVERAGE_STATEMENT_TIMEOUT = "600s"
+
+#: Same keys, no figures. ``row_count`` is null rather than 0 so "still
+#: counting" is not served as a count of zero — platform-api's rollup drops the
+#: whole KPI on this shape, which is what it should show while nothing is known.
+_SNAPSHOT_COVERAGE_EMPTY: dict[str, Any] = {
+    "ok": True,
+    "row_count": None,
+    "last_fetched_at": None,
+    "session_date": None,
+    "by_instrument_type": [],
+}
+
+
+def _snapshot_coverage_payload() -> dict[str, Any]:
+    conn = connect_db(statement_timeout=SNAPSHOT_COVERAGE_STATEMENT_TIMEOUT)
     try:
         return query_snapshot_coverage(conn)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — a close that fails must not lose the answer
+            pass
+
+
+@router.get("/snapshot-coverage")
+def readiness_snapshot_coverage(
+    refresh: bool = Query(False, description="recompute instead of reading the cached answer"),
+) -> dict[str, Any]:
+    """Snapshot row count and instrument-type breakdown for latest session."""
+    if not refresh:
+        return SNAPSHOT_COVERAGE_CACHE.read(
+            "snapshot-coverage", _snapshot_coverage_payload, empty=_SNAPSHOT_COVERAGE_EMPTY
+        )
+    try:
+        return SNAPSHOT_COVERAGE_CACHE.compute_now("snapshot-coverage", _snapshot_coverage_payload)
+    except Exception as exc:
+        logger.exception("readiness snapshot coverage failed")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/vendor-gap")

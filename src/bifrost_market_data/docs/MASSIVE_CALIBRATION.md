@@ -1,7 +1,7 @@
 ---
-version: 2026-09-25.2
+version: 2026-09-25.3
 updated: 2026-09-25
-status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s）
+status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）
 ---
 
 # Massive 校准
@@ -889,6 +889,81 @@ Trade 侧执行 System 收敛，把两项能力交给 Ops：参考指数的 K �
 
 修完实测：14 行全部 `session: true`，面板显示 `14 dates`，回填按钮显示 `Fill 14 sessions`。
 
+## 2t. Research 的七条请求，逐条核过（2026-09-25，0.39.0）
+
+Research 在 IV 历史修复（0.106.0 → 0.121.0）收尾后转来七条，出在 `raw_market.*` / `ops_jobs.*` 或集群存储上。
+**五条成立，两条的前提不对**——而其中一条不对的，恰恰把真因藏住了。
+
+### 「数第几个到期日」对每个名字买到的深度都不一样（P1，真因）
+
+Research 报的是「`core` 档的到期日选择规则」。档位与此无关：`load_snapshot_windows`
+把上界取成**第 `expiries` 个挂牌到期日**（`config/schedule.yaml` 里 `expiries: 3`），
+`core` 和 `edge` 一视同仁——doctor 报 `windowed: 635`。
+
+问题是这个数对不同名字意味着完全不同的东西。当日按挂牌目录实测：
+
+| 名字 | 挂牌到期日 | 第 3 个 | 60 天内 |
+|---|---|---|---|
+| AMD / AVGO / GOOGL | 22–24 | **+5 天** | 10–12 |
+| CDW / AJG / KNX / THC / VRSN / FERG | 4–8 | **+84 天** | **2** |
+
+挂周权的名字第 3 个到期日就在一周内，只挂月权的名字第 3 个已经在三个月外。
+所以偏偏是那三个大票：它们的 EOD 链六天就截断，7–90 DTE 一张都没有，
+从 08-28 起没有 IV30——而月权名字从来没被这条规则伤到过。
+
+修法是把上界改成**两条规则里靠后的那个**：第 `expiries` 个到期日，或第一个 `min_days` 之外的到期日。
+`min_days` 只能是底，不能是替代——上表右列就是理由：**那些月权名字 60 天内只挂两个到期日**，
+单按底线取会把它们的窗口从 3 个砍到 2 个，成了一个装扮成修复的损失。
+
+`eod-pipeline` 设 `min_days: 60`（Research 要的就是 60：IV30 要在 30 天两侧各有一个报价）。
+月权名字读数不变，周权名字补上中间那些。这个 slot 每个标的一个 job——当日 30 小时窗口内 662 个——
+所以改的是表的大小，不是队列。
+
+**`option-bars` 上同一个 knob 留在 0，是有意的。** 那个 slot 每个合约一个 job：
+当日 30 小时窗口内 **79,215 个，占全队列 84,878 的 93%**。周权名字翻三倍会把队列推到约 20 万/晚。
+机制已经接好，开它是一行配置，但那个成本要单独定。
+
+### `job_ingest` 的保留期一直都在，而且比提议的紧（P4，前提不对）
+
+Research 提议「给已完成的作业定保留期（done 30 天 / failed 90 天）」。
+`config/schedule.yaml` 的 trim slot 是 **`keep_hours: 48`**，紧得多，而且在跑：
+当日 `job_trim` 于 02:15 删掉 **83,941 行**，status ok。
+「175,114 行全是 2026-09 创建的」不是没在删，就是 48 小时窗口的正常存量。
+
+真问题只剩**膨胀**：1,000 MB 装 40 MB。每行 INSERT 一次、随 pending → running → done
+至少 UPDATE 两次、48 小时内被 DELETE，每一步都在九个索引上留下死元组；
+而默认 autovacuum 要等到表自身大小的 20% 才醒，对这种队列来说醒得太晚。
+表上已加低 scale factor + 平坦阈值，把触发条件从比例变成行数。
+这只是让空间可被复用；已经占住的 960 MB 要一次 `VACUUM FULL` 或 `pg_repack`，本机没有直连 SQL 通道。
+
+### `snapshot-coverage` 已经在网关上超时了（P3，比报告的更糟）
+
+当日经 platform-api 连打三次：**60 秒 HTTP 502**（60 秒代理上限先放弃）、34 秒、33 秒。
+Console 的 Readiness 面板**每 60 秒**轮询一次——比查询本身还短，所以一个开着的标签页
+就等于常驻一份，platform-api 的 status 探针再加一份。这就是 Research 在库上数到六份的来源。
+
+已进 `BackgroundCache`，和 summary / quality / inventory / dimensions / doctor 同一套：
+立刻回上一次的答案、后台重算、`?refresh` 可强制。冷启动时 `row_count` 是 `null` 而不是 0——
+platform-api 的 rollup 在这个形状上会整块丢掉 KPI，这正是「还在数」该显示的样子。
+
+**Research 的第 ③ 条要改一句话**：不能一概去掉 `UPPER(TRIM())`。
+真凶是 `api/corp_actions.py` 的 `query_daily_checklist`：**40 个自选股 × 3 条查询，每 60 秒一轮**，
+三条全都是 `UPPER(TRIM(列)) = %s`，而三张表都有**以该列打头**的索引
+（`stock_daily (symbol, bar_date)`、`option_open_interest (underlying, trade_date)`、
+`corporate_action (symbol, ex_date)`）。这三条已改成比裸列。
+列值本身早就是规范化的（2026-09-08 实测 `underlying <> UPPER(TRIM(underlying))` 返回 0）。
+但在**全表聚合**上这个包装无害，去掉反而更慢（2026-09-09 实测 401 秒 vs 151 秒），因为两种写法都要读全表。
+**包装只在能走索引探针的地方有害。**
+
+### 其余三条
+
+- **P2（残缺 EOD 快照当天标出并补抓）**：成立，且窗口够——self-heal 00:45 UTC 是当地 20:45 NY，
+  在 EOD 18:00 NY 之后、下次开盘之前，`chain_session()` 还认同一场，不会被 `stale_session` 拒。未做。
+- **P5（`option_daily` / `short_volume` 保留上限）**：真缺口。trim 只覆盖 job_ingest、
+  option_snapshot（90 场）、盘中（30 天）、option_trades（30 天）。`option_daily` 已按月分区，删分区便宜；
+  `short_volume` 是 financials 家族的通用表，**没有分区**。保留多深是数据决策。未做。
+- **O1 / O2（Ops）**：`bifrost-alerting-rules.yaml` 里 Postgres 确实只有复制延迟、连接数、实例缺失三条。未做。
+
 ## 3. 已知差距与最小改动
 
 ### 3.1 重复与冲突（最大的一类）
@@ -973,6 +1048,7 @@ Trade 侧执行 System 收敛，把两项能力交给 Ops：参考指数的 K �
 
 | 快照 | 日期 | 说明 |
 |---|---|---|
+| 2026-09-25.3 | 2026-09-25 | §2t：Research 转来的七条核对（0.39.0）。P1 真因不是档位而是「数第几个到期日」——实测第 3 个到期日对 AMD/AVGO/GOOGL 是 +5 天、对 CDW/AJG/VRSN 是 +84 天，周权名字的链六天就截断所以没有 IV30；上界改成「第 N 个」与「第一个 60 天外」里靠后的那个，月权名字读数不变（它们 60 天内只挂 2 个，单按底线取反而是砍）。同一个 knob 在 `option-bars` 上留 0：那个 slot 当日 79,215 个 job 占全队列 93%。P4 前提不对——保留期一直是 48 小时且当晚删了 83,941 行，真问题只是膨胀（1,000 MB 装 40 MB），已调 autovacuum。P3 坐实且更糟：`snapshot-coverage` 实测 60 秒 HTTP 502 / 34 秒 / 33 秒，而面板每 60 秒轮询一次；已进 BackgroundCache。第 ③ 条纠正一句：`UPPER(TRIM())` 只在能走索引探针的地方有害，全表聚合上去掉更慢。|
 | 2026-09-25.2 | 2026-09-25 | §2s 续：Trade 的回填按钮接进 Ops（六个标签其实只有四个调用——两个 slot 各覆盖三类）。接的过程中发现 2025-06 那 14 天一直被两道过滤挡着：Console 窗口 30 天够不到（已放宽到 500 并把窗口写进说明），放宽后又被「`symbol_count < 500` 即非交易日」丢掉。`low_coverage_dates` 每行新增 `session`（0.38.2），休市日漏进来的几行与交易日只剩几行不再同义。|
 | 2026-09-25.1 | 2026-09-25 | §2s：Trade 交接的两项能力核对。参考指数集实测后定为「不建档」——三条是 whole-market 普通成员（1240/1255，与 AAPL 完全相同），一条是订阅边界（`I:COMP` 0/1255）。SEPA gaps 的闸门查错 schema（不带 `market → raw_market` 别名），六个 report_type 全部短路成 0，Console 六格假绿；修后六格全部有真读数。全市场日期检查以 `HAVING` 结尾，看不见完全缺席的 session，改为按交易日历判定——修完实测 `absent_count = 0`，补的是仪器不是数据。**含一条同日撤回的错误结论**：我把那 14 个 6 月的稀薄日（各 1 个标的）报成了「一行都没有」，根因是读错了自己探针输出的键。|
 | 2026-09-10.8 | 2026-09-10 | §2h：五类度量偏差全部修完（财报节奏、深度 population、绝对起点、不该问的广度、轮转口径），`5/19 clean` → `8/19`。含一个被数据否定并撤回的假设（`common-stock` 档位）、`ratios` 缺口的结论（两个重叠集合，非缺口）、以及档位定义的声明化。|

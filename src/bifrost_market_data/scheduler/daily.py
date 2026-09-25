@@ -787,6 +787,13 @@ def option_trades_universe(
     return sorted([*keep, must])
 
 
+#: How many expiries to read before picking the bound. Counting is only needed
+#: up to ``min_days``; an underlying that lists a daily expiry (SPY, QQQ) shows
+#: about 42 inside sixty days, so this leaves headroom and is still a bounded,
+#: ordered read on the ``(underlying, expiry)`` index.
+EXPIRY_PROBE_ROWS = 120
+
+
 def load_snapshot_windows(
     conn: Any,
     symbols: Sequence[str],
@@ -794,19 +801,38 @@ def load_snapshot_windows(
     as_of: date,
     expiries: int = 3,
     strike_pct: float = 0.15,
+    min_days: int = 0,
 ) -> dict[str, tuple[float, float, str]]:
     """Per underlying: (strike_gte, strike_lte, expiration_lte) — the near-the-money window.
 
-    Spot is the latest close; the expiry bound is the ``expiries``-th listed
-    expiry at or after ``as_of``. A name with no close or no listed expiries
-    gets no window and is snapshotted whole, which is the safer failure: an
-    unbounded chain costs storage, a wrong bound costs the data.
+    Spot is the latest close. The expiry bound is the later of the
+    ``expiries``-th listed expiry at or after ``as_of`` and the first one at
+    least ``min_days`` out. A name with no close or no listed expiries gets no
+    window and is snapshotted whole, which is the safer failure: an unbounded
+    chain costs storage, a wrong bound costs the data.
+
+    Counting expiries means something different for every underlying, and that
+    was the defect. Measured 2026-09-25 against the listed catalogue: the third
+    expiry is **+5 days** for AMD, AVGO and GOOGL, which list weeklies, and
+    **+84 days** for CDW, AJG, KNX, THC, VRSN and FERG, which list monthlies.
+    One number therefore bought three of the largest names a chain that stopped
+    six days out — and with nothing at 7-90 DTE they have had no IV30 at all
+    since 08-28, while the monthly names were never affected.
+
+    ``min_days`` is a floor, not a replacement: those same monthly names list
+    only **two** expiries inside sixty days, so bounding on the floor alone
+    would have narrowed their window instead of widening it. Taking the later
+    of the two leaves them exactly as they were and lets the weekly names pick
+    up the expiries in between.
     """
     syms = sorted({str(x).strip().upper() for x in symbols if str(x).strip()})
     if not syms:
         return {}
     n_exp = max(1, int(expiries))
     pct = max(0.0, float(strike_pct))
+    floor_days = max(0, int(min_days))
+    floor_date = as_of + timedelta(days=floor_days) if floor_days else None
+    probe_rows = n_exp if floor_date is None else max(n_exp, EXPIRY_PROBE_ROWS)
     out: dict[str, tuple[float, float, str]] = {}
     # Two shapes, both index-shaped. Spot for all names is one DISTINCT ON over
     # stock_daily, which its (symbol, bar_date) index serves. The expiry bound
@@ -861,7 +887,7 @@ def load_snapshot_windows(
                     WHERE underlying = %s AND expiry >= %s
                     ORDER BY expiry LIMIT %s
                     """,
-                    (sym, as_of, n_exp),
+                    (sym, as_of, probe_rows),
                 )
                 exps = [
                     (r.get("expiry") if isinstance(r, Mapping) else r[0])
@@ -879,10 +905,18 @@ def load_snapshot_windows(
             continue
         if len(exps) < n_exp:
             continue
+        bound = exps[n_exp - 1]
+        if floor_date is not None:
+            # The first expiry at or past the floor, so the window reaches
+            # across it and a reader interpolating at the floor has a quote on
+            # both sides. When nothing listed gets that far, the deepest expiry
+            # on the catalogue is the deepest there is to buy.
+            beyond = next((e for e in exps if e >= floor_date), exps[-1])
+            bound = max(bound, beyond)
         out[sym] = (
             round(spot * (1 - pct), 2),
             round(spot * (1 + pct), 2),
-            exps[n_exp - 1].isoformat(),
+            bound.isoformat(),
         )
     return out
 
@@ -930,11 +964,19 @@ def load_option_tickers_near_spot(
     as_of: date,
     expiries: int = 3,
     strikes_each_side: int = 10,
+    min_days: int = 0,
 ) -> list[tuple[str, str]]:
     """Contracts around the money: the next ``expiries`` expiries per underlying
+    — plus, when ``min_days`` is set, every expiry inside that many days —
     and, per expiry and right, the ``2·strikes_each_side+1`` strikes nearest the
     latest close. The old selection took the lowest strikes of the nearest
     expiry — for a $230 stock that was C50…C105 expiring that day.
+
+    ``min_days`` is the same floor ``load_snapshot_windows`` applies and exists
+    for the same reason, but it is far from free here: this slot enqueues one
+    job per contract, and its 79,215 jobs in the 30-hour window measured
+    2026-09-25 were 93% of the whole queue. A weekly name goes from 3 expiries
+    to 10-12, so the floor roughly triples it. Left at 0 it changes nothing.
 
     Underlyings without a close in ``stock_daily`` (index roots such as SPX on
     a plan without index levels) are skipped.
@@ -950,6 +992,10 @@ def load_option_tickers_near_spot(
         return []
     n_exp = max(1, int(expiries))
     per_right = max(1, 2 * int(strikes_each_side) + 1)
+    floor_days = max(0, int(min_days))
+    # No future expiry can satisfy a bound in the past, so with the floor off
+    # the extra predicate selects nothing and the rule is the rank alone.
+    floor_date = as_of + timedelta(days=floor_days) if floor_days else as_of - timedelta(days=1)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -978,12 +1024,12 @@ def load_option_tickers_near_spot(
               FROM raw_market.option_contract c
               JOIN spot s ON s.symbol = c.underlying
               JOIN exp e ON e.underlying = c.underlying AND e.expiry = c.expiry
-              WHERE e.erank <= %s
+              WHERE e.erank <= %s OR e.expiry <= %s
             )
             SELECT option_ticker, underlying FROM ranked WHERE srank <= %s
             ORDER BY option_ticker
             """,
-            (syms, as_of, syms, as_of, n_exp, per_right),
+            (syms, as_of, syms, as_of, n_exp, floor_date, per_right),
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     out: list[tuple[str, str]] = []
@@ -1379,6 +1425,7 @@ def enqueue_slot(
                 as_of=day,
                 expiries=int(scfg.get("expiries") or 3),
                 strike_pct=float(scfg.get("strike_pct") or 0.15),
+                min_days=int(scfg.get("min_days") or 0),
             )
         for sym in pipeline_syms:
             storage = storage_underlying(sym)
@@ -1558,6 +1605,7 @@ def enqueue_slot(
             as_of=day,
             expiries=int(scfg.get("expiries") or 3),
             strikes_each_side=int(scfg.get("strikes_each_side") or 10),
+            min_days=int(scfg.get("min_days") or 0),
         )
         # The contracts the Owner holds or closed recently, wherever they sit
         # relative to spot. Without this a leg that drifted 30% away stops getting
@@ -1607,6 +1655,7 @@ def enqueue_slot(
             as_of=day,
             expiries=int(scfg.get("expiries") or 2),
             strikes_each_side=int(scfg.get("strikes_each_side") or 5),
+            min_days=int(scfg.get("min_days") or 0),
         )
         if tickers:
             offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(tickers)
