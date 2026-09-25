@@ -80,6 +80,15 @@ SEC 文件文本（8-K 正文 / 8-K 分类 / 10-K 章节）在 Stocks 计划内�
 
 ## 修改纪律
 
+- **新增或修改表时，建表先落地再放流量。** `kubectl apply -k k8s/base` 会把 Deployment 和
+  `job-wave8-schema-migrate` 同时提交，新 pod 于是在 DDL 还没落地时就开始领活；那个窗口里点火的 slot
+  会写进一张还不存在的表。2026-09-24 发 0.37.0 时实测：同一瞬间创建的 181 个 `sec_filings_symbol`，
+  21:37:49–21:38:16 到库的 56 个全死在 `relation "raw_market.sec_8k_filing" does not exist`，
+  21:38:56 之后到库的 125 个全活——表是在中间那 40 秒建出来的。
+  做法：先单独 apply 迁移 Job 并 `kubectl wait --for=condition=complete` 等它完成，再 apply 其余；
+  **事后核验要看错误特征不要看 Job**（该 Job 带 TTL，成功后自删，`get job` 查不到不代表没跑过），
+  查 `GET /market/ingest/jobs?status=failed` 里有没有 `does not exist`。完整规则见
+  `.claude/skills/market-data-subscription-focus/SKILL.md` § Release path。
 - 公开表/字段契约变更需同步 Trade 消费者 + Ops Console catalog
 - 不引入 Celery / Redis broker 作为任务路由（Redis 仅心跳/缓存可选）
 - D10 BLOCKED — 不涉及交易执行路径
