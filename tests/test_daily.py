@@ -2105,21 +2105,30 @@ def test_the_two_biggest_tables_are_kept_for_as_long_as_they_are_deep() -> None:
     assert out["short_volume_keep_days"] == retention_days("raw_market.short_volume") == 730
 
 
-def test_option_daily_drops_the_month_and_never_deletes_the_rows() -> None:
-    """DROP returns the space; DELETE across 38M rows would only add dead tuples.
+def test_option_daily_retention_reaches_the_default_partition_too() -> None:
+    """Dropping the month is not sufficient, and assuming it was was the bug.
 
-    And the SQL function truncates its cutoff to the start of a month, so it only
-    ever drops a month wholly past the window — retention here is never shorter
-    than the contract, just rounder.
+    ``ensure_month_partitions`` provisions 12 months back while the contract
+    keeps 24, so everything older landed in the DEFAULT partition, which
+    ``drop_month_partitions_older_than`` cannot match — it only matches
+    ``_yYYYYmMM``. Measured 2026-09-25: option_daily_default held 15,461,731
+    rows spanning 2024-09-09 to 2025-07-31, 3.68 GB and 41% of the table, the
+    entire oldest year, while monthly partitions only started at 2025-08. A
+    drop-only retention would have silently kept exactly the data it was written
+    to expire.
+
+    So both run: the drop for the months, the bounded delete for what is left,
+    which by construction is only the default partition.
     """
     conn = _DailyConn([])
-    _trim(conn)
+    out = _trim(conn)
     drops = [st for st in conn.statements if "drop_month_partitions_older_than" in st[0]]
     assert any("option_daily" in st[0] and st[1] == (730,) for st in drops)
-    deletes = [st for st in conn.statements if "delete from" in st[0].lower()]
-    assert not any("option_daily" in st[0].lower() for st in deletes), (
-        "a row delete would leave the 9 GB taken, which is the opposite of the point"
-    )
+    deletes = [st[0] for st in conn.statements if "delete from raw_market.option_daily" in st[0].lower()]
+    assert deletes, "the default partition is unreachable by a drop"
+    assert "option_ticker, bar_date" in deletes[0].lower()
+    assert "date_trunc('month'" in deletes[0].lower(), "same cutoff as the drop"
+    assert "option_daily_default_rows_deleted" in out
 
 
 def test_short_volume_is_deleted_because_it_cannot_be_dropped() -> None:

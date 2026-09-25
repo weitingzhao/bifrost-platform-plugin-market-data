@@ -1261,14 +1261,32 @@ def enqueue_slot(
         short_volume_retention = _retention_days("raw_market.short_volume")
         option_daily_partitions_dropped: int | None = None
         short_volume_deleted = 0
+        option_daily_deleted = 0
         if option_daily_retention:
-            # Partition drop only, no row-delete fallback, unlike option_snapshot
-            # above. A DELETE across 38M rows would reclaim nothing — it would
-            # add ~9 GB of dead tuples to the table this round is already
-            # repacking elsewhere — while DROP returns the space to the
-            # filesystem. And the function truncates its cutoff to the start of
-            # a month, so it only ever drops a month wholly past the window:
-            # retention here is never shorter than the contract, only rounder.
+            # Dropping the month is the cheap path and it is tried first: all 18
+            # partitions are owned by `bifrost`, unlike option_snapshot's, so it
+            # works. The function truncates its cutoff to the start of a month,
+            # so it only ever drops a month wholly past the window — retention
+            # here is never shorter than the contract, only rounder.
+            #
+            # But it is not sufficient, and assuming it was is the mistake this
+            # comment replaces. `ensure_month_partitions` provisions 12 months
+            # back while the contract keeps 24, so every write older than that
+            # landed in the DEFAULT partition, which the drop cannot match:
+            # measured 2026-09-25, option_daily_default holds 15,461,731 rows
+            # spanning 2024-09-09 to 2025-07-31 — 3.68 GB, 41% of the table, and
+            # the entire oldest year. Monthly partitions only start at 2025-08.
+            # A drop-only retention would have silently kept exactly the data it
+            # was written to expire.
+            #
+            # So the row delete runs too, and by construction it touches only
+            # the default partition: every monthly partition's range starts at
+            # or after 2025-08, which is inside the window. Nothing new lands in
+            # default any more — today's bars have a partition — so it grinds
+            # down over the eleven months its contents take to age out.
+            #
+            # Pinned contracts are not spared here and do not need to be: the
+            # slot buys `pinned_history_days: 400` of history, well inside 730.
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -1297,6 +1315,19 @@ def enqueue_slot(
                     )
                 else:
                     logger.warning("option_daily partition retention failed: %s", exc)
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+            try:
+                option_daily_deleted = trim_rows_past_window(
+                    conn,
+                    table="raw_market.option_daily",
+                    date_column="bar_date",
+                    key_columns=("option_ticker", "bar_date"),
+                    keep_days=option_daily_retention,
+                    budget_sec=float(scfg.get("dated_budget_sec") or 60.0),
+                )
+            except Exception as exc:  # noqa: BLE001 — retention best-effort
+                logger.warning("option_daily row retention failed: %s", exc)
                 if hasattr(conn, "rollback"):
                     conn.rollback()
         if short_volume_retention:
@@ -1328,6 +1359,10 @@ def enqueue_slot(
             "option_snapshot_past_window_deleted": past_window_deleted,
             "option_daily_keep_days": option_daily_retention,
             "option_daily_partitions_dropped": option_daily_partitions_dropped,
+            # The default partition is the only place a drop cannot reach, and
+            # it holds the oldest year. Reported apart from the drop count so a
+            # reader can see which mechanism did the work.
+            "option_daily_default_rows_deleted": option_daily_deleted,
             "short_volume_keep_days": short_volume_retention,
             "short_volume_deleted": short_volume_deleted,
             "partitions_ensured": partitions_ensured,
