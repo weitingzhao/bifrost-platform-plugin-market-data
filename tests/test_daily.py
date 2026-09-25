@@ -2078,3 +2078,91 @@ def test_the_slot_cli_raises_its_statement_budget() -> None:
 
     src = inspect.getsource(daily.main)
     assert 'postgres_connect_kwargs(cfg, statement_timeout=' in src
+
+
+# ── Retention for the two tables that had none ───────────────────────────────
+
+
+def _trim(conn: Any, **slot: Any) -> dict[str, Any]:
+    return enqueue_slot(
+        conn, "trim", target_date=date(2026, 9, 25), scheduler_cfg={"slots": {"trim": slot}}
+    )
+
+
+def test_the_two_biggest_tables_are_kept_for_as_long_as_they_are_deep() -> None:
+    """9.65 GB and 4.7 GB with no ceiling at all, measured 2026-09-25.
+
+    The window is not a number in the trim's config. A window written in two
+    places is a dataset whose depth axis promises two years while its trim keeps
+    three, and this system has already had four different answers to "how many
+    symbols should there be". So the cap is the contract's own depth target.
+    """
+    from bifrost_market_data.contracts import retention_days
+
+    conn = _DailyConn([])
+    out = _trim(conn)
+    assert out["option_daily_keep_days"] == retention_days("raw_market.option_daily") == 730
+    assert out["short_volume_keep_days"] == retention_days("raw_market.short_volume") == 730
+
+
+def test_option_daily_drops_the_month_and_never_deletes_the_rows() -> None:
+    """DROP returns the space; DELETE across 38M rows would only add dead tuples.
+
+    And the SQL function truncates its cutoff to the start of a month, so it only
+    ever drops a month wholly past the window — retention here is never shorter
+    than the contract, just rounder.
+    """
+    conn = _DailyConn([])
+    _trim(conn)
+    drops = [st for st in conn.statements if "drop_month_partitions_older_than" in st[0]]
+    assert any("option_daily" in st[0] and st[1] == (730,) for st in drops)
+    deletes = [st for st in conn.statements if "delete from" in st[0].lower()]
+    assert not any("option_daily" in st[0].lower() for st in deletes), (
+        "a row delete would leave the 9 GB taken, which is the opposite of the point"
+    )
+
+
+def test_short_volume_is_deleted_because_it_cannot_be_dropped() -> None:
+    """One unpartitioned heap, so a DELETE is the only retention available."""
+    conn = _DailyConn([])
+    _trim(conn)
+    stmts = [st[0] for st in conn.statements]
+    deletes = [q for q in stmts if "delete from raw_market.short_volume" in q.lower()]
+    assert deletes, "short_volume has no partitions to drop"
+    assert "symbol, period_date, period_type" in deletes[0].lower()
+    # The same cutoff the partition-drop function uses: one retention rule, two
+    # mechanisms. Without the month truncation the measured depth would be
+    # pinned exactly on the target, and "at target" becomes a knife-edge the
+    # rolling window crosses every night.
+    assert "date_trunc('month'" in deletes[0].lower()
+    assert "period_date <" in deletes[0].lower()
+    assert not any(
+        "drop_month_partitions_older_than" in q and "short_volume" in q for q in stmts
+    )
+
+
+def test_stock_daily_is_not_trimmed_although_it_declares_a_window() -> None:
+    """Its five years roll at the vendor, not here.
+
+    Deleting from it would turn a plan boundary into a hole we dug — which is the
+    exact mis-attribution C-D3 exists to prevent. The trim's list is explicit for
+    this reason; adding a table to it is a decision.
+    """
+    from bifrost_market_data.contracts import retention_days
+
+    assert retention_days("raw_market.stock_daily") == 1825, "it does declare one"
+    conn = _DailyConn([])
+    out = _trim(conn)
+    stmts = " ".join(st[0].lower() for st in conn.statements)
+    assert "delete from raw_market.stock_daily" not in stmts
+    assert "drop_month_partitions_older_than('raw_market', 'stock_daily'" not in stmts
+    assert "stock_daily_keep_days" not in out
+
+
+def test_a_dataset_with_no_rolling_window_is_not_deleted_from_on_a_clock() -> None:
+    """A catalogue holds what is live and a forward-only series cannot expire."""
+    from bifrost_market_data.contracts import retention_days
+
+    assert retention_days("raw_market.ratios") is None, "forward_only"
+    assert retention_days("raw_market.option_snapshot") is None, "counted in sessions"
+    assert retention_days("raw_market.option_contract") is None, "a catalogue"

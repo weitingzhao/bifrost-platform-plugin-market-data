@@ -585,6 +585,37 @@ def contract_for(dataset: str) -> DatasetContract:
     return BY_DATASET[dataset]
 
 
+def retention_days(dataset: str) -> int | None:
+    """How long this dataset is kept, which is the same number as how deep it goes.
+
+    Retention had no home before, so ``option_daily`` and ``short_volume`` grew
+    without a ceiling — 9.65 GB and 4.7 GB, the two largest tables in the
+    database, measured 2026-09-25. The obvious fix is a number in the trim
+    slot's config, and that is the wrong one: a window written in two places is
+    a dataset whose depth axis promises two years while its trim keeps three,
+    and C-G1 exists because the system already had four different answers to
+    "how many symbols should there be".
+
+    So the cap *is* the declared depth target. Research asked for two years
+    because the History page reads 504 days and the IV percentile window sits
+    inside that; the vendor serves about two years of ``?date``; the plan's
+    option aggregates roll at two years. One number, and moving it moves what
+    the depth axis measures at the same time — which is correct, because a
+    shorter retention really is a shallower dataset.
+
+    ``None`` where the contract declares no rolling window: a catalogue holds
+    what is live, a forward-only series has nothing to expire, and neither is
+    something to delete from on a clock.
+    """
+    c = BY_DATASET.get(dataset)
+    if c is None or c.depth.kind != "rolling_days":
+        return None
+    try:
+        return int(c.depth.value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def datasets_in_tier(tier: Tier) -> tuple[DatasetContract, ...]:
     return tuple(c for c in CONTRACTS if c.tier == tier)
 
@@ -627,5 +658,6 @@ __all__ = [
     "contract_for",
     "datasets_in_tier",
     "deadline_for_dimension",
+    "retention_days",
     "staleness_by_slot",
 ]

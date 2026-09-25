@@ -32,12 +32,26 @@ from bifrost_market_data.scheduler.enqueue import (
     insert_jobs_bulk,
     trim_option_snapshots,
     trim_old_jobs,
+    trim_rows_past_window,
 )
 from bifrost_market_data.research_pins import load_pinned_contracts, load_pinned_underlyings
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.symbol_void import load_voided_symbols
 
 logger = logging.getLogger(__name__)
+
+
+def _retention_days(dataset: str) -> int | None:
+    """The contract's rolling window, imported where it is used.
+
+    Deferred rather than module-level: ``contracts`` imports nothing from here,
+    but the scheduler is imported by the doctor which is imported by the API, and
+    keeping the retention lookup at the call site is what makes it obvious that
+    the number is not this module's to choose.
+    """
+    from bifrost_market_data.contracts import retention_days
+
+    return retention_days(dataset)
 
 _NY = ZoneInfo("America/New_York")
 
@@ -1232,6 +1246,75 @@ def enqueue_slot(
             logger.warning("option_snapshot row retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
+
+        # ── The two largest tables, which had no ceiling at all ──
+        # 9.65 GB and 4.7 GB measured 2026-09-25, and nothing expired from
+        # either. The window is not a number in this config: it is the depth
+        # target each contract already declares, so retention and the depth axis
+        # cannot disagree. See contracts.retention_days.
+        #
+        # Named explicitly rather than "every dataset with a rolling window":
+        # stock_daily declares five years too, and its window rolls at the
+        # vendor, not here — deleting from it would turn a plan boundary into a
+        # hole we dug. Adding a table to this list is a decision.
+        option_daily_retention = _retention_days("raw_market.option_daily")
+        short_volume_retention = _retention_days("raw_market.short_volume")
+        option_daily_partitions_dropped: int | None = None
+        short_volume_deleted = 0
+        if option_daily_retention:
+            # Partition drop only, no row-delete fallback, unlike option_snapshot
+            # above. A DELETE across 38M rows would reclaim nothing — it would
+            # add ~9 GB of dead tuples to the table this round is already
+            # repacking elsewhere — while DROP returns the space to the
+            # filesystem. And the function truncates its cutoff to the start of
+            # a month, so it only ever drops a month wholly past the window:
+            # retention here is never shorter than the contract, only rounder.
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT ops_jobs.drop_month_partitions_older_than"
+                        "('raw_market', 'option_daily', %s)",
+                        (option_daily_retention,),
+                    )
+                    row = cur.fetchone() if hasattr(cur, "fetchone") else None
+                if row is not None:
+                    option_daily_partitions_dropped = int(
+                        row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+                    )
+                if hasattr(conn, "commit"):
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001 — retention best-effort
+                if _is_not_owner(exc):
+                    # Reported, not worked around. The fix is one elevated
+                    # statement per partition — ALTER TABLE
+                    # raw_market.option_daily_yYYYYmMM OWNER TO bifrost — and
+                    # deleting the rows instead would leave the space taken.
+                    logger.info(
+                        "option_daily partitions are owned by another role, so nothing "
+                        "was dropped; run ALTER TABLE ... OWNER TO bifrost to enable "
+                        "retention (%s)",
+                        str(exc).splitlines()[0],
+                    )
+                else:
+                    logger.warning("option_daily partition retention failed: %s", exc)
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
+        if short_volume_retention:
+            # A single unpartitioned heap, so a DELETE is the only retention
+            # available. It is also affordable: about 13,000 rows a day.
+            try:
+                short_volume_deleted = trim_rows_past_window(
+                    conn,
+                    table="raw_market.short_volume",
+                    date_column="period_date",
+                    key_columns=("symbol", "period_date", "period_type"),
+                    keep_days=short_volume_retention,
+                    budget_sec=float(scfg.get("dated_budget_sec") or 60.0),
+                )
+            except Exception as exc:  # noqa: BLE001 — retention best-effort
+                logger.warning("short_volume row retention failed: %s", exc)
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
         return {
             "slot": slot_key,
             "trimmed": deleted,
@@ -1243,6 +1326,10 @@ def enqueue_slot(
             "option_snapshot_keep_sessions": snapshot_keep_sessions,
             "option_snapshot_intraday_deleted": intraday_deleted,
             "option_snapshot_past_window_deleted": past_window_deleted,
+            "option_daily_keep_days": option_daily_retention,
+            "option_daily_partitions_dropped": option_daily_partitions_dropped,
+            "short_volume_keep_days": short_volume_retention,
+            "short_volume_deleted": short_volume_deleted,
             "partitions_ensured": partitions_ensured,
             "enqueued": 0,
             "deduped": 0,

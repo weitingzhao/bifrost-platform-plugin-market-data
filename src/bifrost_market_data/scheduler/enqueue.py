@@ -338,6 +338,85 @@ def trim_option_snapshots(
     return deleted
 
 
+#: Rows per whole-market retention batch. ``short_volume`` rows are narrow
+#: (symbol, date, type, jsonb) and the predicate is an index range, so these go
+#: wider than the snapshot batches.
+DATED_BATCH_ROWS = 20_000
+
+#: The cutoff is the same expression ``ops_jobs.drop_month_partitions_older_than``
+#: uses, deliberately: one retention rule, two mechanisms. Truncating to the
+#: start of a month means a day only expires once its whole month is past the
+#: window, which is what stops retention from ever being *shorter* than the
+#: declared depth. Measured 2026-09-25: ``short_volume`` reaches 962 days back
+#: with a median of 746, so trimming to exactly 730 would have pinned the
+#: measured depth on the target with no margin at all and made "at target" a
+#: knife-edge the window rolls across every night.
+_DATED_DELETE = """
+DELETE FROM {table} t
+WHERE ({keys}) IN (
+    SELECT {keys}
+    FROM {table}
+    WHERE {date_column} < date_trunc('month', CURRENT_DATE - make_interval(days => %s))::date
+    LIMIT %s
+)
+"""
+
+
+def trim_rows_past_window(
+    conn: _Connection,
+    *,
+    table: str,
+    date_column: str,
+    key_columns: Sequence[str],
+    keep_days: int,
+    batch_size: int = DATED_BATCH_ROWS,
+    budget_sec: float = 60.0,
+    statement_timeout: str = TRIM_STATEMENT_TIMEOUT,
+) -> int:
+    """Delete rows older than ``keep_days``, in bounded committed batches.
+
+    For the tables a partition cannot be dropped from. ``short_volume`` is the
+    one that needs it: it is the second largest table in the database at 4.7 GB
+    over 7M rows (measured 2026-09-25) and it is a single unpartitioned heap, so
+    retention here is a DELETE or it is nothing.
+
+    Batched and committed per batch, like every other trim in this module, and
+    for the reason the job trim learned the hard way: one unbounded statement
+    against a table this size is cancelled by the role's statement timeout with
+    nothing written, so retention that looks implemented never runs.
+
+    Keyed on the primary key rather than ``ctid`` — not because this table is
+    partitioned, it is not, but because a caller may point this at one that is,
+    and a ctid identifies a row only within its own partition.
+
+    ``keep_days`` is rounded out to the start of a month, exactly as the
+    partition-drop function rounds it, so the two retention paths are one policy.
+
+    ``table``, ``date_column`` and ``key_columns`` are interpolated, so they must
+    come from the caller's own constants and never from a request.
+    """
+    keys = ", ".join(str(c) for c in key_columns)
+    if not keys:
+        raise ValueError("key_columns is required")
+    statement = _DATED_DELETE.format(table=table, keys=keys, date_column=date_column)
+    deleted = 0
+    started = monotonic()
+    try:
+        while monotonic() - started < budget_sec:
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+                cur.execute(statement, (int(keep_days), int(batch_size)))
+                n = int(getattr(cur, "rowcount", 0) or 0)
+            conn.commit()
+            deleted += n
+            if n < batch_size:
+                break
+    except Exception:
+        conn.rollback()
+        raise
+    return deleted
+
+
 def trim_old_jobs(
     conn: _Connection,
     *,
