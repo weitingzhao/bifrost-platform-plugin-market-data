@@ -110,9 +110,44 @@ def test_thin_sessions_are_still_reported() -> None:
         _conn(relations=_WITH_CALENDAR, held=held), days_back=30, min_symbol_threshold=1_000
     )
 
-    assert result["low_coverage_dates"] == [{"date": sessions[1].isoformat(), "symbol_count": 18}]
+    assert result["low_coverage_dates"] == [
+        {"date": sessions[1].isoformat(), "symbol_count": 18, "session": True}
+    ]
     assert result["count"] == 1
     assert result["absent_count"] == 0
+
+
+def test_a_thin_day_that_is_not_a_session_says_so() -> None:
+    """A few rows on a closed day is not a gap; the same few on a session is."""
+    sessions = _weekdays(30)
+    closed = sessions[4]
+    held = {d.isoformat(): 9_000 for d in sessions}
+    held[sessions[1].isoformat()] = 1  # a real session almost entirely missed
+    held[closed.isoformat()] = 3  # stray rows on a market holiday
+
+    result = mod.query_date_coverage(
+        _conn(relations=_WITH_CALENDAR, held=held, holidays=(closed,)),
+        days_back=30,
+        min_symbol_threshold=1_000,
+    )
+
+    by_date = {row["date"]: row for row in result["low_coverage_dates"]}
+    assert by_date[sessions[1].isoformat()]["session"] is True
+    assert by_date[closed.isoformat()]["session"] is False
+
+
+def test_session_is_unknown_without_the_calendar() -> None:
+    sessions = _weekdays(30)
+    held = {d.isoformat(): 9_000 for d in sessions}
+    held[sessions[1].isoformat()] = 4
+
+    result = mod.query_date_coverage(
+        _conn(relations={("raw_market", "stock_daily")}, held=held),
+        days_back=30,
+        min_symbol_threshold=1_000,
+    )
+
+    assert result["low_coverage_dates"][0]["session"] is None
 
 
 def test_a_holiday_is_not_an_absent_session() -> None:

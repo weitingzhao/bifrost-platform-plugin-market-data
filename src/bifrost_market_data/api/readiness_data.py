@@ -435,21 +435,30 @@ def query_date_coverage(
         else:
             held[str(r[0])] = int(r[1] or 0)
 
-    dates: list[dict[str, Any]] = [
-        {"date": d, "symbol_count": n}
-        for d, n in sorted(held.items())
-        if n < min_symbol_threshold
-    ]
-
+    sessions: set[str] | None = None
     absent: list[str] | None = None
     if table_exists(conn, "market", "us_market_holiday"):
         from bifrost_market_data.trading_calendar import expected_trading_days
 
-        absent = [
-            d.isoformat()
-            for d in expected_trading_days(conn, start=start, end=end)
-            if d.isoformat() not in held
-        ]
+        sessions = {d.isoformat() for d in expected_trading_days(conn, start=start, end=end)}
+        absent = sorted(sessions - held.keys())
+
+    # ``session`` separates the two things a small count can mean. A handful of
+    # rows on a day the market was closed is not a gap and never was; the same
+    # handful on a day the calendar calls a session is a hole. Readers used to
+    # drop both by thinness alone, which is how fourteen June 2025 sessions
+    # holding one symbol each — against ~11,050 on either side — read as
+    # "thin days ignored" rather than as the gap they are. ``None`` where the
+    # calendar cannot be read: unplaceable is unknown, not "not a session".
+    dates: list[dict[str, Any]] = [
+        {
+            "date": d,
+            "symbol_count": n,
+            "session": None if sessions is None else (d in sessions),
+        }
+        for d, n in sorted(held.items())
+        if n < min_symbol_threshold
+    ]
 
     return {
         "ok": True,
