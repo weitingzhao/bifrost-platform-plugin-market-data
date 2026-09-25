@@ -387,15 +387,30 @@ def test_the_job_queue_vacuums_on_a_row_count_not_a_fraction() -> None:
     A low scale factor with a flat threshold turns the trigger into a row count
     so vacuum keeps pace with the churn. It reclaims space for reuse; the 960 MB
     already on disk needs a one-off VACUUM FULL or pg_repack.
+
+    It has to be on **both** paths. The cluster's schema Job is
+    ``init_schema.py --wave8-only``, so a statement reachable only from
+    ``apply_ddl`` runs nowhere — which is exactly how 0.30.0's coverage_sample
+    came to be declared, printed in the Job's own summary and absent from the
+    database. Written into apply_ddl alone on the first cut of this change, and
+    caught by reading the Job's command rather than by this test, which is why
+    the assertion below is now over both callers.
     """
+    from bifrost_market_data.schema.ddl import apply_wave8_migrations
+
+    for apply in (apply_ddl, apply_wave8_migrations):
+        conn = _FakeConn()
+        apply(conn)
+        stmt = next(
+            (s for s in conn.cur.statements if "ALTER TABLE ops_jobs.job_ingest SET (" in s),
+            None,
+        )
+        assert stmt is not None, (
+            f"{apply.__name__} does not set the queue table's autovacuum options"
+        )
+        assert "autovacuum_vacuum_scale_factor = 0.01" in stmt
+        assert "autovacuum_vacuum_threshold = 2000" in stmt, "a flat floor: a count, not a share"
+
     conn = _FakeConn()
     apply_ddl(conn)
-    blob = "\n".join(conn.cur.statements)
-    stmt = next(
-        (s for s in conn.cur.statements if "ALTER TABLE ops_jobs.job_ingest SET (" in s),
-        None,
-    )
-    assert stmt is not None, "the queue table must carry its own autovacuum settings"
-    assert "autovacuum_vacuum_scale_factor = 0.01" in stmt
-    assert "autovacuum_vacuum_threshold = 2000" in stmt, "a flat floor, so the trigger is a count"
-    assert "job_ingest_dedup" in blob, "the settings did not replace the indexes"
+    assert "job_ingest_dedup" in "\n".join(conn.cur.statements), "the indexes are still created"
