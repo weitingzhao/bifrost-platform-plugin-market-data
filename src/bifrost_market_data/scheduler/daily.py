@@ -147,9 +147,9 @@ WHERE instrument_type = 'CS'
 """.strip()
 
 INCOME_STATEMENT_COVERED_QUERY = """
-SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
+SELECT DISTINCT symbol
 FROM raw_market.income_statement
-WHERE symbol IS NOT NULL AND trim(symbol) <> ''
+WHERE symbol <> ''
 """.strip()
 
 # Wave A IV Radar market-weather ETFs — unioned into eod-pipeline / option paths.
@@ -608,10 +608,10 @@ def _option_contract_underlyings(conn: Any, *, limit: int = 200) -> list[str]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT UPPER(TRIM(underlying)) AS sym
+                SELECT underlying AS sym
                 FROM raw_market.option_contract
-                WHERE TRIM(COALESCE(underlying, '')) <> ''
-                GROUP BY UPPER(TRIM(underlying))
+                WHERE underlying <> ''
+                GROUP BY underlying
                 ORDER BY COUNT(*) DESC, sym ASC
                 LIMIT %s
                 """,

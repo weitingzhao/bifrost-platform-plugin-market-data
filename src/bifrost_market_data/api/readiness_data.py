@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/readiness", tags=["readiness-data"])
 
+# Symbol columns are read bare here, in projections and GROUP BY as well as in
+# comparisons: stock_daily and the six financials tables hold only normalised
+# symbols (every distinct value enumerated on 2026-09-26), so UPPER(TRIM()) could
+# only cost. Alternated that day: the 420-day per-symbol aggregate 0.62s against
+# 0.78-1.09s, the per-session distinct count the Readiness panel polls every
+# minute 2.1-2.4s against 3.9-4.1s. The disk-bound DISTINCT over short_volume
+# (4.7 GB) ran the same scan either way and took 3.5s both ways.
+
 
 def query_bar_aggregate(
     conn: Any,
@@ -57,7 +65,7 @@ def query_bar_aggregate(
             cur.execute(
                 """
                 SELECT
-                    COUNT(DISTINCT UPPER(TRIM(symbol)))::integer AS symbol_count,
+                    COUNT(DISTINCT symbol)::integer AS symbol_count,
                     COUNT(*)::integer AS total_bars,
                     COUNT(*) FILTER (WHERE close IS NULL)::integer AS null_close_rows,
                     COUNT(*) FILTER (WHERE volume IS NULL)::integer AS null_volume_rows
@@ -99,7 +107,7 @@ def query_bar_aggregate(
         cur.execute(
             """
             SELECT
-                UPPER(TRIM(symbol)) AS symbol,
+                symbol,
                 COUNT(*)::integer AS bar_rows,
                 MIN(bar_date)::text AS first_bar_date,
                 MAX(bar_date)::text AS last_bar_date,
@@ -108,7 +116,7 @@ def query_bar_aggregate(
             FROM raw_market.stock_daily
             WHERE bar_date >= (CURRENT_DATE - %s)::date
               AND bar_date <= CURRENT_DATE
-            GROUP BY UPPER(TRIM(symbol))
+            GROUP BY symbol
             """,
             (window_days,),
         )
@@ -253,12 +261,12 @@ def query_financials_coverage_symbols(conn: Any) -> dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT UPPER(TRIM(symbol)) AS symbol,
+            SELECT symbol,
                    COUNT(*) FILTER (WHERE LOWER(period_type) = 'quarterly')::integer AS q_count,
                    COUNT(*) FILTER (WHERE LOWER(period_type) = 'annual')::integer AS a_count
             FROM raw_market.stock_financials
             WHERE report_type = 'income_statement'
-            GROUP BY UPPER(TRIM(symbol))
+            GROUP BY symbol
             """
         )
         inc: dict[str, dict[str, int]] = {}
@@ -272,7 +280,7 @@ def query_financials_coverage_symbols(conn: Any) -> dict[str, Any]:
         for rtype in ("balance_sheet", "cash_flow_statement", "ratios", "short_interest", "short_volume"):
             cur.execute(
                 """
-                SELECT DISTINCT UPPER(TRIM(symbol)) AS symbol
+                SELECT DISTINCT symbol
                 FROM raw_market.stock_financials
                 WHERE report_type = %s
                 """,
@@ -427,7 +435,7 @@ def query_date_coverage(
             """
             SELECT
                 bar_date::text AS dt,
-                COUNT(DISTINCT UPPER(TRIM(symbol)))::int AS symbol_count
+                COUNT(DISTINCT symbol)::int AS symbol_count
             FROM raw_market.stock_daily
             WHERE bar_date >= %s
               AND bar_date <= %s
@@ -502,7 +510,7 @@ def query_financials_by_instrument_type(
     with conn.cursor() as cur:
         for col, rtype in specs:
             cur.execute(
-                "SELECT COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint FROM raw_market.stock_financials WHERE report_type = %s",
+                "SELECT COUNT(DISTINCT symbol)::bigint FROM raw_market.stock_financials WHERE report_type = %s",
                 (rtype,),
             )
             row = cur.fetchone()

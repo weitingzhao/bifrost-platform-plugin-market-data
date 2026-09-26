@@ -15,6 +15,7 @@ normalised — which is the half these tests pin.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 from typing import Any, Self
@@ -58,6 +59,51 @@ def test_no_wrapped_symbol_comparison_anywhere() -> None:
         "normalize_symbols) — after checking the column is clean and indexed:\n"
         + "\n".join(offenders)
     )
+
+
+#: The one wrapper left on purpose: it reads ``features.*``, Research's tables,
+#: whose symbol columns were not checked.
+ALLOWED_WRAPPED_SQL = {("api/coverage.py", "_analytics_metric_summary")}
+
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                ids.add(id(body[0].value))
+    return ids
+
+
+def test_no_sql_string_wraps_a_column_at_all() -> None:
+    """Stricter than the comparison check: projections and GROUP BY too.
+
+    Measured 2026-09-26, the bare column was never slower once the plans were
+    compared: where the wrapper cost nothing visible (a disk-bound DISTINCT over
+    the 4.7 GB short_volume table) both plans were the same scan and both took
+    3.5 s; elsewhere it cost an index-only scan or an on-disk sort.
+    """
+    offenders = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        skip = _docstring_ids(tree)
+        owners: dict[int, str] = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(fn):
+                    owners.setdefault(id(node), fn.name)
+        rel = str(path.relative_to(SRC))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in skip
+                and "UPPER(TRIM(" in node.value.upper()
+                and (rel, owners.get(id(node), "")) not in ALLOWED_WRAPPED_SQL
+            ):
+                offenders.append(f"{rel}:{node.lineno} in {owners.get(id(node), '<module>')}")
+    assert not offenders, "\n".join(offenders)
 
 
 def test_normalize_symbols_drops_blanks_and_duplicates_in_order() -> None:

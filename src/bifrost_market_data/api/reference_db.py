@@ -212,7 +212,9 @@ def query_us_equity_universe(conn: Any) -> dict[str, Any]:
     """US common-stock universe matching former public.v_us_equity_universe.
 
     Filters: active, locale=us, market=stocks, instrument_type=cs.
-    tickers_id is hashtext(upper(trim(symbol)))::bigint for SEPA compatibility.
+    tickers_id is hashtext(symbol)::bigint for SEPA compatibility — the symbol is
+    stored normalised, so this is the same value SEPA keyed on as
+    hashtext(upper(trim(symbol))): all 5,414 tickers matched on 2026-09-26.
     """
     if not table_exists(conn, "market", "ticker"):
         return {"ok": True, "rows": [], "count": 0}
@@ -220,8 +222,8 @@ def query_us_equity_universe(conn: Any) -> dict[str, Any]:
         cur.execute(
             """
             SELECT
-                hashtext(upper(trim(t.symbol)))::bigint AS tickers_id,
-                upper(trim(t.symbol)) AS symbol,
+                hashtext(t.symbol)::bigint AS tickers_id,
+                t.symbol AS symbol,
                 t.name,
                 t.market,
                 t.locale,

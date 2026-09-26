@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.4
+version: 2026-09-26.5
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -1015,6 +1015,24 @@ option_daily 3,860 万行的 `option_ticker` 0 个不规范。输入统一走 `n
 代码注释说两个分支「读的是同一个最新快照，只有 basis 不同」，而 LATERAL 分支按主键逐合约取最新一行只要 44 ms。
 2026-09-26 前 15 小时该端点 0 次调用；是否改走 LATERAL（`basis` 标签怎么定）待 Owner 决定。
 **0.41.6 已改（Owner 定：改走 LATERAL，`basis` 保持 `option_snapshots_latest`）**。改前在库里核对两条路径逐行相同：AAPL 38 个到期日、VRSN 5 个，对称差均为 0。
+
+**0.41.7：投影、GROUP BY 里的包装也清掉，`features.*` 那一处之外全包零处。** readiness_data 8 处、daily.py 3 处，外加一处小写的
+`upper(trim(t.symbol))`（`reference_db.query_us_equity_universe`，此前区分大小写的 grep 漏了它）。那条的 `tickers_id` 是 SEPA 用的哈希，
+改前核对 5,414 个 ticker 的 `hashtext(symbol)` 与 `hashtext(upper(trim(symbol)))` 逐行相同。交替实测：
+
+| 读法 | 包装 | 裸列 |
+|---|---|---|
+| bar-aggregate 420 天逐标的汇总（readiness summary） | 0.78–1.09 s | 0.62 s |
+| date-coverage 420 天逐 session 计数（Console 每 60 秒轮询） | 3.9–4.1 s，80 MB 落盘排序 | 2.1–2.4 s，64 MB |
+| option_contract 回落名单 | 0.20–0.22 s | 0.09–0.10 s |
+| short_volume 全表 `DISTINCT symbol`（4.7 GB） | 3.3–3.6 s | 6.3–6.5 s → 复测 3.56 s |
+
+最后一行记下来是因为它**看起来像反例**：头两轮裸列慢了一倍。但两份执行计划完全相同（并行顺序扫描 + HashAggregate，
+读 556,959 与 556,863 页，全部来自磁盘），裸列只少一个逐行算 `upper(trim())` 的节点；开 `track_io_timing` 复测，
+裸列 3.56 s（I/O 8.2 s）对包装 3.50 s（I/O 7.3 s）。磁盘带宽决定的全扫上两种写法一样快，那 3 秒是 I/O 抖动。
+**判读 A/B 先比执行计划与 buffers，再看耗时**——计划与页数相同而耗时不同，说明的是机器，不是写法。
+新棘轮 `test_no_sql_string_wraps_a_column_at_all` 用 AST 取出全部非文档字符串，只放行 `_analytics_metric_summary`；
+拿 HEAD 源码反向跑，拦下这次改的 9 条 SQL。
 
 ### 其余三条
 

@@ -9,9 +9,11 @@ six analytics products blocked because its inventory call had timed out.
 
 The shape that fixes it is not a faster query. Nothing here can be made to
 answer in a second: the inventory's widest read is one full pass over 13.6M
-``stock_daily`` rows to count distinct symbols, which is 150s however it is
-written (the ``UPPER(TRIM())`` wrapper measured *faster* than the bare column
-on 2026-09-09, so unwrapping it is not the fix either). What fixes it is not
+``stock_daily`` rows to count distinct symbols, 150s under the 2026-09-09
+backfill load. (That day's note that the ``UPPER(TRIM())`` wrapper measured
+*faster* than the bare column did not survive an alternated re-measure on
+2026-09-26: bare 3.7s against wrapped 9.0s, an index-only scan against a sort
+spilled to disk — but a full pass is still a full pass.) What fixes it is not
 making the reader wait: serve the last answer immediately, start a recompute
 behind it, and state the age rather than dressing a cached number as live.
 
