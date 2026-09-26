@@ -132,7 +132,7 @@ def _holidays_summary(conn: Any) -> dict[str, Any] | None:
 
 def _price_readiness(conn: Any) -> dict[str, int]:
     try:
-        bar_agg = query_bar_aggregate(conn, window_days=420, summary=False)
+        bar_agg = query_bar_aggregate(conn, window_days=420)
         symbols = bar_agg.get("symbols") or {}
         stale_cutoff = date.today() - timedelta(days=_STALE_DAYS)
         ready = 0

@@ -38,70 +38,19 @@ def query_bar_aggregate(
     conn: Any,
     *,
     window_days: int = 420,
-    summary: bool = False,
 ) -> dict[str, Any]:
     """Per-symbol bar aggregate stats from market.stock_daily within a date window.
 
     Returns: bar_rows, first_bar_date, last_bar_date, null_close_rows, null_volume_rows
-    per symbol. Used by readiness snapshot bars CTE.
+    per symbol. Read in process by the readiness summary's price readiness.
 
-    When summary=True, return only totals (for Ops Console readiness KPI) — avoids
-    ~1–2 MiB per-symbol JSON that can starve concurrent readiness probes.
+    It used to be served as GET /readiness/bar-aggregate too, with a totals-only
+    ``summary`` variant. Nothing called either — the Console's and trade-api's
+    clients had no callers and the API log showed no request in 24 hours — so the
+    route went in 0.41.11, and the variant with it.
     """
     if not table_exists(conn, "market", "stock_daily"):
-        if summary:
-            return {
-                "ok": True,
-                "summary": True,
-                "symbol_count": 0,
-                "total_bars": 0,
-                "null_close_rows": 0,
-                "null_volume_rows": 0,
-            }
         return {"ok": True, "symbols": {}}
-
-    if summary:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    COUNT(DISTINCT symbol)::integer AS symbol_count,
-                    COUNT(*)::integer AS total_bars,
-                    COUNT(*) FILTER (WHERE close IS NULL)::integer AS null_close_rows,
-                    COUNT(*) FILTER (WHERE volume IS NULL)::integer AS null_volume_rows
-                FROM raw_market.stock_daily
-                WHERE bar_date >= (CURRENT_DATE - %s)::date
-                  AND bar_date <= CURRENT_DATE
-                """,
-                (window_days,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return {
-                "ok": True,
-                "summary": True,
-                "symbol_count": 0,
-                "total_bars": 0,
-                "null_close_rows": 0,
-                "null_volume_rows": 0,
-            }
-        if hasattr(row, "keys"):
-            return {
-                "ok": True,
-                "summary": True,
-                "symbol_count": int(row["symbol_count"] or 0),
-                "total_bars": int(row["total_bars"] or 0),
-                "null_close_rows": int(row["null_close_rows"] or 0),
-                "null_volume_rows": int(row["null_volume_rows"] or 0),
-            }
-        return {
-            "ok": True,
-            "summary": True,
-            "symbol_count": int(row[0] or 0),
-            "total_bars": int(row[1] or 0),
-            "null_close_rows": int(row[2] or 0),
-            "null_volume_rows": int(row[3] or 0),
-        }
 
     with conn.cursor() as cur:
         cur.execute(
@@ -522,24 +471,6 @@ def query_financials_by_instrument_type(
 # ---------------------------------------------------------------------------
 # HTTP routes
 # ---------------------------------------------------------------------------
-
-
-@router.get("/bar-aggregate")
-def readiness_bar_aggregate(
-    window_days: int = Query(420, ge=1, le=800),
-    summary: bool = Query(
-        False,
-        description="If true, return totals only (no per-symbol map) for Ops Console KPI",
-    ),
-) -> dict[str, Any]:
-    """Per-symbol stock_daily aggregate stats within a date window."""
-    conn = require_db()
-    try:
-        return query_bar_aggregate(conn, window_days=window_days, summary=summary)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"bar-aggregate failed: {exc}") from exc
-    finally:
-        conn.close()
 
 
 @router.get("/latest-bar-per-symbol")

@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.9
+version: 2026-09-26.10
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -1074,7 +1074,7 @@ AAPL/MSFT 约 0.3 s、NVDA 约 1.4 s、SPY 约 1.9 s——10.4 s 是冷缓存的
 **`readiness/bar-aggregate?summary=true`：查过，不改——没有调用方。** 冒烟时的 5.6 s 是本会话自己打的；库内冷 6.5 s、热 2.2–2.3 s，
 代价是 420 天窗口约 345 万行的一次全扫（行数、空值数与 distinct 都要它）。Console 的 `fetchReadinessBarAggregate` 与 trade-api 的
 `fetch_readiness_bar_aggregate` 都无人调用，插件日志 24 小时 0 次；readiness summary 在进程内用的是非汇总版（后台缓存，0.62 s）。
-删掉这条路由和两处客户端函数是跨三个仓库的公开接口变更，待 Owner。
+删掉这条路由和两处客户端函数是跨三个仓库的公开接口变更，待 Owner。**Owner 同日决定删：插件 0.41.11 去掉路由与只服务它的 `summary` 分支（`query_bar_aggregate` 仍供 readiness summary 进程内使用）；Console 删 `fetchReadinessBarAggregate` 与只被它和无人调用的 `deriveBarAggregate` 用到的类型（检查项 id `bar_aggregate` 仍在用，数据来自 quality-score，保留）；trade-api 删 `fetch_readiness_bar_aggregate`，血缘目录里那条改指 `/readiness/summary` 的 `price_readiness_live`。**
 
 ### 其余三条
 
