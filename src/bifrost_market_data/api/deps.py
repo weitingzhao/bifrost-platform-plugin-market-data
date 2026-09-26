@@ -5,12 +5,14 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import threading
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from fastapi import HTTPException, Request
 
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
+from bifrost_market_data.db.schema_guard import LegacySchemaError, assert_no_legacy_schemas
 from bifrost_market_data.polygon.client import PolygonClient
 from bifrost_market_data.polygon.errors import PolygonAPIError, PolygonRateLimitError
 
@@ -20,25 +22,59 @@ _client: PolygonClient | None = None
 
 _startup_ok = True
 _startup_error: str | None = None
+#: The guard has not managed to ask the database yet — as opposed to having
+#: asked and found a legacy schema. Only this state is worth asking again.
+_guard_unverified = False
+_guard_lock = threading.Lock()
 
 
-def run_startup_schema_guard() -> None:
-    """Best-effort legacy schema guard — does not block process start."""
-    global _startup_ok, _startup_error
+def run_startup_schema_guard(*, timeout: int = 5) -> None:
+    """Best-effort legacy schema guard — does not block process start.
+
+    Finding a legacy schema is a verdict and stays. Not reaching the database
+    is no verdict at all: measured on the 0.41.2 rollout (2026-09-26), the
+    guard ran 100 ms after process start, the server closed its connection —
+    most likely the egress NetworkPolicy not yet programmed for the new pod —
+    and every database call after it worked. The guard ran once, so /health
+    said ``degraded`` for the whole life of a healthy pod.
+    """
+    global _startup_ok, _startup_error, _guard_unverified
     try:
-        from bifrost_market_data.db.schema_guard import assert_no_legacy_schemas
-
-        conn = connect_db(timeout=5)
+        conn = connect_db(timeout=timeout)
         try:
             assert_no_legacy_schemas(conn)
-            _startup_ok = True
-            _startup_error = None
         finally:
             conn.close()
-    except Exception as exc:
-        _startup_ok = False
-        _startup_error = str(exc)
+    except LegacySchemaError as exc:
+        _startup_ok, _startup_error, _guard_unverified = False, str(exc), False
         logger.error("startup schema guard failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — could not check; /health asks again
+        _startup_ok, _startup_error, _guard_unverified = False, str(exc), True
+        logger.error("startup schema guard could not run: %s", exc)
+    else:
+        if _guard_unverified:
+            logger.info("startup schema guard passed on re-check")
+        _startup_ok, _startup_error, _guard_unverified = True, None, False
+
+
+def recheck_schema_guard() -> bool:
+    """Re-run, in the background, a guard that never reached the database.
+
+    Returns True when a re-run was started. Behind the response rather than in
+    it: the readiness probe allows /health 3 seconds and its own database probe
+    already spends up to 2. The next probe reads the result.
+    """
+    if not _guard_unverified or not _guard_lock.acquire(blocking=False):
+        return False
+
+    def run() -> None:
+        try:
+            run_startup_schema_guard(timeout=2)
+        finally:
+            _guard_lock.release()
+
+    threading.Thread(target=run, name="schema-guard-recheck", daemon=True).start()
+    return True
 
 
 def startup_ok() -> bool:

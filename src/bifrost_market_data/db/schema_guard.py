@@ -17,6 +17,10 @@ FORBIDDEN_LEGACY_SCHEMAS: tuple[str, ...] = (
 )
 
 
+class LegacySchemaError(RuntimeError):
+    """The guard ran and found a forbidden schema — a finding, not a failure to check."""
+
+
 def assert_no_legacy_schemas(conn: Any) -> None:
     """Raise when any forbidden legacy schema exists in Golden Source."""
     with conn.cursor() as cur:
@@ -26,4 +30,4 @@ def assert_no_legacy_schemas(conn: Any) -> None:
         )
         found = [r[0] for r in (cur.fetchall() or [])]
     if found:
-        raise RuntimeError(f"Legacy schemas present in Golden Source: {found}")
+        raise LegacySchemaError(f"Legacy schemas present in Golden Source: {found}")

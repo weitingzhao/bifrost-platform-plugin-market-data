@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from bifrost_market_data.api.deps import startup_error, startup_ok
+from bifrost_market_data.api.deps import recheck_schema_guard, startup_error, startup_ok
 
 router = APIRouter(tags=["health"])
 
@@ -39,6 +39,10 @@ def health() -> dict[str, Any]:
     ``status`` / ``db`` / ``startup_ok`` in the body.
     """
     db = _probe_db()
+    if db == "ok":
+        # The database answers now. If the startup guard never could reach it,
+        # ask again behind this response instead of staying degraded for life.
+        recheck_schema_guard()
     guard_ok = startup_ok()
     status = "ok" if db == "ok" and guard_ok else "degraded"
     return {
