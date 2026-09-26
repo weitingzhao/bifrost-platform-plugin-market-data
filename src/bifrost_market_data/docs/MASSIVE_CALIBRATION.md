@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.7
+version: 2026-09-26.8
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -1046,6 +1046,27 @@ join 条件推不进 `DISTINCT ON`，20 个 AAPL 合约 4.1 s、写约 12.3 万�
 Polygon 形式的 key 是 `WHERE s.option_ticker = ANY(常量)`，条件落在 `DISTINCT ON` 列上能下推（约 200 页），保留走视图。
 trade-api 的 `get_option_snapshots_latest`（screener、option discovery）传的是 IB key，所以慢的恰好是常走的那一支。
 插件里别的视图用法都没问题；Research、trade-api、platform 都不读这个视图。
+
+**`options/analytics/pcr?type=volume`：查过，不改（2026-09-26，Owner 定）。** 冒烟时经 API 量到 10.4 s，复测热缓存下
+AAPL/MSFT 约 0.3 s、NVDA 约 1.4 s、SPY 约 1.9 s——10.4 s 是冷缓存的单次样本，共享集群上另见过一次 7.6 s 的抖动。
+这不是视图 join 那类病态计划：按合约逐个探 `option_snapshot` 各分区的主键，再按（合约，纽约日期）取最新一行，耗时随读到的行数走。
+调用方是 trade-api Stock Inspector 的 `stock_option_pcr.py`（每开一个标的调 oi、volume 各一次），15 小时里 volume 只有 2 次。
+
+试了三种改写，结果与原查询逐行相同（AAPL/NVDA/SPY/MSFT 对称差均为 0，两张表的 underlying 也逐行一致），但没有一种处处更快：
+
+| 写法 | SPY | NVDA | AAPL | MSFT |
+|---|---|---|---|---|
+| 原查询（按合约探主键 + DISTINCT ON） | 1.87–1.96 s | 1.28–1.46 s | **0.31–0.34 s** | **0.29 s** |
+| 走快照表 `(underlying, snapshot_ts)` 索引 | 1.06–1.08 s | 0.65–0.70 s | 0.63–0.68 s | 0.61–0.62 s |
+| 原 join，哈希分组 + `array_agg(... ORDER BY)[1]` | 1.73–1.74 s | 1.42 s | 0.39–0.43 s | 0.31 s |
+| 快照索引 + 哈希分组 | **1.22–1.24 s** | **0.73–0.85 s** | 0.76–0.81 s | 0.70–0.74 s |
+
+排序不是瓶颈（哈希分组几乎不变）；差别在取数路径：大链走快照索引快约四成，中等链反而慢一倍多。代价本身是读完窗口内的全部快照，换路径省不掉。
+
+**会随时间变慢（推算，未实测）**：`option_snapshot_keep_sessions: 90`，而 2026-09-26 库里只有 20–32 个 session（SPY 自 08-14 起 20 天）。
+攒满后预计慢 3–4.5 倍，SPY 热缓存约 8 s；按 08-14 起算约在 12 月底攒满。
+**届时的正解**是在 EOD 流水线里写一张「每个标的每天的 put/call 成交量」小表，读取只剩几十行——新增表，属架构决定，待 Owner。
+覆盖索引 `(underlying, snapshot_ts) INCLUDE (option_ticker, day_volume)` 也可行，但要在一张仍在长的 1.4 GB 表上加一个大索引，收益未测，不作首选。
 
 ### 其余三条
 
