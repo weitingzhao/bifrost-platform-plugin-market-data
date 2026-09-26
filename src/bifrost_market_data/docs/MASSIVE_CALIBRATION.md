@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.5
+version: 2026-09-26.6
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -1033,6 +1033,13 @@ option_daily 3,860 万行的 `option_ticker` 0 个不规范。输入统一走 `n
 **判读 A/B 先比执行计划与 buffers，再看耗时**——计划与页数相同而耗时不同，说明的是机器，不是写法。
 新棘轮 `test_no_sql_string_wraps_a_column_at_all` 用 AST 取出全部非文档字符串，只放行 `_analytics_metric_summary`；
 拿 HEAD 源码反向跑，拦下这次改的 9 条 SQL。
+
+**0.41.8：`/stocks/fundamentals/db/short-volume` 从来没答对过。** 冒烟 0.41.5 时它返回 500：`invalid input syntax for type bigint: "6485654.248821"`。
+旧 SQL 原样在库里跑也是同一个错——vendor 的 short volume 带小数股，抽查的 6 个标的**自 2024-09-09 建表起每一行都是小数**，所以这条路由自有数据起就一直 500
+（15 小时 0 次调用；trade-api 的 `fetch_short_volume` 只有测试在调）。修好强转还会露出第二个错：vendor 的 `short_volume_ratio` 是**百分数**（AAPL 09-25 为 58.33），
+契约与消费方的阈值（0.30）是比率。现在成交量经 `numeric` 四舍五入成整股，比率由未取整的两个成交量相除、退回 vendor 百分数 ÷ 100——与 Research 的 `stg_short_volume` 同一规则。
+short_interest 的五处同类强转一并改成先 `numeric`（目前都是整数，新旧结果逐值相同）。棘轮 `test_jsonb_numeric_casts.py` 禁止 jsonb 文本直接转整数。
+**未改（Trade 侧）**：`bifrost-trade-api` 的 `data_readiness.py:1244` 展示的 `short_volume_ratio` 取自 SEPA 路由的原始 jsonb，即 vendor 的百分数。
 
 ### 其余三条
 

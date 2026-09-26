@@ -61,13 +61,13 @@ def query_short_interest(
               symbol,
               period_date AS settlement_date,
               COALESCE(
-                (data->>'short_interest')::bigint,
-                (data->>'short_interest_shares')::bigint,
-                (data->>'short_shares')::bigint
+                round(NULLIF(data->>'short_interest', '')::numeric)::bigint,
+                round(NULLIF(data->>'short_interest_shares', '')::numeric)::bigint,
+                round(NULLIF(data->>'short_shares', '')::numeric)::bigint
               ) AS short_interest,
               COALESCE(
-                (data->>'avg_daily_volume')::bigint,
-                (data->>'avg_daily_volume_consolidated')::bigint
+                round(NULLIF(data->>'avg_daily_volume', '')::numeric)::bigint,
+                round(NULLIF(data->>'avg_daily_volume_consolidated', '')::numeric)::bigint
               ) AS avg_daily_volume,
               (data->>'days_to_cover')::double precision AS days_to_cover
             FROM (
@@ -117,6 +117,15 @@ def query_short_volume(
     """Recent short volume from market.stock_financials grouped by symbol.
 
     Field names match ``market_pg.get_short_volume_recent`` consumer contract.
+
+    The vendor sends volumes with fractional shares — every row since the table
+    began on 2024-09-09 (AAPL 2026-09-25: 6485654.248821) — and a direct
+    ``::bigint`` cast of that text raised, so this route answered 500 for every
+    symbol. Volumes go through ``numeric`` and round to whole shares, the
+    contract's type. The vendor's ``short_volume_ratio`` is a percent (58.33),
+    while the contract's is a ratio (its consumer thresholds at 0.30), so the
+    ratio is computed from the unrounded volumes and falls back to the percent
+    over 100 — the same rule as Research's ``stg_short_volume``.
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {}
@@ -127,9 +136,13 @@ def query_short_volume(
             SELECT
               symbol,
               period_date AS trade_date,
-              (data->>'short_volume')::bigint AS short_volume,
-              (data->>'short_volume_ratio')::double precision AS short_volume_ratio,
-              (data->>'total_volume')::bigint AS total_volume
+              round(NULLIF(data->>'short_volume', '')::numeric)::bigint AS short_volume,
+              COALESCE(
+                NULLIF(NULLIF(data->>'short_volume', '')::numeric, 0)
+                  / NULLIF(NULLIF(data->>'total_volume', '')::numeric, 0),
+                NULLIF(data->>'short_volume_ratio', '')::numeric / 100
+              )::double precision AS short_volume_ratio,
+              round(NULLIF(data->>'total_volume', '')::numeric)::bigint AS total_volume
             FROM (
               SELECT *,
                 ROW_NUMBER() OVER (
