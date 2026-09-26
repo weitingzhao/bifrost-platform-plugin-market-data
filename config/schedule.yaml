@@ -76,14 +76,32 @@ scheduler:
       # At-the-money: next 3 expiries × ±10 strikes per right, per underlying.
       expiries: 3
       strikes_each_side: 10
-      # The same floor eod-pipeline runs at 60, deliberately off here. This slot
-      # enqueues one job per contract, not per underlying: 79,215 jobs in the
-      # 30-hour window measured 2026-09-25, which is 93% of the entire queue.
-      # Tripling the weekly names' expiries would take the queue to roughly
-      # 200,000 a night. Turning it on is a one-line change once that cost has
-      # been decided; until then option_daily keeps the near-spot ladder and
-      # option_snapshot is the deep read.
-      min_days: 0
+      # The floor, but only for the names the rank rule leaves outside Brent's
+      # window. Research solves ATM IV from option_daily with Brent when a
+      # session's vendor snapshot is judged degraded — 0.118.0 deletes the vendor
+      # rows on purpose, so Brent is the only source left there, and it needs an
+      # expiry at 5-90 DTE. Measured 2026-09-26 over the 678-name universe: 610
+      # underlyings already have a usable Brent window, 68 do not, and the weekly
+      # ones among those are the thirteen largest names in the market, empty on
+      # 14 of 14 sessions.
+      #
+      # `shallow_dte` is the discriminator and it has to be small: the third
+      # listed expiry is 4-5 days out for those names, 7 for MU, then nothing
+      # until 14 (PLTR) and 84 (VRSN). At 7 it selects exactly those 14 and
+      # nobody else, and the gap 7->14 means the threshold is not a knife-edge.
+      #
+      # Cost, computed with this same SQL rather than estimated: 80,374 ->
+      # 86,130 jobs, +5,756 (+7.2%), so the drain moves about a minute and the
+      # 00:45 self-heal and 02:30 Research gate are untouched. Applying the floor
+      # to every weekly name instead measured 156,798 (x1.95) and pushed the
+      # drain to 00:10 UTC — 13x the cost for no extra protection, since those
+      # names already have a Brent window.
+      #
+      # SPX is in the unprotected set and this cannot help it: with no
+      # stock_daily close the near-spot spot join drops it. Index closes are a
+      # separate decision.
+      min_days: 60
+      shallow_dte: 7
       # Renews the same 575 underlyings the P4 backfill bought history for;
       # the watchlist stays the fallback when research.option_universe is empty.
       universe: research
@@ -99,6 +117,13 @@ scheduler:
       expiries: 2
       strikes_each_side: 5
       batch_size: 80
+      # 1-hour bars (only) for every other research-universe stock: Research settles
+      # each forecast session hour by hour, and the watchlist carried these for 18 of
+      # the 678 names it forecasts. Each name asks from the session after its newest
+      # bar, or hourly_backfill_days back when it has none, so the first run fills
+      # the history and a missed night is picked up by the next.
+      hourly_universe: research
+      hourly_backfill_days: 100
     calendar:
       cron: "0 22 * * *"
       priority: 1

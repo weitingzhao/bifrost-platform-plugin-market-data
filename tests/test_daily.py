@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import collections
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -148,12 +150,13 @@ class _DailyCursor:
             self.parent._fetchall = [(e,) for e in exps]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
-            # (syms, as_of, syms, as_of, n_exp, floor_date, per_right)
+            # (syms, as_of, syms, as_of, n_exp, n_exp, floor_date, shallow_date, per_right)
             syms = set(params[0])
             as_of = params[1]
             n_exp = int(params[4])
-            floor_date = params[5]
-            per_right = int(params[6])
+            floor_date = params[6]
+            shallow_date = params[7]
+            per_right = int(params[8])
             # (option_ticker, underlying) — the catalogue's underlying, which for
             # an adjusted contract is not the ticker's root.
             picked: list[tuple[str, str]] = []
@@ -162,9 +165,14 @@ class _DailyCursor:
                 if spot is None:
                     continue
                 mine = [c for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of]
-                # erank <= n_exp OR expiry <= floor_date
+                # erank <= n_exp OR (expiry <= floor_date AND nth_expiry <= shallow_date)
                 listed = sorted({c[2] for c in mine})
-                expiries = sorted(set(listed[:n_exp]) | {e for e in listed if e <= floor_date})
+                nth = listed[n_exp - 1] if len(listed) >= n_exp else None
+                shallow = nth is not None and nth <= shallow_date
+                expiries = sorted(
+                    set(listed[:n_exp])
+                    | ({e for e in listed if e <= floor_date} if shallow else set())
+                )
                 for exp in expiries:
                     for right in ("C", "P"):
                         cands = [c for c in mine if c[2] == exp and c[0][-9] == right]
@@ -1965,26 +1973,68 @@ def test_a_name_with_too_few_expiries_still_gets_no_window() -> None:
     assert dmod.load_snapshot_windows(conn, ["THIN"], as_of=as_of, expiries=3, min_days=60) == {}
 
 
-def test_the_near_spot_ladder_leaves_the_queue_alone_by_default() -> None:
-    """option-bars enqueues one job per contract, not one per underlying.
+def test_the_floor_only_reaches_names_the_rank_rule_leaves_outside_brents_window() -> None:
+    """`shallow_dte` is what makes this affordable, and it has to be small.
 
-    It created 79,215 of the queue's 84,878 jobs in the 30-hour window measured
-    2026-09-25, so the same floor that costs eod-pipeline nothing would roughly
-    triple the busiest slot in the system. Off by default; the mechanism is
-    here so turning it on is a config change.
+    Research solves ATM IV from option_daily with Brent when a session's vendor
+    snapshot is judged degraded — 0.118.0 deletes the vendor rows on purpose, so
+    Brent is the only source there and it needs an expiry at 5-90 DTE. Measured
+    2026-09-26 over 678 names: 610 already have a usable window, 68 do not, and
+    the weekly ones among those are the thirteen largest names in the market.
+
+    Their third listed expiry is 4-5 days out (MU 7), then nothing until PLTR at
+    14 and VRSN at 84 — so at 7 the gate selects exactly those and the 7->14 gap
+    means it is not a knife-edge. Measured with the shipped SQL: 80,374 -> 86,130
+    jobs (+7.2%), against 156,798 (x1.95) for every weekly name.
     """
     from bifrost_market_data.scheduler import daily as dmod
 
     as_of = date(2026, 9, 25)
-    contracts = _weekly_chain("AMD", as_of + timedelta(days=1), 20)
-    conn = _DailyConn(option_contracts=contracts, spots={"AMD": 100.0})
-    default = dmod.load_option_tickers_near_spot(conn, ["AMD"], as_of=as_of, expiries=3)
-    conn = _DailyConn(option_contracts=contracts, spots={"AMD": 100.0})
-    floored = dmod.load_option_tickers_near_spot(
-        conn, ["AMD"], as_of=as_of, expiries=3, min_days=60
+    # A daily-expiry name: third listed expiry is 4 days out.
+    shallow = [
+        (f"O:SPY{i:06d}C00100000", "SPY", as_of + timedelta(days=d), 100.0)
+        for i, d in enumerate((0, 2, 4, 7, 11, 18, 25, 32, 60, 88))
+    ]
+    # A weekly name that already reaches the window: third expiry is 14 days out.
+    deep = [
+        (f"O:PLTR{i:06d}C00100000", "PLTR", as_of + timedelta(days=d), 100.0)
+        for i, d in enumerate((0, 7, 14, 21, 28, 56, 84))
+    ]
+    conn = _DailyConn(option_contracts=shallow + deep, spots={"SPY": 100.0, "PLTR": 100.0})
+    picked = dmod.load_option_tickers_near_spot(
+        conn, ["SPY", "PLTR"], as_of=as_of, expiries=3, min_days=60, shallow_dte=7
     )
-    assert len(default) == 3, "three expiries, one call contract each"
-    assert len(floored) > len(default), "the floor is wired through and does widen the ladder"
+    by = collections.Counter(u for _t, u in picked)
+    assert by["SPY"] > 3, "the shallow name gains the expiries inside the floor"
+    assert by["PLTR"] == 3, "a name whose third expiry already reaches the window must not move"
+
+
+def test_the_floor_is_off_for_everyone_when_the_gate_is_zero() -> None:
+    """`shallow_dte: 0` means no underlying qualifies — off for all, not on for all."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    contracts = [
+        (f"O:SPY{i:06d}C00100000", "SPY", as_of + timedelta(days=d), 100.0)
+        for i, d in enumerate((0, 2, 4, 7, 11, 18, 25))
+    ]
+    conn = _DailyConn(option_contracts=contracts, spots={"SPY": 100.0})
+    picked = dmod.load_option_tickers_near_spot(
+        conn, ["SPY"], as_of=as_of, expiries=3, min_days=60, shallow_dte=0
+    )
+    assert len(picked) == 3, "gate closed, so the rank rule alone"
+
+
+def test_the_gate_reads_its_threshold_from_the_slot_config() -> None:
+    """A number this consequential must not be hard-coded in the scheduler."""
+    import yaml
+
+    cfg = yaml.safe_load(Path(__file__).resolve().parents[1].joinpath("config/schedule.yaml").read_text())
+    ob = cfg["scheduler"]["slots"]["option-bars"]
+    assert ob["min_days"] == 60 and ob["shallow_dte"] == 7
+    # eod-pipeline floors every windowed name: one job per underlying either way.
+    assert cfg["scheduler"]["slots"]["eod-pipeline"]["min_days"] == 60
+    assert "shallow_dte" not in cfg["scheduler"]["slots"]["eod-pipeline"]
 
 
 def test_intraday_rows_do_not_count_as_the_eod_snapshot() -> None:

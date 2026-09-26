@@ -19,7 +19,7 @@ import yaml
 
 from bifrost_market_data.logging_setup import configure_logging
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
-from bifrost_market_data.ingest.index_options import storage_underlying
+from bifrost_market_data.ingest.index_options import is_index_option_underlying, storage_underlying
 from bifrost_market_data.ingest.sec_filings import (
     VOID_8K,
     filings_since,
@@ -446,6 +446,50 @@ ORDER BY CASE tier WHEN 'resident' THEN 0 WHEN 'core' THEN 1 ELSE 2 END, symbol
 #: Added to the slot's base priority so a resident name is claimed before a
 #: core name, and both before an edge name or the standing backfill.
 TIER_PRIORITY_BUMP = {"resident": 3, "core": 2, "edge": 1}
+
+
+def latest_hourly_bar_days(
+    conn: Any,
+    symbols: list[str],
+    *,
+    since: date,
+) -> dict[str, date] | None:
+    """Symbol → the New York session of its newest 1-hour bar at or after ``since``.
+
+    One index probe per symbol (``stock_minute_symbol_period_time``). The date is
+    New York's, not UTC's: a 19:00 ET post-market bar is 00:00 UTC the next day
+    in winter, and reading the UTC date would skip a session. None when the
+    lookup fails — the caller then asks for the whole window, which the
+    vendor answers and the upsert dedups.
+    """
+    if not symbols:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.symbol,
+                       (SELECT max(m.bar_time) FROM raw_market.stock_minute m
+                        WHERE m.symbol = u.symbol AND m.period = '1 hour'
+                          AND m.bar_time >= %s) AS last_bar
+                FROM unnest(%s::text[]) AS u(symbol)
+                """,
+                (datetime.combine(since, datetime.min.time(), tzinfo=_NY), list(symbols)),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — ask for the whole window instead
+        logger.warning("latest 1-hour bars unreadable; hourly universe asks for the window: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    out: dict[str, date] = {}
+    for row in rows or []:
+        sym, last = (row.get("symbol"), row.get("last_bar")) if isinstance(row, Mapping) else (row[0], row[1])
+        if sym and isinstance(last, datetime):
+            out[str(sym)] = last.astimezone(_NY).date()
+    return out
 
 
 def load_research_universe(conn: Any) -> list[dict[str, Any]]:
@@ -979,6 +1023,7 @@ def load_option_tickers_near_spot(
     expiries: int = 3,
     strikes_each_side: int = 10,
     min_days: int = 0,
+    shallow_dte: int = 0,
 ) -> list[tuple[str, str]]:
     """Contracts around the money: the next ``expiries`` expiries per underlying
     — plus, when ``min_days`` is set, every expiry inside that many days —
@@ -986,11 +1031,35 @@ def load_option_tickers_near_spot(
     latest close. The old selection took the lowest strikes of the nearest
     expiry — for a $230 stock that was C50…C105 expiring that day.
 
-    ``min_days`` is the same floor ``load_snapshot_windows`` applies and exists
-    for the same reason, but it is far from free here: this slot enqueues one
-    job per contract, and its 79,215 jobs in the 30-hour window measured
-    2026-09-25 were 93% of the whole queue. A weekly name goes from 3 expiries
-    to 10-12, so the floor roughly triples it. Left at 0 it changes nothing.
+    ``min_days`` is the same floor ``load_snapshot_windows`` applies, but it is
+    far from free here: this slot enqueues one job per contract, and its 79,215
+    jobs in the 30-hour window measured 2026-09-25 were 93% of the whole queue.
+    Applied to every weekly name it measured 80,320 -> 156,798 jobs, which also
+    pushes the nightly drain from 23:07 to about 00:10 UTC and into the 00:45
+    self-heal. That is why it is not simply switched on.
+
+    ``shallow_dte`` is what makes it affordable: the floor applies only to
+    underlyings whose ``expiries``-th listed expiry is fewer than that many days
+    out. Everything it buys for the rest is marginal, because the point of the
+    floor here is not depth for its own sake -- it is that Research solves ATM IV
+    from ``option_daily`` with Brent when a session's vendor snapshot is judged
+    degraded (research 0.118.0 deletes the vendor rows on purpose, so Brent is
+    the only source left there). That solve needs an expiry at 5-90 DTE, and the
+    near-spot ladder already buys 21 strikes per right per expiry, so any expiry
+    inside the window satisfies its "two near-money contracts, both sides"
+    requirement by construction.
+
+    Measured 2026-09-25/26 across the 678-name universe: 610 underlyings already
+    have a usable Brent window and 68 do not, and of those the weekly ones are
+    the thirteen largest names in the market -- AAPL AMZN AMD AVGO GOOGL INTC
+    META MSFT NVDA TSLA plus SPY QQQ IWM -- empty on 14 of 14 sessions. Their
+    third listed expiry is 4-5 days out; PLTR's is 14 and it is fine, VRSN's is
+    84 and it must not move. So the discriminator is a *small* threshold, not
+    the floor itself: at 7 days it selects those names and nobody else.
+
+    SPX is in that set and ``shallow_dte`` cannot help it -- it has no
+    ``stock_daily`` close, so the spot join below drops it entirely. That one
+    needs index closes, which is a separate decision.
 
     Underlyings without a close in ``stock_daily`` (index roots such as SPX on
     a plan without index levels) are skipped.
@@ -1010,6 +1079,10 @@ def load_option_tickers_near_spot(
     # No future expiry can satisfy a bound in the past, so with the floor off
     # the extra predicate selects nothing and the rule is the rank alone.
     floor_date = as_of + timedelta(days=floor_days) if floor_days else as_of - timedelta(days=1)
+    # Same trick for the shallow gate: 0 means "no underlying qualifies", which
+    # leaves the floor switched off for everyone rather than on for everyone.
+    shallow_days = max(0, int(shallow_dte))
+    shallow_date = as_of + timedelta(days=shallow_days) if shallow_days else as_of - timedelta(days=1)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1029,6 +1102,12 @@ def load_option_tickers_near_spot(
                 WHERE underlying = ANY(%s) AND expiry >= %s
               ) d
             ),
+            nth AS (
+              -- The `expiries`-th listed expiry per underlying. Its distance is
+              -- what says whether the rank rule already reaches Brent's window.
+              SELECT underlying, min(expiry) AS nth_expiry FROM exp
+              WHERE erank = %s GROUP BY 1
+            ),
             ranked AS (
               SELECT c.option_ticker, c.underlying,
                      ROW_NUMBER() OVER (
@@ -1038,12 +1117,14 @@ def load_option_tickers_near_spot(
               FROM raw_market.option_contract c
               JOIN spot s ON s.symbol = c.underlying
               JOIN exp e ON e.underlying = c.underlying AND e.expiry = c.expiry
-              WHERE e.erank <= %s OR e.expiry <= %s
+              JOIN nth n ON n.underlying = c.underlying
+              WHERE e.erank <= %s
+                 OR (e.expiry <= %s AND n.nth_expiry <= %s)
             )
             SELECT option_ticker, underlying FROM ranked WHERE srank <= %s
             ORDER BY option_ticker
             """,
-            (syms, as_of, syms, as_of, n_exp, floor_date, per_right),
+            (syms, as_of, syms, as_of, n_exp, n_exp, floor_date, shallow_date, per_right),
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     out: list[tuple[str, str]] = []
@@ -1728,6 +1809,7 @@ def enqueue_slot(
             expiries=int(scfg.get("expiries") or 3),
             strikes_each_side=int(scfg.get("strikes_each_side") or 10),
             min_days=int(scfg.get("min_days") or 0),
+            shallow_dte=int(scfg.get("shallow_dte") or 0),
         )
         # The contracts the Owner holds or closed recently, wherever they sit
         # relative to spot. Without this a leg that drifted 30% away stops getting
@@ -1767,6 +1849,36 @@ def enqueue_slot(
                         "to": day_s,
                         "multiplier": multiplier,
                         "timespan": timespan,
+                    },
+                )
+        # Research settles every forecast session hour by hour against the
+        # session's 1-hour bars; the watchlist carried them for 18 of the 678
+        # names it forecasts, so the rest were judged on the close alone.
+        # `hourly_universe: research` adds the 1-hour bars (only) for every
+        # other universe stock, each from the session after its newest bar —
+        # or `hourly_backfill_days` back when it has none — so the first run
+        # fills the history and a missed night is picked up by the next.
+        if str(scfg.get("hourly_universe") or "").lower() == "research":
+            listed = set(symbols)
+            names = [
+                u["symbol"]
+                for u in load_research_universe(conn)
+                if u["symbol"] not in listed and not is_index_option_underlying(u["symbol"])
+            ]
+            since = day - timedelta(days=int(scfg.get("hourly_backfill_days") or 100))
+            last = latest_hourly_bar_days(conn, names, since=since) or {}
+            for sym in names:
+                start = max(since, last[sym] + timedelta(days=1)) if sym in last else since
+                if start > day:
+                    continue
+                _add(
+                    "stock_minute",
+                    {
+                        "symbol": sym,
+                        "from": start.isoformat(),
+                        "to": day_s,
+                        "multiplier": 1,
+                        "timespan": "hour",
                     },
                 )
         # Option minute bars: rotate a bounded batch of at-the-money contracts.
