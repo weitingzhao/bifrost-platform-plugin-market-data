@@ -156,6 +156,20 @@ def test_chain_latest_takes_its_materialised_path_when_the_view_is_there() -> No
         assert not BAD_SCHEMA.search(statement), statement
 
 
+def test_chain_latest_ib_keys_do_not_join_the_view() -> None:
+    conn = _ResolvingConn([])
+    opt._fetch_chain_latest(conn, ["NVDA|OPT|20261120|245.0|C"])
+    sql = _query_sql(conn)
+    # The Polygon branch filters the view on its DISTINCT ON column with a
+    # constant, which is pushed down; an IB key only becomes a ticker after the
+    # join, and a join cannot be pushed into the view (4.1 s against 2.2 ms for
+    # 20 AAPL contracts on 2026-09-26).
+    assert any("JOIN raw_market.option_snapshot s" in s and "DISTINCT ON (oc.option_ticker)" in s for s in sql)
+    assert not any("v_option_chain_latest" in s for s in sql)
+    for statement in sql:
+        assert not BAD_SCHEMA.search(statement), statement
+
+
 def test_chain_by_expiry_reads_each_contract_through_its_key() -> None:
     conn = _ResolvingConn([])
     result = cbe.query_chain_by_expiry(conn, symbol="NVDA")

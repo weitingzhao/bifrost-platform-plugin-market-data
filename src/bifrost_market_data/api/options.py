@@ -617,26 +617,23 @@ def _fetch_chain_latest(conn: Any, keys: List[str]) -> List[Dict[str, Any]]:
             ib_params = (underlyings, expiries, rights, strikes, ib_keys)
             select_ib = _CHAIN_SELECT + ",\n    req.ib_key AS _req_ib_key"
 
-            if use_view:
-                cur.execute(
-                    f"""
-                    SELECT {select_ib}
-                    {_IB_CONTRACT_JOIN}
-                    JOIN raw_market.v_option_chain_latest s ON s.option_ticker = oc.option_ticker
-                    """,
-                    ib_params,
-                )
-            else:
-                cur.execute(
-                    f"""
-                    SELECT DISTINCT ON (oc.option_ticker)
-                        {select_ib}
-                    {_IB_CONTRACT_JOIN}
-                    JOIN raw_market.option_snapshot s ON s.option_ticker = oc.option_ticker
-                    ORDER BY oc.option_ticker, s.snapshot_ts DESC
-                    """,
-                    ib_params,
-                )
+            # Not through the view, whatever ``use_view`` says. The Polygon branch
+            # above filters the view on its DISTINCT ON column with a constant
+            # array, which the planner pushes inside; here the tickers only exist
+            # after the join, and a join condition cannot be pushed into a
+            # DISTINCT ON over all of option_snapshot. Measured 2026-09-26 on 20
+            # AAPL contracts: 4.1 s and ~123k temp pages through the view, 2.2 ms
+            # this way, the same 20 rows. IB keys are what trade-api sends.
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (oc.option_ticker)
+                    {select_ib}
+                {_IB_CONTRACT_JOIN}
+                JOIN raw_market.option_snapshot s ON s.option_ticker = oc.option_ticker
+                ORDER BY oc.option_ticker, s.snapshot_ts DESC
+                """,
+                ib_params,
+            )
             for r in cur.fetchall() or []:
                 d = dict(r) if isinstance(r, Mapping) else _tuple_to_chain_dict(r, has_ib_key=True)
                 rows.append(d)
