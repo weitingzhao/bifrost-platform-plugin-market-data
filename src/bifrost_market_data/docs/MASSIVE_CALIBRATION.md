@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.8
+version: 2026-09-26.9
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -1031,7 +1031,7 @@ option_daily 3,860 万行的 `option_ticker` 0 个不规范。输入统一走 `n
 读 556,959 与 556,863 页，全部来自磁盘），裸列只少一个逐行算 `upper(trim())` 的节点；开 `track_io_timing` 复测，
 裸列 3.56 s（I/O 8.2 s）对包装 3.50 s（I/O 7.3 s）。磁盘带宽决定的全扫上两种写法一样快，那 3 秒是 I/O 抖动。
 **判读 A/B 先比执行计划与 buffers，再看耗时**——计划与页数相同而耗时不同，说明的是机器，不是写法。
-新棘轮 `test_no_sql_string_wraps_a_column_at_all` 用 AST 取出全部非文档字符串，只放行 `_analytics_metric_summary`；
+新棘轮 `test_no_sql_string_wraps_a_column_at_all` 用 AST 取出全部非文档字符串，只放行 `_analytics_metric_summary`（0.41.10 起不再放行任何一处）；
 拿 HEAD 源码反向跑，拦下这次改的 9 条 SQL。
 
 **0.41.8：`/stocks/fundamentals/db/short-volume` 从来没答对过。** 冒烟 0.41.5 时它返回 500：`invalid input syntax for type bigint: "6485654.248821"`。
@@ -1067,6 +1067,14 @@ AAPL/MSFT 约 0.3 s、NVDA 约 1.4 s、SPY 约 1.9 s——10.4 s 是冷缓存的
 攒满后预计慢 3–4.5 倍，SPY 热缓存约 8 s；按 08-14 起算约在 12 月底攒满。
 **届时的正解**是在 EOD 流水线里写一张「每个标的每天的 put/call 成交量」小表，读取只剩几十行——新增表，属架构决定，待 Owner。
 覆盖索引 `(underlying, snapshot_ts) INCLUDE (option_ticker, day_volume)` 也可行，但要在一张仍在长的 1.4 GB 表上加一个大索引，收益未测，不作首选。
+
+**0.41.10：最后一处包装也去掉，棘轮不再放行任何一处。** `_analytics_metric_summary` 读 Research 的四张 `features.option_metric_*` 表，
+各有 `(symbol, trade_date…)` 打头的索引、656–658 个 symbol 全部干净；交替实测 atm_iv 0.72–0.84 s → 0.26–0.30 s、iv_percentile 0.18–0.20 s → 0.06 s，结果相同。
+
+**`readiness/bar-aggregate?summary=true`：查过，不改——没有调用方。** 冒烟时的 5.6 s 是本会话自己打的；库内冷 6.5 s、热 2.2–2.3 s，
+代价是 420 天窗口约 345 万行的一次全扫（行数、空值数与 distinct 都要它）。Console 的 `fetchReadinessBarAggregate` 与 trade-api 的
+`fetch_readiness_bar_aggregate` 都无人调用，插件日志 24 小时 0 次；readiness summary 在进程内用的是非汇总版（后台缓存，0.62 s）。
+删掉这条路由和两处客户端函数是跨三个仓库的公开接口变更，待 Owner。
 
 ### 其余三条
 

@@ -61,9 +61,9 @@ def test_no_wrapped_symbol_comparison_anywhere() -> None:
     )
 
 
-#: The one wrapper left on purpose: it reads ``features.*``, Research's tables,
-#: whose symbol columns were not checked.
-ALLOWED_WRAPPED_SQL = {("api/coverage.py", "_analytics_metric_summary")}
+#: None left. The last one read Research's features.option_metric_* tables and
+#: went once their symbols were checked (2026-09-26).
+ALLOWED_WRAPPED_SQL: set[tuple[str, str]] = set()
 
 
 def _docstring_ids(tree: ast.AST) -> set[int]:

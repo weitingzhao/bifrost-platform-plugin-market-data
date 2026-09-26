@@ -36,7 +36,10 @@ router = APIRouter(prefix="/coverage", tags=["coverage"])
 # distinct values through those indexes on 2026-09-26 found none that differ
 # from their UPPER(TRIM()) form — 665 option_contract, 658 option_snapshot, 660
 # option_daily underlyings, 20,836 stock_daily symbols — because ingest writes
-# them normalised. Inputs go through ``normalize_symbol`` instead.
+# them normalised. Inputs go through ``normalize_symbol`` instead. The same
+# holds for Research's four features.option_metric_* tables read below: 656-658
+# symbols each, none unnormalised, and the bare count 0.26s against 0.72-0.84s
+# on atm_iv (2026-09-26).
 
 _RECENT_SNAPSHOT_DAYS = 7
 _RECENT_BAR_DAYS = 7
@@ -60,7 +63,7 @@ def _analytics_metric_summary(conn: Any, legacy_table: str) -> dict[str, Any] | 
             cur.execute(
                 f"""
                 SELECT
-                    COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint AS symbols,
+                    COUNT(DISTINCT symbol)::bigint AS symbols,
                     COUNT(DISTINCT trade_date)::bigint AS days,
                     MAX(trade_date) AS latest
                 FROM features.{canonical}

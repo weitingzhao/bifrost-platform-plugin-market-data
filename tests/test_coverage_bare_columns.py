@@ -73,10 +73,7 @@ def _code_without_comments(text: str) -> str:
 
 def test_coverage_wraps_no_raw_market_column() -> None:
     body = _code_without_comments(inspect.getsource(coverage))
-    sites = [m.start() for m in re.finditer(r"UPPER\(TRIM\(", body)]
-    # The one left reads features.* — Research's tables, not verified here.
-    assert len(sites) == 1
-    assert "UPPER(TRIM(" in inspect.getsource(coverage._analytics_metric_summary)
+    assert not re.search(r"UPPER\(TRIM\(", body)
 
 
 @pytest.mark.parametrize(
