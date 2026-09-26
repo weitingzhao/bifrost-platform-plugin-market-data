@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.1
+version: 2026-09-26.2
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -952,8 +952,7 @@ platform-api 的 rollup 在这个形状上会整块丢掉 KPI，这正是「还�
 （`stock_daily (symbol, bar_date)`、`option_open_interest (underlying, trade_date)`、
 `corporate_action (symbol, ex_date)`）。这三条已改成比裸列。
 列值本身早就是规范化的（2026-09-08 实测 `underlying <> UPPER(TRIM(underlying))` 返回 0）。
-但在**全表聚合**上这个包装无害，去掉反而更慢（2026-09-09 实测 401 秒 vs 151 秒），因为两种写法都要读全表。
-**包装只在能走索引探针的地方有害。**
+~~但在**全表聚合**上这个包装无害，去掉反而更慢（2026-09-09 实测 401 秒 vs 151 秒）~~ —— **2026-09-26 实测推翻，见下文 0.41.4**。
 
 **更正（2026-09-26，0.41.2）：上面那句「三张表都有以该列打头的索引」有一张是错的。**
 `stock_daily` 与 `corporate_action` 确实有；`option_open_interest` 在库里**只有主键
@@ -978,6 +977,25 @@ platform-api 的 rollup 在这个形状上会整块丢掉 KPI，这正是「还�
 （任何页面都有，不只是 Readiness），Readiness 面板自己每 60 秒一份，502 时 React Query 还会重试一次。
 0.39.0 起这些请求全部落在缓存上：2026-09-26 实测 15 小时里 prod platform-api 919 次、本机经 apiserver 代理 547 次，
 每次 6–20 ms，后台每 10 分钟最多一份 32.5 秒的 join。
+
+**0.41.4：coverage.py 里的包装全部拿掉，「整表聚合上去掉更慢」这条也不成立。**
+先干读前提：四列的不同值经索引逐个枚举（不扫表），`option_contract` 665、`option_snapshot` 658、`option_daily` 660 个 underlying，
+`stock_daily` 20,836 个 symbol，**没有一个与它的 `UPPER(TRIM())` 形式不同**；四张表及其全部分区都有以该列打头的索引。
+交替实测（先包装、后裸列、再反过来）：
+
+| 读法 | 包装 | 裸列 |
+|---|---|---|
+| `option_contract` 整表 `COUNT(DISTINCT)` | 515–546 ms，顺序扫 + 21 MB 落盘排序 | 80–390 ms，Index Only Scan，无排序 |
+| `option_open_interest` 整表 `COUNT(DISTINCT)` | 2.5–2.7 s，109 MB 落盘排序 | 0.52–0.57 s |
+| `stock_daily` 整表 `COUNT(DISTINCT)` | 13.8 s / 9.0 s，270 MB 落盘排序 | 10.9 s（冷）/ 3.7 s（热） |
+| bars-gap（AAPL，30 天） | 6.8 s，187,065 页 | 13 ms，530 页 |
+| bar-quality 汇总（AAPL） | 1.7 s，184,782 页 | 4 ms，314 页 |
+| snapshots-gap（AAPL，7 天） | 1.5 s，168,555 页 | 66 ms，2,202 页 |
+
+整表聚合上包装的代价不是「多算一次函数」，而是**让规划器放弃按索引顺序读**：裸列可以 Index Only Scan 且输入已排好序，
+包装后只能顺序扫再排序，排序还要落盘。当年的 401 秒多半是冷缓存排在第二个跑。
+唯一留下的一处读 `features.*`（Research 的表，本次未核其列值）。其余文件还有 42 处带包装的等值谓词，
+`tests/test_coverage_bare_columns.py` 以 42 为上限只许下降。
 
 ### 其余三条
 
@@ -1115,7 +1133,7 @@ default 也不会再收到新行（今天的 bar 有自己的分区），所以�
 | `/market/readiness/summary` | 81 秒 | 502，Readiness 页拿不到数 | 同上；后台无网关，两条子查询拿到 600 秒预算，不再靠降级返回 |
 
 **不是把查询变快，而是不让读的人等。** 存量口径本来就快不了：inventory 最宽的一条是对 1,363 万行 `stock_daily` 做一次全表 distinct 计数，
-2026-09-09 实测 151 秒，而**去掉 `UPPER(TRIM())` 反而更慢**（401 秒，两种写法都要读全表），所以谓词不是问题。
+2026-09-09 实测 151 秒。（当时记的「去掉 `UPPER(TRIM())` 反而更慢，401 秒」2026-09-26 已被交替实测推翻，见 §2t 的 0.41.4。）
 共用实现在 `api/slow_cache.py`：立刻回上一次的答案、后台重算、明说年龄与"是否有更新的在路上"，同一个 key 同时只跑一次。
 
 配套改了 Console 一处判断：**"还在数"不等于"数完了是零"**。之前 inventory 取不到数时六个产品全判 blocked，

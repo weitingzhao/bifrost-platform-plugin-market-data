@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/coverage", tags=["coverage"])
 
+# Every ``raw_market`` symbol column here is compared and grouped bare. Each
+# table carries an index leading with that column, and ``UPPER(TRIM(col))`` hid
+# it from the planner: a point question became a scan of the whole table or of
+# every partition in range, and a whole-table count gave up an index-only scan
+# for a sort that spilled to disk. The wrapper bought nothing: enumerating the
+# distinct values through those indexes on 2026-09-26 found none that differ
+# from their UPPER(TRIM()) form — 665 option_contract, 658 option_snapshot, 660
+# option_daily underlyings, 20,836 stock_daily symbols — because ingest writes
+# them normalised. Inputs go through ``normalize_symbol`` instead.
+
 _RECENT_SNAPSHOT_DAYS = 7
 _RECENT_BAR_DAYS = 7
 
@@ -89,8 +99,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 cur.execute("SELECT COUNT(*)::bigint FROM raw_market.stock_daily")
                 total_row = cur.fetchone()
                 cur.execute(
-                    "SELECT COUNT(DISTINCT UPPER(TRIM(symbol)))::bigint "
-                    "FROM raw_market.stock_daily"
+                    "SELECT COUNT(DISTINCT symbol)::bigint FROM raw_market.stock_daily"
                 )
                 sym_row = cur.fetchone()
             if bounds or total_row or sym_row:
@@ -126,7 +135,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT
-                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS underlyings,
+                        COUNT(DISTINCT underlying)::bigint AS underlyings,
                         COUNT(*)::bigint AS total_contracts,
                         COUNT(DISTINCT expiry)::bigint AS total_expiries
                     FROM raw_market.option_contract
@@ -148,7 +157,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT
-                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
+                        COUNT(DISTINCT underlying)::bigint AS symbols,
                         MAX(snapshot_ts)::date AS latest
                     FROM raw_market.option_snapshot
                     """
@@ -168,7 +177,7 @@ def query_inventory(conn: Any) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT
-                        COUNT(DISTINCT UPPER(TRIM(underlying)))::bigint AS symbols,
+                        COUNT(DISTINCT underlying)::bigint AS symbols,
                         MAX(trade_date) AS latest
                     FROM raw_market.option_open_interest
                     """
@@ -285,20 +294,24 @@ def query_watchlist_coverage(conn: Any, *, limit: int = 80) -> dict[str, Any]:
     syms, source = resolve_watchlist_with_source(conn, limit=limit)
     symbols_out: list[dict[str, Any]] = []
     if syms and table_exists(conn, "market", "option_contract"):
+        # Normalised here rather than trusted: the list can come from the
+        # platform union, its cache, a DB query or option_contract itself.
+        # Order is kept — the option_contract fallback ranks by contract count.
+        keys = list(dict.fromkeys(k for k in map(normalize_symbol, syms) if k))
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT
-                        UPPER(TRIM(underlying)) AS sym,
+                        underlying AS sym,
                         COUNT(*)::bigint AS contract_count,
                         COUNT(DISTINCT expiry)::bigint AS expiries,
                         MAX(updated_at) AS newest_contract_ts
                     FROM raw_market.option_contract
-                    WHERE UPPER(TRIM(underlying)) = ANY(%s)
-                    GROUP BY UPPER(TRIM(underlying))
+                    WHERE underlying = ANY(%s)
+                    GROUP BY underlying
                     """,
-                    (syms,),
+                    (keys,),
                 )
                 by_sym = {}
                 cols = ("symbol", "contract_count", "expiries", "newest_contract_ts")
@@ -306,7 +319,7 @@ def query_watchlist_coverage(conn: Any, *, limit: int = 80) -> dict[str, Any]:
                     d = row_dict(row, cols)
                     d["symbol"] = d.pop("sym", None) or (row[0] if row else None)
                     by_sym[str(d["symbol"]).upper()] = d
-            for sym in syms:
+            for sym in keys:
                 symbols_out.append(
                     by_sym.get(
                         sym,
@@ -338,13 +351,13 @@ def query_greeks_coverage(
     params: list[Any] = []
     sym = normalize_symbol(symbol) if symbol else None
     if sym:
-        clauses.append("UPPER(TRIM(underlying)) = %s")
+        clauses.append("underlying = %s")
         params.append(sym)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""
         WITH latest AS (
             SELECT DISTINCT ON (option_ticker)
-                UPPER(TRIM(underlying)) AS symbol,
+                underlying AS symbol,
                 iv, delta, gamma, theta, vega, snapshot_ts
             FROM raw_market.option_snapshot
             {where}
@@ -379,7 +392,7 @@ def query_contracts_coverage(conn: Any, *, limit: int = 100) -> dict[str, Any]:
         cur.execute(
             """
             SELECT
-                UPPER(TRIM(underlying)) AS symbol,
+                underlying AS symbol,
                 COUNT(*)::bigint AS contract_count,
                 COUNT(DISTINCT expiry)::bigint AS expiries,
                 COUNT(DISTINCT strike)::bigint AS strikes,
@@ -387,7 +400,7 @@ def query_contracts_coverage(conn: Any, *, limit: int = 100) -> dict[str, Any]:
                 MAX(expiry) AS max_expiry,
                 MAX(updated_at) AS newest_updated_at
             FROM raw_market.option_contract
-            GROUP BY UPPER(TRIM(underlying))
+            GROUP BY underlying
             ORDER BY contract_count DESC, symbol ASC
             LIMIT %s
             """,
@@ -430,7 +443,7 @@ def query_option_contracts_reference_gap(
                 exercise_style,
                 shares_per_contract
             FROM raw_market.option_contract
-            WHERE UPPER(TRIM(underlying)) = %s
+            WHERE underlying = %s
               AND (
                     TRIM(COALESCE(option_ticker, '')) = ''
                  OR expiry IS NULL
@@ -482,7 +495,7 @@ def query_option_snapshots_contracts_gap(
             WITH recent_snaps AS (
                 SELECT DISTINCT option_ticker
                 FROM raw_market.option_snapshot
-                WHERE UPPER(TRIM(underlying)) = %s
+                WHERE underlying = %s
                   AND snapshot_ts >= NOW() - (%s || ' days')::interval
             )
             SELECT
@@ -493,7 +506,7 @@ def query_option_snapshots_contracts_gap(
                 c.updated_at
             FROM raw_market.option_contract c
             LEFT JOIN recent_snaps s ON s.option_ticker = c.option_ticker
-            WHERE UPPER(TRIM(c.underlying)) = %s
+            WHERE c.underlying = %s
               AND s.option_ticker IS NULL
             ORDER BY c.expiry, c.strike, c.option_ticker
             LIMIT 500
@@ -504,7 +517,7 @@ def query_option_snapshots_contracts_gap(
         cur.execute(
             """
             SELECT COUNT(*)::bigint FROM raw_market.option_contract
-            WHERE UPPER(TRIM(underlying)) = %s
+            WHERE underlying = %s
             """,
             (sym,),
         )
@@ -540,7 +553,7 @@ def query_option_bars_contracts_gap(
             WITH recent_bars AS (
                 SELECT DISTINCT option_ticker
                 FROM raw_market.option_daily
-                WHERE UPPER(TRIM(underlying)) = %s
+                WHERE underlying = %s
                   AND bar_date >= CURRENT_DATE - (%s || ' days')::interval
             )
             SELECT
@@ -550,7 +563,7 @@ def query_option_bars_contracts_gap(
                 c.option_right
             FROM raw_market.option_contract c
             LEFT JOIN recent_bars b ON b.option_ticker = c.option_ticker
-            WHERE UPPER(TRIM(c.underlying)) = %s
+            WHERE c.underlying = %s
               AND b.option_ticker IS NULL
             ORDER BY c.expiry, c.strike, c.option_ticker
             LIMIT 500
@@ -588,7 +601,7 @@ def query_bar_quality_detail(
                 bar_date,
                 open, high, low, close, volume, vwap
             FROM raw_market.stock_daily
-            WHERE UPPER(TRIM(symbol)) = %s
+            WHERE symbol = %s
               AND bar_date >= CURRENT_DATE - (%s || ' days')::interval
             ORDER BY bar_date DESC
             """,
@@ -602,7 +615,7 @@ def query_bar_quality_detail(
                 MIN(bar_date),
                 MAX(bar_date)
             FROM raw_market.stock_daily
-            WHERE UPPER(TRIM(symbol)) = %s
+            WHERE symbol = %s
             """,
             (sym,),
         )
@@ -647,7 +660,7 @@ def query_snapshot_quality_detail(
                     DATE(timezone('America/New_York', snapshot_ts)) AS snap_day,
                     iv, delta, gamma, theta, vega, open_interest, day_close
                 FROM raw_market.option_snapshot
-                WHERE UPPER(TRIM(underlying)) = %s
+                WHERE underlying = %s
                   AND snapshot_ts >= NOW() - (%s || ' days')::interval
                 ORDER BY DATE(timezone('America/New_York', snapshot_ts)),
                          option_ticker,
@@ -709,7 +722,7 @@ def query_stock_day_gap(
                 """
                 SELECT bar_date
                 FROM raw_market.stock_daily
-                WHERE UPPER(TRIM(symbol)) = %s
+                WHERE symbol = %s
                   AND bar_date >= %s
                 """,
                 (sym, start),
@@ -781,11 +794,17 @@ def coverage_quality_score(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-#: The inventory's widest read is one full pass over 13.6M ``stock_daily`` rows
-#: to count distinct symbols: 151 seconds on 2026-09-09, against a 60-second API
-#: gateway. It cannot be made fast — writing the predicate without the
-#: ``UPPER(TRIM())`` wrapper measured *slower*, 401s, since either way every row
-#: is read — so the reader is served the last answer while the next is computed.
+#: The inventory's widest read is one full pass over ~14M ``stock_daily`` rows
+#: to count distinct symbols: 151 seconds on 2026-09-09 under backfill load,
+#: against a 60-second API gateway, so the reader is served the last answer
+#: while the next is computed.
+#:
+#: That entry once also said the bare column measured *slower* (401s). It does
+#: not: on 2026-09-26, alternated, the wrapped count was a sequential scan with a
+#: 270 MB on-disk sort (13.8s, 9.0s) and the bare one an index-only scan with no
+#: sort at all (10.9s cold, 3.7s warm). The same held on option_contract (534 ms
+#: against 86 ms) and option_open_interest (2.6s against 0.5s). The 401s was a
+#: cold cache read second, not the wrapper.
 INVENTORY_CACHE = BackgroundCache("inventory")
 #: No gateway sits in front of the background pass, so it gets a real budget.
 INVENTORY_STATEMENT_TIMEOUT = "600s"
@@ -895,7 +914,7 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(DISTINCT UPPER(TRIM(underlying)))::int,
+                SELECT COUNT(DISTINCT underlying)::int,
                        COUNT(*)::bigint,
                        MIN(expiry), MAX(expiry)
                 FROM raw_market.option_contract
@@ -920,7 +939,7 @@ def query_chain_headline(conn: Any) -> dict[str, Any]:
                 ),
                 latest AS (
                     SELECT DISTINCT ON (option_ticker)
-                        UPPER(TRIM(underlying)) AS symbol, delta, gamma, theta, vega
+                        underlying AS symbol, delta, gamma, theta, vega
                     FROM raw_market.option_snapshot s, bound b
                     WHERE (s.snapshot_ts AT TIME ZONE 'America/New_York')::date = b.d
                     ORDER BY option_ticker, snapshot_ts DESC
@@ -1151,10 +1170,10 @@ def query_distributions(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT UPPER(TRIM({sym_col})) AS symbol, COUNT(*)::bigint AS row_count
+            SELECT {sym_col} AS symbol, COUNT(*)::bigint AS row_count
             FROM {qualified}
-            WHERE TRIM(COALESCE({sym_col}, '')) <> ''
-            GROUP BY UPPER(TRIM({sym_col}))
+            WHERE {sym_col} <> ''
+            GROUP BY {sym_col}
             ORDER BY row_count DESC, symbol ASC
             LIMIT %s
             """,
