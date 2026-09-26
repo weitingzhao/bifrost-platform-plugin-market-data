@@ -14,7 +14,6 @@ from fastapi import APIRouter, Query
 from bifrost_market_data.api.deps import (
     normalize_symbol,
     require_db,
-    resolve_market_schema,
     table_exists,
 )
 
@@ -40,8 +39,8 @@ def query_chain_by_expiry(
 ) -> dict[str, Any]:
     """Aggregate OI + volume by expiry from option_contract + option_snapshot.
 
-    Tries v_option_chain_latest (materialized view) first, falls back to
-    LATERAL on option_snapshot, then option_open_interest as last resort.
+    The latest snapshot per contract, read by LATERAL on option_snapshot's
+    (option_ticker, snapshot_ts) key; option_open_interest as last resort.
     """
     sym = normalize_symbol(symbol)
     if not sym:
@@ -50,65 +49,42 @@ def query_chain_by_expiry(
         return {"ok": True, "symbol": sym, "chain": [], "basis": None}
 
     chain: list[dict[str, Any]] = []
-    basis: str | None = None
 
-    # Same fault as chain/eod and chain/latest: the relation moved to ``raw_market``,
-    # so a check naming ``market`` never matched and the LATERAL fallback ran every
-    # time. Both branches read the latest snapshot per ticker; only ``basis`` differs.
-    use_mv = resolve_market_schema(conn, "market", "v_option_chain_latest") is not None
-
+    # One contract at a time through the (option_ticker, snapshot_ts) key, not a
+    # join to ``v_option_chain_latest``. That view is a DISTINCT ON over the whole
+    # of option_snapshot and a join condition cannot be pushed into it, so every
+    # call sorted all 8M rows and spilled ~70k pages to disk: 8.9 s for AAPL on
+    # 2026-09-26 (24.6 s through the API) against 44 ms here. Both read the same
+    # latest snapshot per contract — AAPL's 38 expiries and VRSN's 5 matched row
+    # for row — so ``basis`` keeps its name.
+    basis: str | None = "option_snapshots_latest"
     with conn.cursor() as cur:
-        if use_mv:
-            basis = "option_snapshots_latest"
-            cur.execute(
-                """
-                SELECT oc.expiry,
-                       MAX(DATE(timezone('America/New_York', os.snapshot_ts))) AS snap_day,
-                       SUM(CASE WHEN oc.option_right = 'P'
-                           THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                       SUM(CASE WHEN oc.option_right = 'C'
-                           THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS call_oi,
-                       SUM(CASE WHEN oc.option_right = 'P'
-                           THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS put_vol,
-                       SUM(CASE WHEN oc.option_right = 'C'
-                           THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS call_vol
-                FROM raw_market.option_contract oc
-                LEFT JOIN raw_market.v_option_chain_latest os
-                  ON os.option_ticker = oc.option_ticker
-                WHERE oc.underlying = %s
-                GROUP BY oc.expiry
-                ORDER BY oc.expiry ASC
-                """,
-                (sym,),
-            )
-        else:
-            basis = "option_snapshots"
-            cur.execute(
-                """
-                SELECT oc.expiry,
-                       MAX(DATE(timezone('America/New_York', os.snapshot_ts))) AS snap_day,
-                       SUM(CASE WHEN oc.option_right = 'P'
-                           THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                       SUM(CASE WHEN oc.option_right = 'C'
-                           THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS call_oi,
-                       SUM(CASE WHEN oc.option_right = 'P'
-                           THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS put_vol,
-                       SUM(CASE WHEN oc.option_right = 'C'
-                           THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS call_vol
-                FROM raw_market.option_contract oc
-                LEFT JOIN LATERAL (
-                  SELECT open_interest, day_volume, snapshot_ts
-                  FROM raw_market.option_snapshot s
-                  WHERE s.option_ticker = oc.option_ticker
-                  ORDER BY s.snapshot_ts DESC
-                  LIMIT 1
-                ) os ON TRUE
-                WHERE oc.underlying = %s
-                GROUP BY oc.expiry
-                ORDER BY oc.expiry ASC
-                """,
-                (sym,),
-            )
+        cur.execute(
+            """
+            SELECT oc.expiry,
+                   MAX(DATE(timezone('America/New_York', os.snapshot_ts))) AS snap_day,
+                   SUM(CASE WHEN oc.option_right = 'P'
+                       THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS put_oi,
+                   SUM(CASE WHEN oc.option_right = 'C'
+                       THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS call_oi,
+                   SUM(CASE WHEN oc.option_right = 'P'
+                       THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS put_vol,
+                   SUM(CASE WHEN oc.option_right = 'C'
+                       THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS call_vol
+            FROM raw_market.option_contract oc
+            LEFT JOIN LATERAL (
+              SELECT open_interest, day_volume, snapshot_ts
+              FROM raw_market.option_snapshot s
+              WHERE s.option_ticker = oc.option_ticker
+              ORDER BY s.snapshot_ts DESC
+              LIMIT 1
+            ) os ON TRUE
+            WHERE oc.underlying = %s
+            GROUP BY oc.expiry
+            ORDER BY oc.expiry ASC
+            """,
+            (sym,),
+        )
 
         raw = cur.fetchall() or []
         for r in raw:

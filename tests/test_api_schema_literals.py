@@ -156,9 +156,15 @@ def test_chain_latest_takes_its_materialised_path_when_the_view_is_there() -> No
         assert not BAD_SCHEMA.search(statement), statement
 
 
-def test_chain_by_expiry_takes_its_materialised_path_too() -> None:
+def test_chain_by_expiry_reads_each_contract_through_its_key() -> None:
     conn = _ResolvingConn([])
     result = cbe.query_chain_by_expiry(conn, symbol="NVDA")
+    # Same latest snapshot per contract as the view, so the label stays; but the
+    # view is a DISTINCT ON over all of option_snapshot that a join cannot push
+    # into (8.9 s against 44 ms for AAPL on 2026-09-26), so it is not joined.
     assert result["basis"] == "option_snapshots_latest"
-    for statement in _query_sql(conn):
+    sql = _query_sql(conn)
+    assert any("LEFT JOIN LATERAL" in s and "raw_market.option_snapshot s" in s for s in sql)
+    assert not any("v_option_chain_latest" in s for s in sql)
+    for statement in sql:
         assert not BAD_SCHEMA.search(statement), statement
