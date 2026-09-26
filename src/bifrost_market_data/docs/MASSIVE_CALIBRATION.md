@@ -1,7 +1,7 @@
 ---
-version: 2026-09-25.7
-updated: 2026-09-25
-status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0）
+version: 2026-09-26.1
+updated: 2026-09-26
+status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
 
 # Massive 校准
@@ -954,6 +954,30 @@ platform-api 的 rollup 在这个形状上会整块丢掉 KPI，这正是「还�
 列值本身早就是规范化的（2026-09-08 实测 `underlying <> UPPER(TRIM(underlying))` 返回 0）。
 但在**全表聚合**上这个包装无害，去掉反而更慢（2026-09-09 实测 401 秒 vs 151 秒），因为两种写法都要读全表。
 **包装只在能走索引探针的地方有害。**
+
+**更正（2026-09-26，0.41.2）：上面那句「三张表都有以该列打头的索引」有一张是错的。**
+`stock_daily` 与 `corporate_action` 确实有；`option_open_interest` 在库里**只有主键
+`(option_ticker, trade_date)`**，父表和 18 个分区都一样。所以对它来说改裸列什么都没买到——
+同一条 `underlying = 'AAPL' AND trade_date = '2026-09-25'` 的计数，裸列 87 ms、包装 97 ms，
+两种写法都是对 9 月分区的并行全扫，各读 **41,224 页（约 322 MB）**；面板 40 个名字一轮就是约 13 GB。
+按到期日查的六条（`analytics` 与 Research 的 OI 历史）连日期条件都没有，分区都裁不掉，是整表扫。
+
+索引其实一直写在 `wave8_migrations` 里，三个，**从没存在过**：
+① 表一旦是分区表迁移就直接 `return`，之后没有任何一次运行会去补；
+② 唯一建表的那一次，旧表先被 rename 成 `_legacy`，**rename 不改索引名**，于是新表上的
+`CREATE INDEX IF NOT EXISTS` 撞名全部静默跳过，紧接着 `DROP TABLE _legacy` 把它们一起带走。
+集群上的主键叫 `option_open_interest_pkey1` 就是同一次撞名留下的指纹。
+0.41.2 把建索引挪到迁移最后、每种表状态都走，恢复有读者的两个：
+`(underlying, trade_date DESC)` 与 `(underlying, expiry, trade_date DESC)`；
+`(underlying, expiry, strike)` 没有任何查询按 strike 过滤、前缀又被后者覆盖，不再声明。
+
+**六份并发的调用方也要补一条**：常驻的那一份不是标签页，是 **Prometheus**。
+`bifrost-platform-prod` 的 ServiceMonitor 每 60 秒抓 `/metrics`，`PluginHealth` → `Status` →
+`probeReadinessRollup` → `snapshot-coverage`；探针只等 8 秒就放弃，而插件的同步端点不会因客户端断开取消查询，
+于是每分钟都留下一份 33–60 秒的 join。每个开着的 Console 标签页再经侧栏的 live probe **每 30 秒**一份
+（任何页面都有，不只是 Readiness），Readiness 面板自己每 60 秒一份，502 时 React Query 还会重试一次。
+0.39.0 起这些请求全部落在缓存上：2026-09-26 实测 15 小时里 prod platform-api 919 次、本机经 apiserver 代理 547 次，
+每次 6–20 ms，后台每 10 分钟最多一份 32.5 秒的 join。
 
 ### 其余三条
 

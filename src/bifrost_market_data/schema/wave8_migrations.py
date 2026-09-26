@@ -218,30 +218,39 @@ def _create_option_open_interest_partitioned(cur: _Cursor) -> None:
         ) PARTITION BY RANGE (trade_date)
         """
     )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_date
-        ON raw_market.option_open_interest (underlying, trade_date DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_strike
-        ON raw_market.option_open_interest (underlying, expiry, strike)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS option_oi_underlying_expiry_date
-        ON raw_market.option_open_interest (underlying, expiry, trade_date DESC)
-        """
-    )
+
+
+#: Every reader of this table filters on ``underlying`` — by trade date (the
+#: checklist probe, pcr, chain-by-expiry, doctor, quality, Research's pcr /
+#: max-pain / gex) or by expiry (analytics and Research's OI history, which
+#: carry no date bound and so could not even prune partitions). Without these
+#: each one was a sequential scan: measured 2026-09-26, one symbol's count for
+#: one session read all 41,224 pages of the September partition, with the
+#: column bare or wrapped alike.
+#:
+#: ``(underlying, expiry, strike)`` used to be declared beside them. Nothing
+#: filters on strike, and ``(underlying, expiry, trade_date)`` serves the same
+#: prefix, so it is not restored.
+OPTION_OI_INDEXES: tuple[tuple[str, str], ...] = (
+    ("option_oi_underlying_date", "(underlying, trade_date DESC)"),
+    ("option_oi_underlying_expiry_date", "(underlying, expiry, trade_date DESC)"),
+)
+
+
+def create_option_open_interest_indexes(cur: _Cursor) -> None:
+    """Ensure the ``underlying`` indexes on the partitioned table and all partitions.
+
+    On the parent, so every partition ``ensure_month_partitions`` adds later
+    inherits them.
+    """
+    for name, columns in OPTION_OI_INDEXES:
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS {name} ON raw_market.option_open_interest {columns}"
+        )
 
 
 def migrate_option_open_interest_partitioned(cur: _Cursor) -> None:
     relkind = _table_relkind(cur, "raw_market", "option_open_interest")
-    if relkind == "p":
-        return
     if relkind == "r":
         cur.execute(
             "ALTER TABLE raw_market.option_open_interest RENAME TO option_open_interest_legacy"
@@ -257,8 +266,15 @@ def migrate_option_open_interest_partitioned(cur: _Cursor) -> None:
             """
         )
         cur.execute("DROP TABLE raw_market.option_open_interest_legacy")
-        return
-    _create_option_open_interest_partitioned(cur)
+    elif relkind != "p":
+        _create_option_open_interest_partitioned(cur)
+    # Indexes last, and on every path including "already partitioned". A renamed
+    # table keeps its index names, so creating these while the legacy table
+    # still existed made ``IF NOT EXISTS`` skip every one of them, and the DROP
+    # then took them away — the cluster's primary key is ``_pkey1`` for the
+    # same reason. The early return for "p" meant no later run could notice:
+    # none of the three declared indexes existed on 2026-09-26.
+    create_option_open_interest_indexes(cur)
 
 
 def retire_data_ops_compat_schema(cur: _Cursor) -> None:
