@@ -17,6 +17,14 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Completed Jobs leave on a clock, not only when the next one pushes them
+      # out. `successfulJobsHistoryLimit: 3` above only prunes relative to newer
+      # runs of the same CronJob, so a CronJob that stops running freezes its
+      # last three forever: these have all been suspended since 2026-08-29
+      # (Dagster owns the batch) and their frozen history was still pinning
+      # `bifrost-market-data:0.9.0` in the registry 29 days later, which is what
+      # made those image tags undeletable. Seven days.
+      ttlSecondsAfterFinished: 604800
       backoffLimit: 3
       template:
         metadata:
