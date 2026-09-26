@@ -94,7 +94,7 @@ def query_option_daily(
     if not table_exists(conn, "market", "option_daily"):
         return {"ok": True, "symbol": sym, "rows": [], "count": 0}
 
-    clauses = ["UPPER(TRIM(underlying)) = %s"]
+    clauses = ["underlying = %s"]
     params: list[Any] = [sym]
 
     window: dict[str, str | None]
@@ -119,7 +119,7 @@ def query_option_daily(
         clauses.append("expiry = %s")
         params.append(expiry)
     if option_ticker:
-        clauses.append("UPPER(TRIM(option_ticker)) = %s")
+        clauses.append("option_ticker = %s")
         params.append(normalize_symbol(option_ticker))
     if strike is not None:
         # Strikes are numeric(…); compare with a tolerance rather than on equality
@@ -127,8 +127,8 @@ def query_option_daily(
         clauses.append("abs(strike - %s) < 1e-4")
         params.append(float(strike))
     if right is not None:
-        clauses.append("UPPER(TRIM(option_right)) = %s")
-        params.append(right)
+        clauses.append("option_right = %s")
+        params.append(str(right).strip().upper())
 
     params.append(min(limit, 5000))
 
@@ -193,7 +193,7 @@ def query_option_daily_available_dates(
             """
             SELECT DISTINCT bar_date
             FROM raw_market.option_daily
-            WHERE UPPER(TRIM(underlying)) = %s
+            WHERE underlying = %s
             ORDER BY bar_date DESC
             LIMIT %s
             """,

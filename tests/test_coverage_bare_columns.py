@@ -10,7 +10,6 @@ its ``UPPER(TRIM())`` form, so the wrapper bought nothing.
 from __future__ import annotations
 
 import inspect
-import pathlib
 import re
 from datetime import date
 from typing import Any, Self
@@ -18,14 +17,6 @@ from typing import Any, Self
 import pytest
 
 from bifrost_market_data.api import coverage
-
-SRC = pathlib.Path(coverage.__file__).resolve().parents[1]
-
-#: ``UPPER(TRIM(col)) = …`` / ``IN`` anywhere in the package. Only allowed to
-#: fall: the sites left are outside coverage.py and each needs its own check
-#: that the column is clean and indexed before it goes.
-WRAPPED_EQUALITY = re.compile(r"UPPER\(TRIM\(\s*[\w.{}]+\s*\)\)\s*(=|IN\b)", re.IGNORECASE)
-PACKAGE_BASELINE = 42
 
 
 class _Cursor:
@@ -86,17 +77,6 @@ def test_coverage_wraps_no_raw_market_column() -> None:
     # The one left reads features.* — Research's tables, not verified here.
     assert len(sites) == 1
     assert "UPPER(TRIM(" in inspect.getsource(coverage._analytics_metric_summary)
-
-
-def test_package_wrapped_equality_only_falls() -> None:
-    total = sum(
-        len(WRAPPED_EQUALITY.findall(path.read_text()))
-        for path in SRC.rglob("*.py")
-    )
-    assert total <= PACKAGE_BASELINE, (
-        f"{total} wrapped equality predicates (baseline {PACKAGE_BASELINE}); "
-        "compare the bare column and normalise the input instead"
-    )
 
 
 @pytest.mark.parametrize(

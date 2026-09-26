@@ -151,7 +151,9 @@ def test_option_ticker_filters_to_one_contract() -> None:
     conn = _Conn([DAILY_ROW])
     out = od.query_option_daily(conn, symbol="DDOG", option_ticker="o:ddog260731c00222500")
     sql, params = _reads(conn)[0]
-    assert "UPPER(TRIM(option_ticker)) = %s" in sql
+    # Bare, so the (option_ticker, bar_date) key can be probed; the input is
+    # what gets normalised.
+    assert "AND option_ticker = %s" in sql
     assert "O:DDOG260731C00222500" in params
     assert out["contract"]["option_ticker"] == "O:DDOG260731C00222500"
     assert out["count"] == 1
@@ -159,11 +161,11 @@ def test_option_ticker_filters_to_one_contract() -> None:
 
 def test_strike_and_right_filter_to_one_contract_too() -> None:
     conn = _Conn([DAILY_ROW])
-    od.query_option_daily(conn, symbol="DDOG", expiry="2026-07-31", strike=222.5, right="C")
+    od.query_option_daily(conn, symbol="DDOG", expiry="2026-07-31", strike=222.5, right="c")
     sql, params = _reads(conn)[0]
     # A strike the caller typed is compared with a tolerance, not by float equality.
     assert "abs(strike - %s) < 1e-4" in sql
-    assert "UPPER(TRIM(option_right)) = %s" in sql
+    assert "AND option_right = %s" in sql
     assert 222.5 in params and "C" in params
 
 

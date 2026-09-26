@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from bifrost_market_data.api.deps import (
     normalize_symbol,
+    normalize_symbols,
     require_db,
     row_dict,
     table_exists,
@@ -444,17 +445,17 @@ def query_bars_coverage(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT UPPER(TRIM(symbol)) AS sym,
+                SELECT symbol AS sym,
                        COUNT(*)::bigint AS cnt,
                        MIN(bar_date)::text AS min_day,
                        MAX(bar_date)::text AS max_day,
                        extract(epoch from MIN(bar_date)) AS min_ts,
                        extract(epoch from MAX(bar_date)) AS max_ts
                 FROM raw_market.stock_daily
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
-                GROUP BY UPPER(TRIM(symbol))
+                WHERE symbol = ANY(%s)
+                GROUP BY symbol
                 """,
-                ([s.upper() for s in symbols],),
+                (normalize_symbols(symbols),),
             )
             for row in cur.fetchall() or []:
                 sn = str(row[0]).strip().upper()
@@ -473,16 +474,16 @@ def query_bars_coverage(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT UPPER(TRIM(symbol)) AS sym, period,
+                SELECT symbol AS sym, period,
                        COUNT(*)::bigint AS cnt,
                        extract(epoch from MIN(bar_time)) AS min_ts,
                        extract(epoch from MAX(bar_time)) AS max_ts
                 FROM raw_market.stock_minute
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                WHERE symbol = ANY(%s)
                   AND period = ANY(%s)
-                GROUP BY UPPER(TRIM(symbol)), period
+                GROUP BY symbol, period
                 """,
-                ([s.upper() for s in symbols], db_periods),
+                (normalize_symbols(symbols), db_periods),
             )
             for row in cur.fetchall() or []:
                 sn = str(row[0]).strip().upper()

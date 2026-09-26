@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query
 from bifrost_market_data.api.deps import (
     iso_value,
     normalize_symbol,
+    normalize_symbols,
     require_db,
     table_exists,
 )
@@ -71,8 +72,9 @@ def query_financials_batch(
     """Batch-read financials rows grouped by symbol, returning raw jsonb data."""
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
 
-    clauses = ["UPPER(TRIM(symbol)) = ANY(%s)", "report_type = %s"]
+    clauses = ["symbol = ANY(%s)", "report_type = %s"]
     params: list[Any] = [symbols, report_type]
 
     if period_type:
@@ -86,7 +88,7 @@ def query_financials_batch(
             f"""
             SELECT * FROM (
                 SELECT
-                    UPPER(TRIM(symbol)) AS symbol,
+                    symbol,
                     report_type,
                     period_date,
                     period_type,
@@ -95,7 +97,7 @@ def query_financials_batch(
                     data,
                     fetched_at,
                     ROW_NUMBER() OVER (
-                        PARTITION BY UPPER(TRIM(symbol))
+                        PARTITION BY symbol
                         ORDER BY period_date DESC
                     ) AS rn
                 FROM raw_market.stock_financials
@@ -151,6 +153,7 @@ def query_income_rows_for_sepa(
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {"quarterly": [], "annual": []}
+    symbol = normalize_symbol(symbol)
 
     out: dict[str, list[dict[str, Any]]] = {"quarterly": [], "annual": []}
     with conn.cursor() as cur:
@@ -169,7 +172,7 @@ def query_income_rows_for_sepa(
                     period_date AS period_end,
                     data
                 FROM raw_market.stock_financials
-                WHERE UPPER(TRIM(symbol)) = %s
+                WHERE symbol = %s
                   AND report_type = 'income_statement'
                   AND lower(period_type) = %s
                 ORDER BY {order}
@@ -215,6 +218,7 @@ def query_financials_ext_batch(
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
 
     if max_rows_per_symbol is not None:
         with conn.cursor() as cur:
@@ -222,17 +226,17 @@ def query_financials_ext_batch(
                 """
                 SELECT * FROM (
                     SELECT
-                        UPPER(TRIM(symbol)) AS symbol,
+                        symbol,
                         fiscal_year,
                         fiscal_quarter,
                         period_date AS period_end,
                         data,
                         ROW_NUMBER() OVER (
-                            PARTITION BY UPPER(TRIM(symbol))
+                            PARTITION BY symbol
                             ORDER BY period_date DESC
                         ) AS rn
                     FROM raw_market.stock_financials
-                    WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                    WHERE symbol = ANY(%s)
                       AND report_type = %s
                       AND lower(period_type) = %s
                 ) ranked
@@ -247,13 +251,13 @@ def query_financials_ext_batch(
             cur.execute(
                 """
                 SELECT
-                    UPPER(TRIM(symbol)) AS symbol,
+                    symbol,
                     fiscal_year,
                     fiscal_quarter,
                     period_date AS period_end,
                     data
                 FROM raw_market.stock_financials
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                WHERE symbol = ANY(%s)
                   AND report_type = %s
                   AND lower(period_type) = %s
                 ORDER BY symbol, period_end ASC
@@ -282,18 +286,19 @@ def query_ratios_latest_batch(
     """Latest ratios row per symbol (DISTINCT ON)."""
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (UPPER(TRIM(symbol)))
-                UPPER(TRIM(symbol)) AS symbol,
+            SELECT DISTINCT ON (symbol)
+                symbol,
                 period_date AS date,
                 data
             FROM raw_market.stock_financials
-            WHERE UPPER(TRIM(symbol)) = ANY(%s)
+            WHERE symbol = ANY(%s)
               AND report_type = 'ratios'
-            ORDER BY UPPER(TRIM(symbol)), period_date DESC
+            ORDER BY symbol, period_date DESC
             """,
             (symbols,),
         )
@@ -319,21 +324,22 @@ def query_short_interest_latest_batch(
     """Latest N short-interest rows per symbol."""
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
 
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT * FROM (
                 SELECT
-                    UPPER(TRIM(symbol)) AS symbol,
+                    symbol,
                     period_date AS settlement_date,
                     data,
                     ROW_NUMBER() OVER (
-                        PARTITION BY UPPER(TRIM(symbol))
+                        PARTITION BY symbol
                         ORDER BY period_date DESC
                     ) AS rn
                 FROM raw_market.stock_financials
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                WHERE symbol = ANY(%s)
                   AND report_type = 'short_interest'
             ) ranked
             WHERE rn <= %s
@@ -371,21 +377,22 @@ def query_short_volume_recent_batch(
     """Latest N short-volume rows per symbol."""
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
 
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT * FROM (
                 SELECT
-                    UPPER(TRIM(symbol)) AS symbol,
+                    symbol,
                     period_date AS trade_date,
                     data,
                     ROW_NUMBER() OVER (
-                        PARTITION BY UPPER(TRIM(symbol))
+                        PARTITION BY symbol
                         ORDER BY period_date DESC
                     ) AS rn
                 FROM raw_market.stock_financials
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                WHERE symbol = ANY(%s)
                   AND report_type = 'short_volume'
             ) ranked
             WHERE rn <= %s

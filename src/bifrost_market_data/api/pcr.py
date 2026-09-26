@@ -58,9 +58,9 @@ def query_pcr_aggregate(
                 cur.execute(
                     """
                     SELECT trade_date::date AS trade_date,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('P', 'PUT')
+                           SUM(CASE WHEN option_right = 'P'
                                THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('C', 'CALL')
+                           SUM(CASE WHEN option_right = 'C'
                                THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS call_oi
                     FROM raw_market.option_open_interest
                     WHERE underlying = %s
@@ -95,16 +95,16 @@ def query_pcr_aggregate(
                       FROM raw_market.option_contract oc
                       INNER JOIN raw_market.option_snapshot os
                         ON os.option_ticker = oc.option_ticker
-                      WHERE UPPER(TRIM(oc.underlying)) = %s
+                      WHERE oc.underlying = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)
                       ORDER BY oc.option_ticker,
                                DATE(timezone('America/New_York', os.snapshot_ts)),
                                os.snapshot_ts DESC
                     )
                     SELECT trade_date,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('P', 'PUT')
+                           SUM(CASE WHEN option_right = 'P'
                                THEN open_interest ELSE 0 END)::bigint AS put_oi,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('C', 'CALL')
+                           SUM(CASE WHEN option_right = 'C'
                                THEN open_interest ELSE 0 END)::bigint AS call_oi
                     FROM snap
                     GROUP BY trade_date
@@ -138,16 +138,16 @@ def query_pcr_aggregate(
                       FROM raw_market.option_contract oc
                       INNER JOIN raw_market.option_snapshot os
                         ON os.option_ticker = oc.option_ticker
-                      WHERE UPPER(TRIM(oc.underlying)) = %s
+                      WHERE oc.underlying = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)
                       ORDER BY oc.option_ticker,
                                DATE(timezone('America/New_York', os.snapshot_ts)),
                                os.snapshot_ts DESC
                     )
                     SELECT trade_date,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('P', 'PUT')
+                           SUM(CASE WHEN option_right = 'P'
                                THEN day_volume ELSE 0 END)::bigint AS put_vol,
-                           SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('C', 'CALL')
+                           SUM(CASE WHEN option_right = 'C'
                                THEN day_volume ELSE 0 END)::bigint AS call_vol
                     FROM snap
                     GROUP BY trade_date

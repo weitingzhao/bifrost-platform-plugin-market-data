@@ -12,7 +12,13 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from bifrost_market_data.api.deps import connect_db, iso_value, require_db, table_exists
+from bifrost_market_data.api.deps import (
+    connect_db,
+    iso_value,
+    normalize_symbols,
+    require_db,
+    table_exists,
+)
 from bifrost_market_data.api.slow_cache import BackgroundCache
 
 logger = logging.getLogger(__name__)
@@ -148,29 +154,29 @@ def query_latest_bar_per_symbol(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT ON (UPPER(TRIM(symbol)))
-                    UPPER(TRIM(symbol)) AS symbol,
+                SELECT DISTINCT ON (symbol)
+                    symbol,
                     bar_date::text AS bar_date,
                     close
                 FROM raw_market.stock_daily
-                WHERE UPPER(TRIM(symbol)) = ANY(%s)
+                WHERE symbol = ANY(%s)
                   AND bar_date >= (CURRENT_DATE - %s)::date
-                ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
+                ORDER BY symbol, bar_date DESC NULLS LAST
                 """,
-                (symbols, lookback_days),
+                (normalize_symbols(symbols), lookback_days),
             )
             raw = cur.fetchall() or []
     else:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT ON (UPPER(TRIM(symbol)))
-                    UPPER(TRIM(symbol)) AS symbol,
+                SELECT DISTINCT ON (symbol)
+                    symbol,
                     bar_date::text AS bar_date,
                     close
                 FROM raw_market.stock_daily
                 WHERE bar_date >= (CURRENT_DATE - %s)::date
-                ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
+                ORDER BY symbol, bar_date DESC NULLS LAST
                 """,
                 (lookback_days,),
             )
@@ -203,15 +209,15 @@ def query_latest_bar_full_history(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (UPPER(TRIM(symbol)))
-                UPPER(TRIM(symbol)) AS symbol,
+            SELECT DISTINCT ON (symbol)
+                symbol,
                 bar_date::text AS bar_date,
                 close
             FROM raw_market.stock_daily
-            WHERE UPPER(TRIM(symbol)) = ANY(%s)
-            ORDER BY UPPER(TRIM(symbol)), bar_date DESC NULLS LAST
+            WHERE symbol = ANY(%s)
+            ORDER BY symbol, bar_date DESC NULLS LAST
             """,
-            (symbols,),
+            (normalize_symbols(symbols),),
         )
         raw = cur.fetchall() or []
 
@@ -350,8 +356,8 @@ def query_financials_fill_rate(
             universe_filter = ""
             params: list[Any] = [report_type]
             if universe_symbols:
-                universe_filter = "AND UPPER(TRIM(t.symbol)) = ANY(%s)"
-                params.append(universe_symbols)
+                universe_filter = "AND t.symbol = ANY(%s)"
+                params.append(normalize_symbols(universe_symbols))
 
             try:
                 cur.execute(
@@ -657,7 +663,7 @@ def query_snapshot_coverage(conn: Any) -> dict[str, Any]:
                     COUNT(u.symbol)::bigint AS universe_ticker_count
                 FROM raw_market.v_us_equity_universe u
                 LEFT JOIN raw_market.stock_snapshot s
-                    ON UPPER(TRIM(s.symbol)) = UPPER(TRIM(u.symbol))
+                    ON s.symbol = u.symbol
                    AND s.session_date = %s
                 GROUP BY COALESCE(u.instrument_type, 'UNKNOWN')
                 ORDER BY universe_ticker_count DESC

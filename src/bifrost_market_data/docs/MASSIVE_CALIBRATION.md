@@ -1,5 +1,5 @@
 ---
-version: 2026-09-26.2
+version: 2026-09-26.3
 updated: 2026-09-26
 status: 含一次由我造成并已完整复原的数据损坏（§2n） · 四轴普查落地 · Doctor 接上厚度轴（能发现的现在也能修） · Coverage 分层 + 档位×粒度矩阵 · 五类度量偏差已修 · 判定移入插件并向前记录，矩阵能说出「变差了」 · SEPA 面板退役（十张表从未读到过） · Trade 交接照出两个盲点并修（SEPA gaps 闸门查错 schema — 六格假绿；全市场日期检查看不见完全缺席的 session），含一条同日撤回的错误结论（§2s） · Research 转来的七条逐条核过，两条前提被纠正（§2t）· 残缺快照当场可发现可补抓（0.40.0）· 两张最大的表有了保留期，上限就是契约的深度目标（0.41.0） · `option_open_interest` 声明的三个 underlying 索引从未存在，恢复两个（0.41.2，§2t 更正）
 ---
@@ -996,6 +996,24 @@ platform-api 的 rollup 在这个形状上会整块丢掉 KPI，这正是「还�
 包装后只能顺序扫再排序，排序还要落盘。当年的 401 秒多半是冷缓存排在第二个跑。
 唯一留下的一处读 `features.*`（Research 的表，本次未核其列值）。其余文件还有 42 处带包装的等值谓词，
 `tests/test_coverage_bare_columns.py` 以 42 为上限只许下降。
+
+**0.41.5：包内剩下的 42 处也清零**（加上正则当时漏掉的两处写在等号右侧的 join，共 44 行）。同样先干读：
+六张财务表、`stock_minute`、`stock_snapshot`、`ticker`、`ticker_related` 两列、`corporate_action` 共 11.8 万个不同值，经各自索引枚举，0 个不规范；
+`option_right` 在 option_contract / option_open_interest / option_daily 里只有 `'C'` 与 `'P'`（`char(1)`，`'PUT'`/`'CALL'` 那两个备选从来匹配不上）；
+option_daily 3,860 万行的 `option_ticker` 0 个不规范。输入统一走 `normalize_symbol` / `normalize_symbols`（保序去重），查询函数内部也做，不依赖路由。
+
+| 读法（10 个大票或 AAPL） | 包装 | 裸列 |
+|---|---|---|
+| short_volume 最近 10 条（经 `stock_financials` 视图） | 556,959 页 ≈ 4.3 GB | 5,183 页 ≈ 40 MB |
+| 每标的最新一根日线（readiness） | 184,874 页 | 11,801 页 |
+| chain-by-expiry 的 LATERAL 分支 | 302 ms | 44 ms |
+
+棘轮改为 `tests/test_sargable_symbol_predicates.py`：等号两侧都查，上限 0；用 HEAD 源码反向验证过，旧代码会被拦下 44 行、21 个行为测试全红。
+
+**顺带量到、未改：chain-by-expiry 线上走的是慢分支。** 视图 `v_option_chain_latest` 是对整张 `option_snapshot`（800 万行）的
+`DISTINCT ON (option_ticker)`，join 条件推不进去，每次都要整表排序并写约 7 万页临时文件：8.9 s。
+代码注释说两个分支「读的是同一个最新快照，只有 basis 不同」，而 LATERAL 分支按主键逐合约取最新一行只要 44 ms。
+2026-09-26 前 15 小时该端点 0 次调用；是否改走 LATERAL（`basis` 标签怎么定）待 Owner 决定。
 
 ### 其余三条
 

@@ -64,18 +64,18 @@ def query_chain_by_expiry(
                 """
                 SELECT oc.expiry,
                        MAX(DATE(timezone('America/New_York', os.snapshot_ts))) AS snap_day,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('P', 'PUT')
+                       SUM(CASE WHEN oc.option_right = 'P'
                            THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('C', 'CALL')
+                       SUM(CASE WHEN oc.option_right = 'C'
                            THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS call_oi,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('P', 'PUT')
+                       SUM(CASE WHEN oc.option_right = 'P'
                            THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS put_vol,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('C', 'CALL')
+                       SUM(CASE WHEN oc.option_right = 'C'
                            THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS call_vol
                 FROM raw_market.option_contract oc
                 LEFT JOIN raw_market.v_option_chain_latest os
                   ON os.option_ticker = oc.option_ticker
-                WHERE UPPER(TRIM(oc.underlying)) = %s
+                WHERE oc.underlying = %s
                 GROUP BY oc.expiry
                 ORDER BY oc.expiry ASC
                 """,
@@ -87,13 +87,13 @@ def query_chain_by_expiry(
                 """
                 SELECT oc.expiry,
                        MAX(DATE(timezone('America/New_York', os.snapshot_ts))) AS snap_day,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('P', 'PUT')
+                       SUM(CASE WHEN oc.option_right = 'P'
                            THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('C', 'CALL')
+                       SUM(CASE WHEN oc.option_right = 'C'
                            THEN COALESCE(os.open_interest, 0) ELSE 0 END)::bigint AS call_oi,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('P', 'PUT')
+                       SUM(CASE WHEN oc.option_right = 'P'
                            THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS put_vol,
-                       SUM(CASE WHEN UPPER(TRIM(oc.option_right)) IN ('C', 'CALL')
+                       SUM(CASE WHEN oc.option_right = 'C'
                            THEN COALESCE(os.day_volume, 0) ELSE 0 END)::bigint AS call_vol
                 FROM raw_market.option_contract oc
                 LEFT JOIN LATERAL (
@@ -103,7 +103,7 @@ def query_chain_by_expiry(
                   ORDER BY s.snapshot_ts DESC
                   LIMIT 1
                 ) os ON TRUE
-                WHERE UPPER(TRIM(oc.underlying)) = %s
+                WHERE oc.underlying = %s
                 GROUP BY oc.expiry
                 ORDER BY oc.expiry ASC
                 """,
@@ -129,9 +129,9 @@ def query_chain_by_expiry(
             cur.execute(
                 """
                 SELECT expiry,
-                       SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('P', 'PUT')
+                       SUM(CASE WHEN option_right = 'P'
                            THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS put_oi,
-                       SUM(CASE WHEN UPPER(TRIM(option_right)) IN ('C', 'CALL')
+                       SUM(CASE WHEN option_right = 'C'
                            THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS call_oi
                 FROM raw_market.option_open_interest
                 WHERE underlying = %s AND trade_date = %s

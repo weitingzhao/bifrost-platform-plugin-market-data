@@ -254,6 +254,15 @@ def normalize_symbol(value: str | None) -> str:
     return str(value or "").strip().upper()
 
 
+def normalize_symbols(values: Sequence[str] | None) -> list[str]:
+    """``normalize_symbol`` over a list: blanks dropped, duplicates removed, order kept.
+
+    Symbol columns are compared bare so their indexes can be probed; that is only
+    the same answer as ``UPPER(TRIM(col))`` when the input is normalised too.
+    """
+    return list(dict.fromkeys(s for s in map(normalize_symbol, values or ()) if s))
+
+
 def reject_unknown_params(request: Request, aliases: Mapping[str, str]) -> None:
     """422 naming the right parameter when a caller uses one this route does not have.
 

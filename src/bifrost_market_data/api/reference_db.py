@@ -119,7 +119,7 @@ def query_related_coverage(conn: Any) -> dict[str, Any]:
         total = int((cur.fetchone() or [0])[0])
         cur.execute(
             """
-            SELECT COUNT(DISTINCT UPPER(TRIM(from_symbol)))::bigint
+            SELECT COUNT(DISTINCT from_symbol)::bigint
             FROM raw_market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             """
@@ -146,9 +146,9 @@ def query_missing_related(conn: Any, *, limit: int, offset: int) -> dict[str, An
             SELECT t.symbol
             FROM raw_market.ticker t
             LEFT JOIN (
-                SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
+                SELECT DISTINCT from_symbol AS sym
                 FROM raw_market.ticker_related
-            ) r ON r.sym = UPPER(TRIM(t.symbol))
+            ) r ON r.sym = t.symbol
             WHERE r.sym IS NULL
             ORDER BY t.symbol ASC
             LIMIT %s OFFSET %s
@@ -182,7 +182,7 @@ def query_filled_related(conn: Any, *, limit: int, offset: int) -> dict[str, Any
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT UPPER(TRIM(from_symbol)) AS sym
+            SELECT DISTINCT from_symbol AS sym
             FROM raw_market.ticker_related
             WHERE TRIM(COALESCE(from_symbol, '')) <> ''
             ORDER BY sym ASC
@@ -362,12 +362,12 @@ def query_ticker_related(conn: Any, *, ticker: str) -> dict[str, Any]:
         cur.execute(
             """
             SELECT
-                UPPER(TRIM(r.to_symbol)) AS symbol,
+                r.to_symbol AS symbol,
                 r.rank,
                 t.name
             FROM raw_market.ticker_related r
-            LEFT JOIN raw_market.ticker t ON t.symbol = UPPER(TRIM(r.to_symbol))
-            WHERE UPPER(TRIM(r.from_symbol)) = %s
+            LEFT JOIN raw_market.ticker t ON t.symbol = r.to_symbol
+            WHERE r.from_symbol = %s
             ORDER BY r.rank ASC, r.to_symbol ASC
             LIMIT 200
             """,

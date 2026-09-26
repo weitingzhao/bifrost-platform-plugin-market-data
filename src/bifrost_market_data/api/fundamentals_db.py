@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from bifrost_market_data.api.deps import (
     iso_value,
     normalize_symbol,
+    normalize_symbols,
     require_db,
     table_exists,
 )
@@ -52,11 +53,12 @@ def query_short_interest(
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT
-              UPPER(TRIM(symbol)) AS symbol,
+              symbol,
               period_date AS settlement_date,
               COALESCE(
                 (data->>'short_interest')::bigint,
@@ -71,10 +73,10 @@ def query_short_interest(
             FROM (
               SELECT *,
                 ROW_NUMBER() OVER (
-                  PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
+                  PARTITION BY symbol ORDER BY period_date DESC
                 ) AS rn
               FROM raw_market.stock_financials
-              WHERE UPPER(TRIM(symbol)) = ANY(%s)
+              WHERE symbol = ANY(%s)
                 AND report_type = 'short_interest'
             ) sub
             WHERE rn <= %s
@@ -118,11 +120,12 @@ def query_short_volume(
     """
     if not table_exists(conn, "market", "stock_financials"):
         return {}
+    symbols = normalize_symbols(symbols)
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT
-              UPPER(TRIM(symbol)) AS symbol,
+              symbol,
               period_date AS trade_date,
               (data->>'short_volume')::bigint AS short_volume,
               (data->>'short_volume_ratio')::double precision AS short_volume_ratio,
@@ -130,10 +133,10 @@ def query_short_volume(
             FROM (
               SELECT *,
                 ROW_NUMBER() OVER (
-                  PARTITION BY UPPER(TRIM(symbol)) ORDER BY period_date DESC
+                  PARTITION BY symbol ORDER BY period_date DESC
                 ) AS rn
               FROM raw_market.stock_financials
-              WHERE UPPER(TRIM(symbol)) = ANY(%s)
+              WHERE symbol = ANY(%s)
                 AND report_type = 'short_volume'
             ) sub
             WHERE rn <= %s
@@ -179,8 +182,9 @@ def query_financials(
     """Generic financials rows from market.stock_financials for a single symbol."""
     if not table_exists(conn, "market", "stock_financials"):
         return []
+    symbol = normalize_symbol(symbol)
 
-    clauses = ["UPPER(TRIM(symbol)) = %s"]
+    clauses = ["symbol = %s"]
     params: list[Any] = [symbol]
 
     if report_type:

@@ -30,7 +30,7 @@ def query_corporate_actions(
     if not table_exists(conn, "market", "corporate_action"):
         return []
     sym = normalize_symbol(symbol)
-    clauses = ["UPPER(TRIM(symbol)) = %s"]
+    clauses = ["symbol = %s"]
     params: list[Any] = [sym]
     if action_type:
         clauses.append("LOWER(action_type) = LOWER(%s)")
