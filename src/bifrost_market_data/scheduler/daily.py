@@ -19,7 +19,11 @@ import yaml
 
 from bifrost_market_data.logging_setup import configure_logging
 from bifrost_market_data.config import load_config, postgres_connect_kwargs
-from bifrost_market_data.ingest.index_options import is_index_option_underlying, storage_underlying
+from bifrost_market_data.ingest.index_options import (
+    is_index_option_underlying,
+    spot_proxy_for,
+    storage_underlying,
+)
 from bifrost_market_data.ingest.sec_filings import (
     VOID_8K,
     filings_since,
@@ -1057,12 +1061,18 @@ def load_option_tickers_near_spot(
     84 and it must not move. So the discriminator is a *small* threshold, not
     the floor itself: at 7 days it selects those names and nobody else.
 
-    SPX is in that set and ``shallow_dte`` cannot help it -- it has no
-    ``stock_daily`` close, so the spot join below drops it entirely. That one
-    needs index closes, which is a separate decision.
+    SPX is in that set, and until 0.42.0 ``shallow_dte`` could not help it: an
+    index level is not in ``stock_daily`` (that needs an Indices plan we do not
+    hold), so the spot join below dropped the root outright and the ladder
+    bought it nothing. That is why SPX's ``option_daily`` stops on 2026-09-04 --
+    where the *backfill* stopped. ``option_backfill`` has always answered this
+    question with the tracking ETF; this slot simply never asked it. The same
+    ``spot_proxy_for`` map is applied here now: a root with no close of its own
+    borrows its proxy's, scaled. A real close always wins, so the map can only
+    fill a hole, never shadow a vendor number.
 
-    Underlyings without a close in ``stock_daily`` (index roots such as SPX on
-    a plan without index levels) are skipped.
+    Underlyings with neither a close of their own nor a proxy are still skipped
+    -- without a spot there is no "near" for strikes to be ranked by.
 
     Returns ``(option_ticker, underlying)``. The underlying comes from the
     catalogue rather than the ticker because an adjusted contract's root is not
@@ -1083,15 +1093,46 @@ def load_option_tickers_near_spot(
     # leaves the floor switched off for everyone rather than on for everyone.
     shallow_days = max(0, int(shallow_dte))
     shallow_date = as_of + timedelta(days=shallow_days) if shallow_days else as_of - timedelta(days=1)
+    # Index roots stand in for their own level with a tracking ETF, exactly as
+    # ``option_backfill`` does. Three parallel arrays rather than a dict so the
+    # mapping travels as query parameters instead of interpolated SQL.
+    proxy_storage: list[str] = []
+    proxy_symbol: list[str] = []
+    proxy_mult: list[float] = []
+    for sym in syms:
+        proxy = spot_proxy_for(sym)
+        if proxy is None:
+            continue
+        psym, multiplier = proxy
+        proxy_storage.append(sym)
+        proxy_symbol.append(str(psym).strip().upper())
+        proxy_mult.append(float(multiplier))
+    # A proxy's close has to be fetched even when the proxy is not itself in the
+    # ladder; SPY usually is, but nothing here may depend on that.
+    close_syms = sorted(set(syms) | set(proxy_symbol))
     with conn.cursor() as cur:
         cur.execute(
             """
             /* near-spot */
-            WITH spot AS (
+            WITH raw_close AS (
               SELECT DISTINCT ON (symbol) symbol, close
               FROM raw_market.stock_daily
               WHERE symbol = ANY(%s) AND bar_date <= %s AND close IS NOT NULL
               ORDER BY symbol, bar_date DESC
+            ),
+            proxy AS (
+              SELECT * FROM unnest(%s::text[], %s::text[], %s::float8[])
+                AS t(storage, proxy_symbol, multiplier)
+            ),
+            spot AS (
+              SELECT symbol, close FROM raw_close
+              UNION ALL
+              SELECT p.storage, rc.close * p.multiplier
+              FROM proxy p
+              JOIN raw_close rc ON rc.symbol = p.proxy_symbol
+              -- Only where the root has no close of its own, so a vendor number
+              -- is never displaced and no symbol reaches the join twice.
+              WHERE NOT EXISTS (SELECT 1 FROM raw_close d WHERE d.symbol = p.storage)
             ),
             exp AS (
               SELECT underlying, expiry,
@@ -1124,7 +1165,20 @@ def load_option_tickers_near_spot(
             SELECT option_ticker, underlying FROM ranked WHERE srank <= %s
             ORDER BY option_ticker
             """,
-            (syms, as_of, syms, as_of, n_exp, n_exp, floor_date, shallow_date, per_right),
+            (
+                close_syms,
+                as_of,
+                proxy_storage,
+                proxy_symbol,
+                proxy_mult,
+                syms,
+                as_of,
+                n_exp,
+                n_exp,
+                floor_date,
+                shallow_date,
+                per_right,
+            ),
         )
         rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     out: list[tuple[str, str]] = []

@@ -150,18 +150,24 @@ class _DailyCursor:
             self.parent._fetchall = [(e,) for e in exps]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
-            # (syms, as_of, syms, as_of, n_exp, n_exp, floor_date, shallow_date, per_right)
-            syms = set(params[0])
-            as_of = params[1]
-            n_exp = int(params[4])
-            floor_date = params[6]
-            shallow_date = params[7]
-            per_right = int(params[8])
+            # (close_syms, as_of, proxy_storage, proxy_symbol, proxy_mult,
+            #  syms, as_of, n_exp, n_exp, floor_date, shallow_date, per_right)
+            proxies = dict(zip(params[2], zip(params[3], params[4])))
+            syms = set(params[5])
+            as_of = params[6]
+            n_exp = int(params[7])
+            floor_date = params[9]
+            shallow_date = params[10]
+            per_right = int(params[11])
             # (option_ticker, underlying) — the catalogue's underlying, which for
             # an adjusted contract is not the ticker's root.
             picked: list[tuple[str, str]] = []
             for und in sorted(syms):
                 spot = self.parent.spots.get(und)
+                if spot is None and und in proxies:
+                    psym, mult = proxies[und]
+                    base = self.parent.spots.get(psym)
+                    spot = base * mult if base is not None else None
                 if spot is None:
                     continue
                 mine = [c for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of]
@@ -2007,6 +2013,57 @@ def test_the_floor_only_reaches_names_the_rank_rule_leaves_outside_brents_window
     by = collections.Counter(u for _t, u in picked)
     assert by["SPY"] > 3, "the shallow name gains the expiries inside the floor"
     assert by["PLTR"] == 3, "a name whose third expiry already reaches the window must not move"
+
+
+def test_an_index_root_borrows_its_tracking_etfs_close() -> None:
+    """SPX has no close of its own, and without one the spot join dropped it.
+
+    That is why its option_daily stops on 2026-09-04, where the backfill
+    stopped: `option_backfill` has always resolved the level through the
+    tracking ETF and this slot never did. SPX is `resident` and its third listed
+    expiry is 4 days out, so `shallow_dte: 7` selects it — but only once it has
+    a spot to rank strikes by.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    # Strikes in index points, a decade of them, so the ±spot ranking is what
+    # decides rather than the supply of contracts.
+    spx = [
+        (f"O:SPX26{i:04d}{r}{int(k * 1000):08d}", "SPX", as_of + timedelta(days=d), k)
+        for i, d in enumerate((0, 2, 4, 7, 11, 18, 25, 60, 88))
+        for r in ("C", "P")
+        for k in (5000.0, 7000.0, 7700.0, 7750.0, 9000.0)
+    ]
+    conn = _DailyConn(option_contracts=spx, spots={"SPY": 771.35})
+    picked = dmod.load_option_tickers_near_spot(
+        conn, ["SPX"], as_of=as_of, expiries=3, strikes_each_side=0, min_days=60, shallow_dte=7
+    )
+    assert picked, "SPY x 10 stands in for the index level"
+    # One strike per right, so this is the nearest one outright: unscaled 771.35
+    # would have picked 5000, and no spot at all would have picked nothing.
+    strikes = {float(t[-8:]) / 1000 for t, _u in picked}
+    assert strikes == {7700.0}, f"ranked around 7713.5: {strikes}"
+    # The gate selected it, so the floor applies: eight of the nine expiries are
+    # inside 60 days, x2 rights x1 strike. The rank rule alone would be six.
+    assert len(picked) == 16
+
+
+def test_a_real_close_is_never_displaced_by_a_proxy() -> None:
+    """The map fills a hole. A root that has its own close keeps it."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 25)
+    contracts = [
+        ("O:SPX260930C00100000", "SPX", as_of + timedelta(days=5), 100.0),
+        ("O:SPX260930C09000000", "SPX", as_of + timedelta(days=5), 9000.0),
+    ]
+    # Both a (hypothetical) index close and the proxy are present.
+    conn = _DailyConn(option_contracts=contracts, spots={"SPX": 100.0, "SPY": 771.35})
+    picked = dmod.load_option_tickers_near_spot(
+        conn, ["SPX"], as_of=as_of, expiries=1, strikes_each_side=0
+    )
+    assert [t for t, _u in picked] == ["O:SPX260930C00100000"], "ranked around 100, not 7713.5"
 
 
 def test_the_floor_is_off_for_everyone_when_the_gate_is_zero() -> None:
