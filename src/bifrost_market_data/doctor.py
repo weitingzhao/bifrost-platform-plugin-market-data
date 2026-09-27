@@ -1010,6 +1010,7 @@ def _snapshot_refetch_fix(
                 expiries=int(scfg.get("expiries") or 3),
                 strike_pct=float(scfg.get("strike_pct") or 0.15),
                 min_days=int(scfg.get("min_days") or 0),
+                min_strikes_each_side=int(scfg.get("min_strikes_each_side") or 0),
             )
         except Exception as exc:  # noqa: BLE001 -- an unbounded refetch beats none
             logger.warning("refetch window lookup failed; whole chains: %s", exc)

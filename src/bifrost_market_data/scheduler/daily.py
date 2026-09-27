@@ -874,6 +874,22 @@ RETIRED_SKIP_MAX_SHARE = 0.10
 RETIRED_SKIP_MIN_NAMES = 5
 
 
+def _strike_ladder_bounds(
+    strikes: Sequence[float], spot: float, per_side: int
+) -> tuple[float | None, float | None]:
+    """The ``per_side``-th listed strike at or below spot, and at or above it.
+
+    A side that lists fewer than that gives its outermost strike: the ladder is
+    all there is to buy, so the whole side is the most the rule can ask for.
+    """
+    ladder = sorted({float(s) for s in strikes})
+    below = [s for s in ladder if s <= spot]
+    above = [s for s in ladder if s >= spot]
+    lo = below[-per_side] if len(below) >= per_side else (below[0] if below else None)
+    hi = above[per_side - 1] if len(above) >= per_side else (above[-1] if above else None)
+    return lo, hi
+
+
 def load_snapshot_windows(
     conn: Any,
     symbols: Sequence[str],
@@ -882,6 +898,7 @@ def load_snapshot_windows(
     expiries: int = 3,
     strike_pct: float = 0.15,
     min_days: int = 0,
+    min_strikes_each_side: int = 0,
 ) -> dict[str, tuple[float, float, str]]:
     """Per underlying: (strike_gte, strike_lte, expiration_lte) — the near-the-money window.
 
@@ -904,12 +921,24 @@ def load_snapshot_windows(
     would have narrowed their window instead of widening it. Taking the later
     of the two leaves them exactly as they were and lets the weekly names pick
     up the expiries in between.
+
+    The strike band is ±``strike_pct`` of spot, widened where it has to be so it
+    holds at least ``min_strikes_each_side`` listed strikes on each side of spot,
+    counted on every strike the window's expiries list. A percentage buys a
+    different number of strikes for every ladder, the same defect as counting
+    expiries: measured 2026-09-27 over ten sessions, ±15% held two to four
+    strikes for names that list them 5 apart on a 60 stock or 2.5 apart on a 13
+    one (XEL, CMS, NI, FTI, CNH ...). On 09-25, 49 of 631 windowed names held
+    fewer than the ten IV points Research fits a smile on and 20 more sat at ten
+    or eleven, and the set barely moves from session to session. The floor
+    counts strikes, not percent, so a dense ladder is left exactly as it was.
     """
     syms = sorted({str(x).strip().upper() for x in symbols if str(x).strip()})
     if not syms:
         return {}
     n_exp = max(1, int(expiries))
     pct = max(0.0, float(strike_pct))
+    per_side = max(0, int(min_strikes_each_side))
     floor_days = max(0, int(min_days))
     floor_date = as_of + timedelta(days=floor_days) if floor_days else None
     probe_rows = n_exp if floor_date is None else max(n_exp, EXPIRY_PROBE_ROWS)
@@ -993,11 +1022,47 @@ def load_snapshot_windows(
             # on the catalogue is the deepest there is to buy.
             beyond = next((e for e in exps if e >= floor_date), exps[-1])
             bound = max(bound, beyond)
-        out[sym] = (
-            round(spot * (1 - pct), 2),
-            round(spot * (1 + pct), 2),
-            bound.isoformat(),
-        )
+        lo, hi = round(spot * (1 - pct), 2), round(spot * (1 + pct), 2)
+        if per_side:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '10s'")
+                    cur.execute(
+                        """
+                        /* snapshot-window: strikes */
+                        SELECT DISTINCT strike FROM raw_market.option_contract
+                        WHERE underlying = %s AND expiry >= %s AND expiry <= %s
+                        ORDER BY strike
+                        """,
+                        (sym, as_of, bound),
+                    )
+                    strikes = [
+                        float(r.get("strike") if isinstance(r, Mapping) else r[0])
+                        for r in (cur.fetchall() or [])
+                    ]
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                # The percentage band, not the whole chain: that is what every
+                # session bought before the floor existed, and a lookup that
+                # fails for one name tends to fail for all of them -- a whole
+                # chain is about five times the window, for all 631 names.
+                logger.warning(
+                    "snapshot window strike lookup failed for %s; keeping ±%s: %s",
+                    sym,
+                    pct,
+                    exc,
+                )
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                strikes = []
+            k_lo, k_hi = _strike_ladder_bounds(strikes, spot, per_side)
+            if k_lo is not None:
+                lo = min(lo, round(k_lo, 2))
+            if k_hi is not None:
+                hi = max(hi, round(k_hi, 2))
+        out[sym] = (lo, hi, bound.isoformat())
     return out
 
 
@@ -1870,6 +1935,7 @@ def enqueue_slot(
                 expiries=int(scfg.get("expiries") or 3),
                 strike_pct=float(scfg.get("strike_pct") or 0.15),
                 min_days=int(scfg.get("min_days") or 0),
+                min_strikes_each_side=int(scfg.get("min_strikes_each_side") or 0),
             )
         # A name with no window is snapshotted whole, and for a retired listing
         # that is the most expensive thing this slot can do: every strike out to a

@@ -29,8 +29,9 @@ scheduler:
       priority: 5
       # Blueprint C-F5: snapshot research.option_universe. Resident names whole;
       # core and edge get the near-the-money window (next `expiries` expiries,
-      # strikes within ±strike_pct of spot) — a whole chain at 575 names is
-      # ~130 GB of 90-session retention, the window about 18 GB.
+      # strikes within ±strike_pct of spot). Measured 2026-09-27 at 253 bytes a
+      # row: the 640 core and edge chains whole are 672,930 contracts a session,
+      # 15.3 GB over 90 sessions; the window is 141,934, 3.2 GB.
       universe: research
       expiries: 3
       strike_pct: 0.15
@@ -45,6 +46,19 @@ scheduler:
       # which on this slot is one job per underlying either way — 662 in the
       # 30-hour window measured that day — and roughly doubles the table.
       min_days: 60
+      # ±strike_pct buys a different number of strikes for every ladder, the
+      # same defect as counting expiries: strikes 5 apart on a 60 stock, or 2.5
+      # apart on a 13 one, leave two to four in ±15% (XEL, CMS, NI, FTI, CNH), and
+      # on 09-25 49 of 631 windowed names held fewer than the ten IV points
+      # Research fits a smile on and 20 more sat at ten or eleven -- the same
+      # names session after session (2026-09-14..25). The band therefore
+      # reaches at least this many listed strikes on each side of spot. Six
+      # because a whole right can go dark: on 09-22 fourteen names had no IV on
+      # any put, and twelve strikes of calls alone still clear ten points where
+      # four a side would leave eight. Cost measured on 09-25: +9,230 contracts
+      # a session (+6.5%), +0.21 GB at 90 sessions; 295 bands widen, every other
+      # name keeps its ±15%.
+      min_strikes_each_side: 6
     universe-daily:
       cron: "0 22 * * *"
       priority: 3

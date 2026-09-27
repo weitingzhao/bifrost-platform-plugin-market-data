@@ -812,6 +812,34 @@ def test_the_repair_refetches_only_the_names_that_came_back_wrong() -> None:
     ]
 
 
+def test_the_repair_buys_the_same_strike_floor_the_slot_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refetch that dropped the floor would put a thin name back to ±15%.
+
+    The window comes from the one function the slot uses, so every knob the
+    slot reads has to reach it from here too.
+    """
+    seen: dict[str, Any] = {}
+
+    def _spy(conn: Any, names: Any, **kw: Any) -> dict[str, tuple[float, float, str]]:
+        seen.update(kw)
+        return {"XEL": (40.0, 95.0, "2026-12-18")}
+
+    monkeypatch.setattr(doc, "load_snapshot_windows", _spy)
+    cfg = {
+        "slots": {
+            "eod-pipeline": {"expiries": 3, "strike_pct": 0.15, "min_days": 60,
+                             "min_strikes_each_side": 6}
+        }
+    }
+    fix = doc._snapshot_refetch_fix(
+        _Conn(_healthy_data()), ["XEL"], session=SESSION, tier_of={"XEL": "core"}, cfg=cfg
+    )
+    assert seen["min_strikes_each_side"] == 6
+    assert fix is not None and fix["payloads"][0]["strike_gte"] == 40.0
+
+
 def test_a_session_the_chain_no_longer_reflects_prescribes_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+from collections.abc import Sequence
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -148,6 +149,19 @@ class _DailyCursor:
                 {c[2] for c in self.parent.option_contracts if c[1] == und and c[2] >= as_of}
             )[:n]
             self.parent._fetchall = [(e,) for e in exps]
+            self.parent._fetchone = None
+        elif "/* snapshot-window: strikes */" in q:
+            if self.parent.raise_on_strikes:
+                raise RuntimeError("canceling statement due to statement timeout")
+            und, first, last = params[0], params[1], params[2]
+            ks = sorted(
+                {
+                    float(c[3])
+                    for c in self.parent.option_contracts
+                    if c[1] == und and first <= c[2] <= last and len(c) > 3
+                }
+            )
+            self.parent._fetchall = [(k,) for k in ks]
             self.parent._fetchone = None
         elif "/* near-spot */" in q:
             # (close_syms, as_of, proxy_storage, proxy_symbol, proxy_mult,
@@ -355,6 +369,7 @@ class _DailyConn:
         raise_on_enumerated: bool = False,
         catalogue_updated: dict[str, Any] | None = None,
         raise_on_stalest: bool = False,
+        raise_on_strikes: bool = False,
     ) -> None:
         self.session_evidence = session_evidence
         self.session_symbols = session_symbols or []
@@ -368,6 +383,7 @@ class _DailyConn:
         # {underlying: when its catalogue was last walked}; missing = never
         self.catalogue_updated = dict(catalogue_updated or {})
         self.raise_on_stalest = raise_on_stalest
+        self.raise_on_strikes = raise_on_strikes
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
@@ -1995,6 +2011,194 @@ def test_a_name_with_too_few_expiries_still_gets_no_window() -> None:
         spots={"THIN": 100.0},
     )
     assert dmod.load_snapshot_windows(conn, ["THIN"], as_of=as_of, expiries=3, min_days=60) == {}
+
+
+#: XEL's listed ladder, read from the catalogue on 2026-09-27: every monthly out to
+#: January lists strikes 5 apart from 40 to 120. Its 09-24 close was 69.56, so
+#: ±15% holds 60, 65, 70 and 75 -- eight contracts, and no expiry it lists could
+#: reach the ten IV points Research fits a smile on. The measured shape is the
+#: point: a tidy ladder dense enough to fill ±15% would prove nothing.
+XEL_STRIKES = tuple(float(k) for k in range(40, 121, 5))
+XEL_EXPIRIES = (date(2026, 10, 16), date(2026, 11, 20), date(2026, 12, 18), date(2027, 1, 15))
+
+
+def _ladder(und: str, expiries: Sequence[date], strikes: Sequence[float]) -> list[Any]:
+    return [
+        (f"O:{und}{e:%y%m%d}C{int(k * 1000):08d}", und, e, k) for e in expiries for k in strikes
+    ]
+
+
+def test_a_sparse_ladder_widens_until_it_holds_six_strikes_a_side() -> None:
+    """A percentage buys a different number of strikes for every ladder.
+
+    Measured over 2026-09-14..25: 49 of the 631 windowed names held fewer than
+    ten IV points on 09-25 and 20 more sat at ten or eleven, the same names
+    session after session. Counting strikes instead of percent is the same fix
+    the expiry bound got for counting expiries.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    contracts = _ladder("XEL", XEL_EXPIRIES, XEL_STRIKES)
+    conn = _DailyConn(option_contracts=contracts, spots={"XEL": 69.56})
+    pct_only = dmod.load_snapshot_windows(conn, ["XEL"], as_of=as_of, expiries=3, min_days=60)
+    assert pct_only["XEL"][:2] == (59.13, 79.99)
+    assert [k for k in XEL_STRIKES if 59.13 <= k <= 79.99] == [60.0, 65.0, 70.0, 75.0]
+
+    conn = _DailyConn(option_contracts=contracts, spots={"XEL": 69.56})
+    w = dmod.load_snapshot_windows(
+        conn, ["XEL"], as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    lo, hi, bound = w["XEL"]
+    assert (lo, hi) == (40.0, 95.0), "the sixth listed strike below spot and the sixth above"
+    held = [k for k in XEL_STRIKES if lo <= k <= hi]
+    assert sum(k <= 69.56 for k in held) == 6 and sum(k >= 69.56 for k in held) == 6
+    assert bound == pct_only["XEL"][2], "a width fix: the expiry bound does not move"
+
+
+def test_a_dense_ladder_keeps_its_percentage_band() -> None:
+    """The floor only ever widens, so a ladder that fills ±15% is left alone.
+
+    Measured on 09-25, 295 bands widen; every other name's is byte for byte what
+    it was.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    strikes = [150.0 + 2.5 * i for i in range(41)]  # 150 .. 250
+    contracts = _ladder("DENSE", XEL_EXPIRIES, strikes)
+    conn = _DailyConn(option_contracts=contracts, spots={"DENSE": 200.0})
+    before = dmod.load_snapshot_windows(conn, ["DENSE"], as_of=as_of, expiries=3, min_days=60)
+    conn = _DailyConn(option_contracts=contracts, spots={"DENSE": 200.0})
+    after = dmod.load_snapshot_windows(
+        conn, ["DENSE"], as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    assert after == before == {"DENSE": (170.0, 230.0, "2026-12-18")}
+
+
+def test_a_short_side_gives_the_whole_side() -> None:
+    """Fewer than six listed below spot: the lowest listed strike is the bound.
+
+    The ladder is all there is to buy, so the rule can ask for no more than the
+    whole side -- and the cost stays bounded by what the name lists.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    strikes = [5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 22.5, 25.0]
+    conn = _DailyConn(option_contracts=_ladder("CNH", XEL_EXPIRIES, strikes), spots={"CNH": 13.28})
+    w = dmod.load_snapshot_windows(
+        conn, ["CNH"], as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    assert w["CNH"][:2] == (5.0, 25.0), "four below and five above: both sides whole"
+
+
+def test_the_ladder_is_read_only_from_the_expiries_the_window_buys() -> None:
+    """A strike listed only past the bound is not bought, so it cannot count.
+
+    Counting it would let a far expiry's finer ladder satisfy the floor with
+    strikes the window then filters out, and the thin name would stay thin.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    contracts = _ladder("XEL", XEL_EXPIRIES[:3], XEL_STRIKES) + _ladder(
+        "XEL", [date(2027, 6, 17)], [float(k) for k in range(60, 81)]
+    )
+    conn = _DailyConn(option_contracts=contracts, spots={"XEL": 69.56})
+    w = dmod.load_snapshot_windows(
+        conn, ["XEL"], as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    assert w["XEL"] == (40.0, 95.0, "2026-12-18")
+    strike_reads = [p for q, p in conn.statements if "/* snapshot-window: strikes */" in q]
+    assert strike_reads == [("XEL", as_of, date(2026, 12, 18))]
+
+
+def test_a_strike_on_spot_counts_on_both_sides() -> None:
+    from bifrost_market_data.scheduler import daily as dmod
+
+    assert dmod._strike_ladder_bounds([90, 95, 100, 105, 110], 100.0, 3) == (90.0, 110.0)
+    assert dmod._strike_ladder_bounds([], 100.0, 6) == (None, None)
+    assert dmod._strike_ladder_bounds([120, 130], 100.0, 6) == (None, 130.0)
+
+
+def test_a_failed_strike_lookup_keeps_the_percentage_band() -> None:
+    """Not the whole chain: that is about five times the window for every name.
+
+    A lookup that fails for one name tends to fail for all of them, and the
+    percentage band is what every session bought before the floor existed.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    conn = _DailyConn(
+        option_contracts=_ladder("XEL", XEL_EXPIRIES, XEL_STRIKES),
+        spots={"XEL": 69.56},
+        raise_on_strikes=True,
+    )
+    w = dmod.load_snapshot_windows(
+        conn, ["XEL"], as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    assert w == {"XEL": (59.13, 79.99, "2026-12-18")}
+
+
+def test_the_floor_costs_one_indexed_ladder_read_per_name_and_none_when_off() -> None:
+    from bifrost_market_data.scheduler import daily as dmod
+
+    as_of = date(2026, 9, 24)
+    names = ["XEL", "CMS", "NI"]
+    contracts = [c for n in names for c in _ladder(n, XEL_EXPIRIES, XEL_STRIKES)]
+    conn = _DailyConn(option_contracts=contracts, spots={n: 69.56 for n in names})
+    dmod.load_snapshot_windows(conn, names, as_of=as_of, expiries=3, min_days=60)
+    assert not [q for q, _p in conn.statements if "/* snapshot-window: strikes */" in q]
+    conn = _DailyConn(option_contracts=contracts, spots={n: 69.56 for n in names})
+    dmod.load_snapshot_windows(
+        conn, names, as_of=as_of, expiries=3, min_days=60, min_strikes_each_side=6
+    )
+    reads = [q for q, _p in conn.statements if "/* snapshot-window: strikes */" in q]
+    assert len(reads) == 3
+
+
+def test_eod_pipeline_hands_the_strike_floor_to_the_window() -> None:
+    d = date(2026, 9, 24)
+    conn = _DailyConn(
+        research_universe=[("XEL", "core", 24)],
+        option_contracts=_ladder("XEL", XEL_EXPIRIES, XEL_STRIKES),
+        spots={"XEL": 69.56},
+    )
+    r = enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=d,
+        watchlist_symbols=["TSLA"],
+        scheduler_cfg={
+            "slots": {
+                "eod-pipeline": {
+                    "priority": 5,
+                    "universe": "research",
+                    "expiries": 3,
+                    "strike_pct": 0.15,
+                    "min_days": 60,
+                    "min_strikes_each_side": 6,
+                }
+            }
+        },
+    )
+    snaps = {
+        j["payload"]["underlying"]: j["payload"]
+        for j in r["jobs"]
+        if j["kind"] == "option_snapshot"
+    }
+    assert (snaps["XEL"]["strike_gte"], snaps["XEL"]["strike_lte"]) == (40.0, 95.0)
+
+
+def test_the_shipped_schedule_sets_the_strike_floor() -> None:
+    """The knob defaults to off, so the floor exists only if the config says six."""
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "config" / "schedule.yaml").read_text())
+    assert cfg["scheduler"]["slots"]["eod-pipeline"]["min_strikes_each_side"] == 6
 
 
 def test_the_floor_only_reaches_names_the_rank_rule_leaves_outside_brents_window() -> None:
