@@ -855,6 +855,24 @@ def option_trades_universe(
 #: ordered read on the ``(underlying, expiry)`` index.
 EXPIRY_PROBE_ROWS = 120
 
+#: How far back a close still counts as a sign of life. A listed name prints one
+#: every session, so a week plus a holiday is generous; the measurement this is
+#: drawn from used 10 days and found no name in between.
+RETIRED_CLOSE_LOOKBACK_DAYS = 10
+#: The second belt, not the first. The conjunction is what actually protects the
+#: session: a truncated ``raw_market.ticker`` makes every name look inactive, and
+#: the close test still clears every name that trades, so a broken sweep on its
+#: own cannot mass-skip. This ceiling covers the case where *both* inputs are
+#: wrong at once -- no ticker rows and no recent closes -- where the honest answer
+#: is that nothing is known, not that nothing is live.
+#:
+#: A share alone is the wrong shape at small inputs: one dead name in a five-name
+#: watchlist is 20% and entirely plausible. So the ceiling is whichever is larger,
+#: which lets a handful through at any size and still catches a sweep that has
+#: condemned most of a real universe. Measured 2026-09-27: 6 retired of 656.
+RETIRED_SKIP_MAX_SHARE = 0.10
+RETIRED_SKIP_MIN_NAMES = 5
+
 
 def load_snapshot_windows(
     conn: Any,
@@ -1016,6 +1034,95 @@ def tickers_needing_detail(conn: Any, *, limit: int = 200) -> list[str]:
         v = tuple(r.values())[0] if hasattr(r, "values") else (r[0] if r else None)
         if v:
             out.append(str(v).strip().upper())
+    return out
+
+
+def load_retired_underlyings(
+    conn: Any,
+    underlyings: Sequence[str],
+    *,
+    as_of: date,
+) -> set[str]:
+    """Names with **neither** a close in the last ``RETIRED_CLOSE_LOOKBACK_DAYS``
+    **nor** an active ``raw_market.ticker`` row.
+
+    Both, because either alone is the wrong test. A live name's spot lookup can
+    fail transiently, and ``load_snapshot_windows`` deliberately answers that by
+    snapshotting the chain whole -- "an unbounded chain costs storage, a wrong
+    bound costs the data". That reasoning holds for a name that still trades and
+    collapses for one that does not: whole-chaining a delisted symbol buys every
+    strike out to a LEAP for a company that no longer exists. Measured 2026-09-27
+    across the 656 core and edge names: 650 active with a recent close, 5 active
+    ``false`` with none, SATS with no row and none, and **nothing in either mixed
+    state** -- so requiring both keeps the transient protection and removes the
+    pathology, rather than trading one for the other.
+
+    The activity flag is not why the closes stopped; ``stock_daily_grouped``
+    writes every bar the vendor returns and never reads it. Both are consequences
+    of the vendor retiring the listing. The flag is simply the only local signal
+    for which of the two an unpriced name is, since we store ``active`` and not
+    ``delisted_utc``.
+
+    Returns an empty set when the probe fails, when nothing qualifies, or when
+    more than ``RETIRED_SKIP_MAX_SHARE`` of the input looks retired: an
+    unanswerable probe must not read as "collect nothing".
+    """
+    # An index root has neither a ``ticker`` row nor a ``stock_daily`` close by
+    # construction -- we hold no Indices plan -- so to this pair of conditions SPX
+    # is indistinguishable from a delisted equity. Dry-reading the statement
+    # against the live universe on 2026-09-27 returned SPX among seven names,
+    # which would have skipped the healthiest chain in the pipeline. Its liveness
+    # is not knowable here, so the probe does not judge it.
+    syms = sorted(
+        {
+            str(u).strip().upper()
+            for u in underlyings
+            if str(u).strip() and not is_index_option_underlying(str(u).strip().upper())
+        }
+    )
+    if not syms:
+        return set()
+    floor = as_of - timedelta(days=RETIRED_CLOSE_LOOKBACK_DAYS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                /* retired-underlyings */
+                SELECT u.symbol
+                FROM unnest(%s::text[]) AS u(symbol)
+                LEFT JOIN raw_market.ticker t ON t.symbol = u.symbol
+                WHERE COALESCE(t.active, false) = false
+                  AND NOT EXISTS (
+                    SELECT 1 FROM raw_market.stock_daily s
+                    WHERE s.symbol = u.symbol AND s.bar_date >= %s AND s.close IS NOT NULL
+                  )
+                """,
+                (syms, floor),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- over-collecting beats collecting nothing
+        logger.warning("retired-underlying probe failed; collecting every name: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+    out: set[str] = set()
+    for row in rows or []:
+        sym = row.get("symbol") if isinstance(row, Mapping) else (row[0] if row else None)
+        if sym:
+            out.add(str(sym).strip().upper())
+    ceiling = max(RETIRED_SKIP_MIN_NAMES, int(len(syms) * RETIRED_SKIP_MAX_SHARE))
+    if len(out) > ceiling:
+        logger.warning(
+            "retired-underlying probe called %d of %d names retired, over the ceiling of %d; "
+            "treating the reading as unknown and collecting every name",
+            len(out),
+            len(syms),
+            ceiling,
+        )
+        return set()
     return out
 
 
@@ -1651,6 +1758,7 @@ def enqueue_slot(
 
     jobs: list[dict[str, Any]] = []
     specs: list[tuple[str, dict[str, Any], int, int]] = []
+    retired_skipped: list[str] = []
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
         # Collected here, written in one statement below.
@@ -1684,10 +1792,20 @@ def enqueue_slot(
                 strike_pct=float(scfg.get("strike_pct") or 0.15),
                 min_days=int(scfg.get("min_days") or 0),
             )
+        # A name with no window is snapshotted whole, and for a retired listing
+        # that is the most expensive thing this slot can do: every strike out to a
+        # LEAP for a company that no longer exists. Measured 2026-09-26, SATS was
+        # bought to the 2028-01-21 expiry that way. Skipping is only safe because
+        # the probe requires both signals and refuses to answer at scale -- see
+        # load_retired_underlyings.
+        retired = load_retired_underlyings(conn, pipeline_syms, as_of=day)
         for sym in pipeline_syms:
             storage = storage_underlying(sym)
-            payload: dict[str, Any] = {"underlying": storage, "trade_date": day_s}
             win = windows.get(sym)
+            if win is None and sym in retired:
+                retired_skipped.append(sym)
+                continue
+            payload: dict[str, Any] = {"underlying": storage, "trade_date": day_s}
             if win is not None:
                 payload["strike_gte"], payload["strike_lte"], payload["expiration_lte"] = win
             _add("option_snapshot", payload, pri=_tier_pri(sym))
@@ -2093,7 +2211,7 @@ def enqueue_slot(
     enqueued = sum(1 for j in jobs if not j["deduped"])
     deduped = len(jobs) - enqueued
 
-    return {
+    out: dict[str, Any] = {
         "slot": slot_key,
         "target_date": day_s,
         "symbols": len(symbols),
@@ -2101,6 +2219,11 @@ def enqueue_slot(
         "deduped": deduped,
         "jobs": jobs,
     }
+    if retired_skipped:
+        # Named, not just counted: a skip nobody can see is how a universe stays
+        # stale. These belong out of the universe, which is upstream of this slot.
+        out["retired_skipped"] = sorted(retired_skipped)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

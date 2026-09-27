@@ -236,6 +236,12 @@ class _DailyCursor:
                 rows.append((ticker,))
             self.parent._fetchall = rows
             self.parent._fetchone = None
+        elif "/* retired-underlyings */" in q:
+            scope = set(params[0]) if params else set()
+            self.parent._fetchall = [
+                (s,) for s in sorted(self.parent.retired) if not scope or s in scope
+            ]
+            self.parent._fetchone = None
         elif (
             "from market.ticker" in q or "from raw_market.ticker" in q
         ) and "instrument_type" in q:
@@ -333,6 +339,7 @@ class _DailyConn:
         raise_on_readiness: bool = False,
         cs_universe: list[str] | None = None,
         income_covered: list[str] | None = None,
+        retired: list[str] | None = None,
         session_evidence: bool = False,
         session_symbols: list[str] | None = None,
         spots: dict[str, float] | None = None,
@@ -359,6 +366,10 @@ class _DailyConn:
         self.watchlist = watchlist or ["AAPL", "MSFT", "TSLA"]
         self.cs_universe = cs_universe or []
         self.income_covered = income_covered or []
+        #: What the retired-underlying probe finds: neither a recent close nor an
+        #: active ticker row. The fake answers from this rather than deriving it,
+        #: so a test can put a name in exactly one state.
+        self.retired = retired or []
         self.raise_on_watchlist = raise_on_watchlist
         self.raise_on_readiness = raise_on_readiness
         self.calendar = calendar or {}
@@ -2282,3 +2293,123 @@ def test_a_dataset_with_no_rolling_window_is_not_deleted_from_on_a_clock() -> No
     assert retention_days("raw_market.ratios") is None, "forward_only"
     assert retention_days("raw_market.option_snapshot") is None, "counted in sessions"
     assert retention_days("raw_market.option_contract") is None, "a catalogue"
+
+
+# ── Retired listings are skipped, not snapshotted whole ─────────────────────
+
+
+def _eod(symbols: list[str], **kw: Any) -> dict[str, Any]:
+    conn = _DailyConn(symbols, **kw)
+    return enqueue_slot(
+        conn,
+        "eod-pipeline",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=symbols,
+        scheduler_cfg={"slots": {"eod-pipeline": {"priority": 5}}},
+        force=True,
+    )
+
+
+def test_a_retired_listing_is_skipped_rather_than_snapshotted_whole() -> None:
+    """For a delisted name, the no-window fallback is the worst thing this slot does.
+
+    `load_snapshot_windows` answers a missing spot by snapshotting the chain
+    whole, and its docstring is right about why: an unbounded chain costs
+    storage, a wrong bound costs the data. That trade collapses once the listing
+    is gone — measured 2026-09-26, SATS was bought out to the 2028-01-21 expiry
+    that way, for a company that had not existed since June.
+    """
+    out = _eod(["AAPL", "DEADCO"], retired=["DEADCO"])
+    kinds = [(j["kind"], j["payload"].get("underlying")) for j in out["jobs"]]
+    assert ("option_snapshot", "DEADCO") not in kinds, "no job at all, not an unbounded one"
+    assert ("option_snapshot", "AAPL") in kinds
+    assert out["retired_skipped"] == ["DEADCO"], "named in the summary, not merely absent"
+
+
+def test_a_live_name_with_no_window_is_still_snapshotted_whole() -> None:
+    """The transient case the old behaviour was protecting has to keep working.
+
+    A spot lookup can fail for a name that trades every session, and answering
+    that by collecting nothing would lose the session's chain. This is why the
+    probe requires *both* signals: no recent close AND no active ticker row.
+    """
+    out = _eod(["AAPL", "NOSPOT"])
+    kinds = [(j["kind"], j["payload"].get("underlying")) for j in out["jobs"]]
+    assert ("option_snapshot", "NOSPOT") in kinds
+    assert "retired_skipped" not in out
+
+
+def test_the_probe_refuses_to_answer_at_scale() -> None:
+    """A truncated raw_market.ticker must not skip a whole session's collection.
+
+    Over-collecting is recoverable; a session nobody snapshotted is not. Measured
+    2026-09-27 the real share is 6 of 656, so the ceiling has an order of
+    magnitude of headroom before it can bite on a true reading.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    syms = [f"S{i:03d}" for i in range(20)]
+    conn = _DailyConn(syms, retired=syms)  # 20 > max(5, 2)
+    found = dmod.load_retired_underlyings(conn, syms, as_of=date(2024, 6, 20))
+    assert found == set(), "every name retired reads as a broken ticker table"
+
+    # Just under the ceiling it answers normally.
+    conn = _DailyConn(syms, retired=syms[:1])
+    assert dmod.load_retired_underlyings(conn, syms, as_of=date(2024, 6, 20)) == {"S000"}
+
+
+def test_an_unanswerable_probe_collects_everything() -> None:
+    """A failed probe is not a reading of "nothing is live"."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    class _Boom(_DailyConn):
+        def cursor(self) -> Any:
+            cur = super().cursor()
+            inner = cur.execute
+
+            def execute(query: str, params: Any = None) -> None:
+                if "/* retired-underlyings */" in " ".join(query.lower().split()):
+                    raise RuntimeError("canceling statement due to statement timeout")
+                inner(query, params)
+
+            cur.execute = execute  # type: ignore[method-assign]
+            return cur
+
+    conn = _Boom(["AAPL"], retired=["AAPL"])
+    assert dmod.load_retired_underlyings(conn, ["AAPL"], as_of=date(2024, 6, 20)) == set()
+
+
+def test_an_index_root_is_never_called_retired() -> None:
+    """SPX has no ticker row and no stock_daily close, by construction.
+
+    We hold no Indices plan, so to this pair of conditions SPX looks exactly like
+    a delisted equity. Dry-read against the live universe on 2026-09-27 the
+    statement returned SPX among seven names — and SPX is resident, its chain is
+    the healthiest in the pipeline, and its level comes from the tracking ETF.
+    The earlier measurement missed this because it was scoped to core and edge
+    while the slot passes every pipeline symbol.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    conn = _DailyConn(["SPX", "DEADCO"], retired=["SPX", "DEADCO"])
+    found = dmod.load_retired_underlyings(conn, ["SPX", "SPXW", "DEADCO"], as_of=date(2024, 6, 20))
+    assert "SPX" not in found and "SPXW" not in found, "an index root is not judged here"
+    assert found == {"DEADCO"}
+    sql_params = next(p for q, p in conn.statements if "/* retired-underlyings */" in q)
+    assert "SPX" not in sql_params[0], "and it never reaches the statement"
+
+    out = _eod(["SPX", "DEADCO"], retired=["SPX", "DEADCO"])
+    kinds = [(j["kind"], j["payload"].get("underlying")) for j in out["jobs"]]
+    assert ("option_snapshot", "SPX") in kinds, "the index chain is still collected"
+
+
+def test_the_probe_needs_both_signals_in_its_sql() -> None:
+    """Either condition alone is the wrong test, so both must be in the statement."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    conn = _DailyConn(["AAPL"])
+    dmod.load_retired_underlyings(conn, ["AAPL"], as_of=date(2024, 6, 20))
+    raw = next(q for q, _p in conn.statements if "/* retired-underlyings */" in q)
+    sql = " ".join(raw.lower().split())
+    assert "coalesce(t.active, false) = false" in sql, "absent counts as inactive"
+    assert "not exists" in sql and "stock_daily" in sql, "and no recent close"
