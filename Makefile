@@ -1,4 +1,4 @@
-.PHONY: install-dev test lint db-init db-init-dry apply-roles ownership-sql apply-ownership rollback-ownership run-api kustomize-check deploy verify-market-data sync-platform-write-token sync-write-auth-overlay install-redis-massive apply-external-names-massive
+.PHONY: install-dev test lint db-init db-init-dry apply-roles ownership-sql apply-ownership rollback-ownership run-api kustomize-check deploy verify-market-data sync-platform-write-token sync-write-auth-overlay
 
 install-dev:
 	pip install -e ".[dev]"
@@ -64,9 +64,3 @@ sync-write-auth-overlay:
 	  --from-file=deps.py=src/bifrost_market_data/api/deps.py \
 	  --dry-run=client -o yaml | kubectl apply -f -
 	kubectl -n plugin-market-data rollout restart deploy/market-data-api
-
-install-redis-massive:
-	./scripts/install-redis-massive.sh
-
-apply-external-names-massive:
-	./scripts/apply-external-names-massive.sh

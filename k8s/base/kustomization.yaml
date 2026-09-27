@@ -8,7 +8,6 @@ resources:
   - deployment-stocks.yaml
   - deployment-options.yaml
   - deployment-api.yaml
-  - deployment-polygon-ws.yaml
   - service.yaml
   - service-api.yaml
   - configmap.yaml

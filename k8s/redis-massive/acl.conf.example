@@ -1,5 +1,0 @@
-user default off
-user polygon-ws on >POLYGON_WS_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@all
-user trade-prod on >TRADE_PROD_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list
-user trade-dev on >TRADE_DEV_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list
-user platform on >PLATFORM_PASS ~massive:* ~bifrost:health:ws_massive_option allchannels +@read +ping +info +client|list

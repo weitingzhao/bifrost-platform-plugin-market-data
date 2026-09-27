@@ -176,6 +176,17 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 | `option_minute` 18/26 | benchmark-only 档 = watchlist ∪ IV-radar 基准，但 `minute-bars` 只走 watchlist，SPY QQQ IWM SPX AAPL MSFT AMZN META 从未有分钟线（`option-bars` 09-10 已修过同类问题） | 0.55.0：`minute-bars` 改走并集；SPX 只进期权轮转（SPY 代理现价），不拉股票分钟线（需 Indices）；期权批量 80 → 120，保持每个名字约 5 天轮一次 |
 | `polygon-ws-ingestor` 心跳每 34 秒 WRONGPASS | 2026-08-19 轮换密码时 `install-redis-massive.sh` 只重建了 ACL，没动 ingestor 自己读的 `redis-massive-ws-secret` | 从 `.env` 重写 Secret 并重启，`bifrost:health:ws_massive_option` 恢复刷新（`ws_mode=rest_only`）；脚本改为同时写两份 Secret |
 
+### 2026-09-27 防复发（Plugin 0.56.0 · Research 0.146.0）
+
+上表两处期权日线缺口的共同根因是「没有东西会主动发现并补上」，补数据之外加了两道机制：
+
+| 缺口 | 为什么当时没人发现 | 机制 |
+|---|---|---|
+| 09-10 后新进宇宙的 134 个标的没有 09-08 以前的期权日线 | `option-backfill` 是 Owner 手动一次性运行，没有调度；重跑会把 650 个名字的两年全部重拉，所以没人敢重跑 | 新 slot **`option-depth`**：按每个标的最早一根 `option_daily` 判断是否达到分层深度（resident/core 24 个月、edge 12 个月，宽限 30 天），只给不达标的名字规划、且只规划最早 bar 之前还能补到的到期月份；读不到最早日期时整轮跳过，不退化成全量。Research `market_option_depth_schedule` 每周日 07:30 UTC 触发。宇宙达标后每轮接近 0 个作业 |
+| 09-09 只有 26 个标的（相邻日约 340） | doctor 连续性检查只问「这天有没有行」，有行就算通过；coverage 的 thin 是只读指标 | 契约新增 `refill_narrow`（stock_daily / short_volume / option_daily）。doctor 对这些表按**每日标的数**与前 10 个交易日中位数比较，低于一半即开出与缺失日相同的补数处方（共用每轮 3 天上限、先旧后新），00:45 UTC 的 `market_self_heal` 自动执行；当天正在写入的会话不判。按标的数而非行数：08-31～09-04 标的数与邻居相同、只是合约少（回填 DTE 边缘），按行数会每晚误开处方 |
+
+首轮 `option-depth` 手动触发（2026-09-27 22:25 UTC）：134 个标的、2,511 个规划作业，展开约 15.8 万个合约作业。已知代价：天然历史较短的标的（新上市）每周会重拉最早几个月，约 30 个名字，周日空闲时段内消化。
+
 ---
 
 ## 3. Owner 待决事项
@@ -184,7 +195,15 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 2. ~~`option_snapshot` 主键改造~~ — 已定（2026-09-08，方案 A，见 P3）。
 3. SEPA 宇宙是否收敛到 "vendor 有报表的 CS"（约 4,465 只），其余进 void 登记。
 4. ~~日内快照节奏与保留期~~ — 已定（2026-09-08，日内 A：10:30 / 13:00 / 15:30 ET，日内行 30 天）。
-5. 退役清单确认：option-trades、ws-ingestor、`trades-quotes` / `filings` 路由、`stock_financials` 旧表、Option Discovery 流动性面板的 vendor 调用。（ws-ingestor 目前以 standby 常驻，`ws_enabled=false`。）
+5. 退役清单确认：option-trades、~~ws-ingestor~~、`trades-quotes` / `filings` 路由、`stock_financials` 旧表、Option Discovery 流动性面板的 vendor 调用。（ws-ingestor 已定：2026-09-27 连同 redis-massive 一起退役、删代码，见下节。）
+
+### ws-ingestor / redis-massive 退役（Owner 2026-09-27）
+
+Options Starter 没有实时 WS，`polygon-ws-ingestor` 常驻只写一个 `ws_mode=rest_only` 心跳（`bifrost:health:ws_massive_option`），全仓没有任何代码读 redis-massive 里的 `massive:*` 报价；redis-massive 唯一的写入方就是它。Owner 选择两者一起退役、代码直接删除（git 历史保留，将来升级订阅再恢复）。
+
+- Plugin：删 `src/bifrost_market_data/ws/`、`scripts/run_polygon_ws.py`、`k8s/base/deployment-polygon-ws.yaml`、`k8s/redis-massive/`、`k8s/external-names/`、`install-redis-massive.sh` / `apply-external-names-massive.sh`、configmap 的 `polygon_ws` / `redis_massive` / `watchlist_pg` 块、`websockets` 依赖。
+- 下游同批：trade-core（0.25.0，删 massive Redis URL / 心跳键 / `socket_massive_disconnected`）、trade-api（`/status` 不再有 `socket.polygon_ws`）、trade-frontend（状态灯与拓扑节点）、bifrost-platform（卫星总线组件、Critical Processes、sessions-catalog、Tier B `massive-ws-quotes`）、bifrost-trade-infra（Trade 配置 `redis_massive`、`REDIS_MASSIVE_*` secrets、verify-phase-b、NetworkPolicy、platform overlay sessions-catalog）。
+- 顺序：心跳 TTL 180 秒，消费端在读不到时会判红，所以先发代码与消费端，最后才删集群里的 Deployment、redis-massive、ExternalName 与 Secret（`kubectl apply -k` 不 prune，删掉 manifest 不会让线上立即消失）。
 
 ---
 
