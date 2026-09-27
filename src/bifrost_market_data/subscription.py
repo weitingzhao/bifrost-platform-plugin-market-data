@@ -51,7 +51,7 @@ CAPABILITIES: list[dict[str, Any]] = [
     {"id": "option_contracts", "label": "Option contract catalogue (incl. expired)", "status": "entitled", "subscription": "options-starter", "used_by": ["option-refresh"]},
     {"id": "option_aggregates", "label": "Option daily / minute bars", "status": "entitled", "subscription": "options-starter", "used_by": ["option-bars", "minute-bars"]},
     {"id": "financial_statements", "label": "Income, balance sheet, cash flow", "status": "entitled", "subscription": "financials-ratios", "used_by": ["fundamentals-rotate"]},
-    {"id": "ratios_short", "label": "Financial ratios, short interest, short volume", "status": "entitled", "subscription": "financials-ratios", "used_by": ["fundamentals-market"]},
+    {"id": "ratios_short", "label": "Financial ratios, short interest, short volume", "status": "entitled", "subscription": "financials-ratios", "used_by": ["fundamentals-market", "ratios-market"]},
     {"id": "treasury_yields", "label": "Treasury yields and inflation", "status": "entitled", "subscription": None, "used_by": []},
     # Recorded as "unavailable, 404" from 0.10.3 until 0.37.0: that release
     # probed /stocks/filings/v1/*, and the vendor serves vX. The data had been

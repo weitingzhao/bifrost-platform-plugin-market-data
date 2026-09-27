@@ -69,6 +69,7 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "kinds": ["ratios_market", "short_volume_market", "short_interest_market", "sec_filings_market"],
         "freshness": "ratios",
     },
+    "ratios-market": {"kinds": ["ratios_market"], "freshness": "ratios"},
     "intraday-chain": {
         "kinds": ["option_snapshot"],
         "freshness": "option_snapshot",
@@ -154,6 +155,7 @@ SLOT_NOTES: dict[str, str] = {
     "stock-snapshot": "Stock snapshots",
     "stock-movers": "Stock movers",
     "fundamentals-market": "Ratios + short data, whole market by date; SEC filings for the universe",
+    "ratios-market": "Ratios only, whole market, every three hours every day (vendor's latest)",
     "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",

@@ -77,6 +77,10 @@ SLOT_NAMES = (
     "stock-snapshot",
     "stock-movers",
     "fundamentals-market",
+    # Ratios alone, every day including weekends: the endpoint answers with the
+    # vendor's latest whatever date it is asked, so a pull is never a re-fetch
+    # of a done session — it is the only way to catch the next one early.
+    "ratios-market",
     "intraday-chain",
     "treasury",
     "option-backfill",
@@ -2294,6 +2298,17 @@ def enqueue_slot(
             batch = []
         for sym in batch:
             _add("ticker_related", {"symbol": sym}, pri=priority)
+
+    elif slot_key == "ratios-market":
+        # The vendor issues a session's ratios during the next day, after the
+        # 04:30 UTC fundamentals-market run has asked; a Friday's were there by
+        # Sunday afternoon on 2026-09-27 while that slot next ran on Tuesday.
+        # The date is ignored by the endpoint and only names the job.
+        from bifrost_market_data.quality import fetch_completed_trading_days
+
+        sessions = fetch_completed_trading_days(conn, 1, as_of=day)
+        session = sessions[-1] if sessions else day
+        _add("ratios_market", {"date": session.isoformat()}, pri=priority)
 
     elif slot_key == "fundamentals-market":
         # Ratios and short data for the last completed session, whole market.

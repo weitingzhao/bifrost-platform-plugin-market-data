@@ -313,7 +313,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
             why="the vendor ignores ?date and returns the latest; history only accumulates",
         ),
         30.0,
-        ("fundamentals-market",),
+        ("fundamentals-market", "ratios-market"),
         "symbol",
         "period_date",
         freshness_dimension="ratios",

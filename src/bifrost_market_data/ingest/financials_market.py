@@ -8,6 +8,7 @@ per symbol. Rows go into the same entity tables the per-symbol handlers use.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import parse_date
@@ -58,7 +59,19 @@ async def handle_ratios_market(job: JobRow, client: Any, conn: Any) -> Mapping[s
     _reject_truncation("ratios_market", data)
     rows = _rows_from(list(data.get("results") or []), report_type="ratios", period_type="daily", date_keys=("date",))
     n = upsert_financials_rows(conn, rows)
-    return {"rows_written": n, "date": day, "pages": data.get("pages"), "truncated": bool(data.get("truncated"))}
+    # ``date`` is what we asked for and the vendor ignores it. What it answered
+    # is the only trace of when a session's ratios appeared: ``fetched_at`` is a
+    # last-write column, and ratios-market re-pulls the same rows all day.
+    by_date = Counter(r[2] for r in rows)
+    newest = max(by_date) if by_date else None
+    return {
+        "rows_written": n,
+        "date": day,
+        "pages": data.get("pages"),
+        "truncated": bool(data.get("truncated")),
+        "newest": newest.isoformat() if newest else None,
+        "newest_rows": by_date[newest] if newest else 0,
+    }
 
 
 async def handle_short_volume_market(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:

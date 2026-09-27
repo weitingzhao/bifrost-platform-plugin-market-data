@@ -133,6 +133,8 @@ async def test_full_market_fundamentals_and_corporate_handlers() -> None:
     )
     r = await handle_ratios_market(make_job("ratios_market", {"date": "2026-09-04"}), client, FakeConn())
     assert r["rows_written"] == 1 and r["pages"] == 6  # the row without a ticker is dropped
+    # What the vendor answered, not what was asked: the endpoint ignores ?date.
+    assert r["newest"] == "2026-09-04" and r["newest_rows"] == 1
     r = await handle_short_volume_market(make_job("short_volume_market", {"date": "2026-09-04"}), client, FakeConn())
     assert r["rows_written"] == 1
     conn = FakeConn()

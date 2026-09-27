@@ -1527,6 +1527,26 @@ def test_enqueue_fundamentals_market() -> None:
     assert weekend["enqueued"] == 4  # ratios, short volume, short interest, SEC filings
 
 
+def test_enqueue_ratios_market_on_a_sunday() -> None:
+    """Ratios alone, and a Sunday fire is not skipped.
+
+    The endpoint answers with the vendor's latest whatever date it is asked, so
+    a weekend pull is how Friday's ratios arrive before Tuesday — not a re-fetch
+    of a session that is already done.
+    """
+    result = enqueue_slot(
+        _DailyConn(["AAPL"]),
+        "ratios-market",
+        target_date=date(2024, 6, 21),  # Friday
+        fire_date=date(2024, 6, 23),  # Sunday
+        scheduler_cfg={"slots": {"ratios-market": {"priority": 2}}},
+    )
+    assert result.get("skipped") is not True
+    assert [(j["kind"], j["payload"]) for j in result["jobs"]] == [
+        ("ratios_market", {"date": "2024-06-21"})
+    ]
+
+
 def test_fundamentals_rotate_skips_vendor_voids() -> None:
     """A name the vendor answered nothing for waits a month instead of leading the queue daily."""
     conn = _DailyConn(
