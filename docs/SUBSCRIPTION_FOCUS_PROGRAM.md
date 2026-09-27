@@ -164,15 +164,27 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 
 `short_pct_float` 仍恒为 null——流通股数不在当前订阅内（float 端点 404），依赖它的两个情绪信号静默。
 
+### 2026-09-27 巡检修复（Plugin 0.54.0 / 0.55.0 · Research 0.145.0）
+
+巡检时 doctor 判 healthy（0 critical / 0 warning），coverage 页有四处 partial / thin，逐项分因后处理：
+
+| 发现 | 原因 | 处理 |
+|---|---|---|
+| ratios 总是晚两个 slot 才落库 | `ratios?date=` 忽略日期、只给 vendor 最新值；vendor 在会话次日才发布，04:30 UTC 周二–六那一轮问得太早（周五的 ratios 周日下午已有，下一轮在周二） | 新 slot `ratios-market`（每 3 小时、含周末，只拉 ratios）；Research 新增 `market_ratios_market_schedule`（`10 2-20/3 * * *` UTC）并进 husbandry 白名单。`fundamentals-market` 保留 ratios 作为 doctor 的底线 |
+| `option_daily` 09-09 只有 26 个标的（相邻日约 560） | 那天 `option-bars` 仍只续 watchlist，09-10 才扩到宇宙 | `enqueue-slot option-bars date=2026-09-09 force` 重放，91,950 个 job、0 失败 → 36,877 行 / 652 个标的 |
+| `option_daily` 08-31～09-04 被标 thin | **不是缺陷**：这几天来自 P4 回填（每合约只定价到期前 90 天），越靠近回填终点 09-04 远月合约越少；按标的看比现行日更阶梯（约 126 行/标的）还多。coverage 拿回填最密的 08-26～08-28 作邻居才显得薄 | 不补。09-10 后新进宇宙的约 230 个标的在 09-08 前没有期权日线，属 `option-backfill` 的深度问题，另议 |
+| `option_minute` 18/26 | benchmark-only 档 = watchlist ∪ IV-radar 基准，但 `minute-bars` 只走 watchlist，SPY QQQ IWM SPX AAPL MSFT AMZN META 从未有分钟线（`option-bars` 09-10 已修过同类问题） | 0.55.0：`minute-bars` 改走并集；SPX 只进期权轮转（SPY 代理现价），不拉股票分钟线（需 Indices）；期权批量 80 → 120，保持每个名字约 5 天轮一次 |
+| `polygon-ws-ingestor` 心跳每 34 秒 WRONGPASS | 2026-08-19 轮换密码时 `install-redis-massive.sh` 只重建了 ACL，没动 ingestor 自己读的 `redis-massive-ws-secret` | 从 `.env` 重写 Secret 并重启，`bifrost:health:ws_massive_option` 恢复刷新（`ws_mode=rest_only`）；脚本改为同时写两份 Secret |
+
 ---
 
 ## 3. Owner 待决事项
 
-1. 期权回填范围：建议 watchlist ∪ SPY/QQQ/IWM/SPX ∪ M7，共 22 个标的，2 年，行权价 ±30%、DTE ≤ 90。
-2. `option_snapshot` 主键改造（P3，架构级 DDL）。
+1. ~~期权回填范围~~ — 已定（2026-09-08，回填 A，见 P4）。
+2. ~~`option_snapshot` 主键改造~~ — 已定（2026-09-08，方案 A，见 P3）。
 3. SEPA 宇宙是否收敛到 "vendor 有报表的 CS"（约 4,465 只），其余进 void 登记。
-4. 日内快照节奏与保留期：建议 10:30 / 13:00 / 15:30 ET，90 天。
-5. 退役清单确认：option-trades、ws-ingestor、`trades-quotes` / `filings` 路由、`stock_financials` 旧表、Option Discovery 流动性面板的 vendor 调用。
+4. ~~日内快照节奏与保留期~~ — 已定（2026-09-08，日内 A：10:30 / 13:00 / 15:30 ET，日内行 30 天）。
+5. 退役清单确认：option-trades、ws-ingestor、`trades-quotes` / `filings` 路由、`stock_financials` 旧表、Option Discovery 流动性面板的 vendor 调用。（ws-ingestor 目前以 standby 常驻，`ws_enabled=false`。）
 
 ---
 
