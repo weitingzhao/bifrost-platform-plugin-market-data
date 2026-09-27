@@ -160,3 +160,69 @@ def test_a_spent_budget_returns_what_it_did_rather_than_raising() -> None:
     moved = repair_renamed_labels(conn, budget_sec=-1.0)
     assert moved == {}
     assert not [q for q, _ in conn.statements if q.startswith("UPDATE")]
+
+
+# ── the listings have to abut ──────────────────────────────────────────────
+
+
+def _routes() -> dict[str, str]:
+    from bifrost_market_data.schema import rename_label_repair as m
+
+    return {"ticker": m._PAIRS_FROM_TICKER, "catalogue": m._PAIRS_FROM_CATALOGUE}
+
+
+def test_both_routes_require_the_listings_to_abut() -> None:
+    """A rename hands the price series over within days.
+
+    Sharing a CIK and a FIGI across a gap of years is a registrant reusing an
+    identifier, not one company changing its symbol, and it must not move option
+    rows. Measured 2026-09-27 this filters nothing: of the twenty pairs the
+    reference route finds, sixteen abut at one day and four at three, none
+    further. It was added expecting to drop ADIGW/ADIG and BBBY/NXH and does not,
+    because those are real symbol changes — ADIG carries ADIGW's company name and
+    is instrument_type CS, not a warrant. So it bounds what the rule can do later
+    rather than correcting what it does now, and the measurement is the reason to
+    keep it honest about which of those it is.
+
+    It matters most on the catalogue route, which has no CIK to link through: a
+    live root over a dead label is the whole of its evidence there.
+    """
+    from bifrost_market_data.schema.rename_label_repair import _RENAME_MAX_GAP_DAYS
+
+    for name, sql in _routes().items():
+        flat = " ".join(sql.split())
+        assert f"<= {_RENAME_MAX_GAP_DAYS}" in flat, f"{name} route does not bound the gap"
+        assert "next_bar - " in flat and "last_bar" in flat, f"{name} route compares no dates"
+
+
+def test_the_successor_is_judged_on_the_handover_not_its_earlier_life() -> None:
+    """ECHO held the symbol before, so its first bar ever is the wrong date.
+
+    ``stock_daily`` has ECHO bars from 2021-09-09 to 2021-11-22 for Echo Global
+    Logistics, then nothing until EchoStar took the symbol on 2026-06-24 — the
+    session after SATS's last bar on 2026-06-23. Read as "the successor's first
+    bar" the gap is 4.6 years and SATS → ECHO, the pair this repair exists for,
+    is rejected. Read as "its first bar after the retired symbol's last" it is one
+    session. Simplifying the subquery to an unconditional ``min`` is the mistake
+    this test exists to catch.
+    """
+    for name, sql in _routes().items():
+        flat = " ".join(sql.split())
+        assert "min(bar_date) AS next_bar" in flat, f"{name} route takes no successor date"
+        head, _, tail = flat.partition("min(bar_date) AS next_bar")
+        assert "bar_date >" in tail.split(")")[0] + tail.split(")")[1], (
+            f"{name} route takes the successor's first bar outright, not the handover"
+        )
+
+
+def test_a_missing_price_series_on_either_side_moves_nothing() -> None:
+    """No dates is no evidence, and the write is an UPDATE nobody can undo.
+
+    A symbol with no bars cannot be shown to abut anything, so it fails closed.
+    That does cost a rename of a name that never printed a stock bar; moving rows
+    on no time evidence at all costs more.
+    """
+    for name, sql in _routes().items():
+        flat = " ".join(sql.split())
+        assert "last_bar IS NOT NULL" in flat, f"{name} route acts without the dead date"
+        assert "next_bar IS NOT NULL" in flat, f"{name} route acts without the live date"

@@ -60,20 +60,54 @@ RENAME_TABLES: tuple[str, ...] = (
 _TICKER_TAIL = 15
 _TICKER_PREFIX = 2
 
-#: Renames the reference table can prove: one registrant (CIK) and one
-#: instrument (composite FIGI), the old symbol inactive and the new one active.
-#: ``HAVING count(*) = 1`` drops a dead symbol that matches two live ones —
-#: ambiguity is a reason to do nothing, not to pick.
-_PAIRS_FROM_TICKER = """
+#: A rename hands the price series over within days: the retired symbol prints
+#: its last bar and the successor picks up on the next session. Anything further
+#: apart shares a CIK and a FIGI for some other reason -- a registrant reusing an
+#: identifier after a gap, or vendor error -- and must not move option rows.
+#:
+#: One weekend plus a holiday. Measured 2026-09-27 over every pair the CIK/FIGI
+#: test finds: sixteen abut at one day and four at three, and **none** is further
+#: out, so this bounds what the rule can do in future rather than filtering
+#: anything today. It was added on the expectation that it would drop pairs like
+#: ADIGW/ADIG and BBBY/NXH; it does not, because those are real symbol changes --
+#: ADIG carries the same company name as ADIGW and is instrument_type CS, not a
+#: warrant. The guard is honest as an invariant and idle as a filter.
+_RENAME_MAX_GAP_DAYS = 5
+
+#: Renames the reference table can prove: one registrant (CIK), one instrument
+#: (composite FIGI), the old symbol inactive and the new one active, and the two
+#: listings abutting in time. ``HAVING count(*) = 1`` drops a dead symbol that
+#: still matches two live ones — ambiguity is a reason to do nothing, not to pick.
+#: The adjacency test runs before that count, so evidence narrows the ambiguity
+#: instead of the count refusing a pair that evidence could have settled.
+#:
+#: ``next_bar`` is the successor's first bar **after** the retired symbol's last,
+#: not its first bar outright, so a successor that has held the symbol before is
+#: still judged on the handover and not on its earlier life. No pair on this route
+#: needs that today -- the case that does, SATS → ECHO, has no ticker row and so
+#: arrives through the catalogue route below.
+_PAIRS_FROM_TICKER = f"""
 SELECT dead.symbol, min(alive.symbol)
 FROM raw_market.ticker dead
 JOIN raw_market.ticker alive
   ON alive.cik = dead.cik
  AND alive.composite_figi = dead.composite_figi
  AND alive.symbol <> dead.symbol
+CROSS JOIN LATERAL (
+  SELECT max(bar_date) AS last_bar
+  FROM raw_market.stock_daily WHERE symbol = dead.symbol
+) dl
+CROSS JOIN LATERAL (
+  SELECT min(bar_date) AS next_bar
+  FROM raw_market.stock_daily
+  WHERE symbol = alive.symbol AND bar_date > dl.last_bar
+) an
 WHERE NOT dead.active AND alive.active
   AND dead.cik IS NOT NULL AND dead.cik <> ''
   AND dead.composite_figi IS NOT NULL AND dead.composite_figi <> ''
+  AND dl.last_bar IS NOT NULL
+  AND an.next_bar IS NOT NULL
+  AND an.next_bar - dl.last_bar <= {_RENAME_MAX_GAP_DAYS}
 GROUP BY dead.symbol
 HAVING count(*) = 1
 """
@@ -82,6 +116,16 @@ HAVING count(*) = 1
 #: row to link from: the walk inserts what the vendor lists as active, and SATS
 #: was delisted before the table was first written. A root that is a live
 #: ticker over a label that is not one is the same fact by another route.
+#:
+#: This route carries the same adjacency test, and it is the one that needs it.
+#: With no CIK to link through, a live root over a dead label is all the evidence
+#: there is, and a reused ticker looks exactly like a rename -- which is not
+#: hypothetical here: ``stock_daily`` holds ECHO bars from 2021-09-09 to
+#: 2021-11-22 for Echo Global Logistics, nothing until EchoStar took the symbol on
+#: 2026-06-24, the session after SATS's last bar. So this is where the successor's
+#: first bar **after** the dead symbol's last matters: read as its first bar
+#: outright it is 2021-09-09, a 4.6-year gap, and the one pair this repair exists
+#: for would be rejected.
 _PAIRS_FROM_CATALOGUE = f"""
 WITH r AS (
     SELECT DISTINCT underlying,
@@ -95,6 +139,21 @@ FROM r
 WHERE r.root <> r.underlying
   AND EXISTS (SELECT 1 FROM raw_market.ticker t WHERE t.symbol = r.root AND t.active)
   AND NOT EXISTS (SELECT 1 FROM raw_market.ticker t WHERE t.symbol = r.underlying AND t.active)
+  AND EXISTS (
+    SELECT 1
+    FROM (
+      SELECT max(bar_date) AS last_bar
+      FROM raw_market.stock_daily WHERE symbol = r.underlying
+    ) dl
+    CROSS JOIN LATERAL (
+      SELECT min(bar_date) AS next_bar
+      FROM raw_market.stock_daily
+      WHERE symbol = r.root AND bar_date > dl.last_bar
+    ) an
+    WHERE dl.last_bar IS NOT NULL
+      AND an.next_bar IS NOT NULL
+      AND an.next_bar - dl.last_bar <= {_RENAME_MAX_GAP_DAYS}
+  )
 """
 
 #: One statement per (table, pair). Equality on ``underlying`` so the label
@@ -186,4 +245,10 @@ def repair_renamed_labels(
     return moved
 
 
-__all__ = ["DEFAULT_BUDGET_SEC", "RENAME_TABLES", "rename_pairs", "repair_renamed_labels"]
+__all__ = [
+    "DEFAULT_BUDGET_SEC",
+    "RENAME_TABLES",
+    "_RENAME_MAX_GAP_DAYS",
+    "rename_pairs",
+    "repair_renamed_labels",
+]
