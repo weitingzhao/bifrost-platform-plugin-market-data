@@ -1383,24 +1383,30 @@ def run_doctor(
     # the whole session critical for data that was not yet due.
     fund_due = deadline(session, FUNDAMENTALS_MARKET_DEADLINE_H)
     fund_overdue = now_utc >= fund_due
+    # Not yet due is not a warning. The nightly self-heal runs at 00:45 UTC and
+    # the slot at 04:30, so a warning here was the only thing between the
+    # doctor and "healthy" on 7 of 7 nights from 09-16 to 09-26 — the verdict
+    # said degraded every night and meant nothing by it. `is_late` in
+    # ``session`` already draws the line here for the quality gate.
+    fund_late = not fund_ok and fund_overdue
     findings.append(
         Finding(
             f"fundamentals_market:{session_s}",
             "fundamentals-market",
-            "ok" if fund_ok else ("crit" if fund_overdue else "warn"),
+            "crit" if fund_late else "ok",
             "Ratios + short volume (whole market)",
             f"ratios >= {RATIOS_MIN_ROWS} for {ratios_s}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
             {"ratios": n_ratios, "short_volume": n_sv},
             f"ratios={n_ratios} rows for {ratios_s}, short_volume={n_sv} rows for {session_s}."
             + (
-                " Short volume is published the morning after the session and ratios"
-                f" a session later; due {fund_due:%Y-%m-%d %H:%M} UTC."
+                " Not yet due: short volume is published the morning after the session"
+                f" and ratios a session later; due {fund_due:%Y-%m-%d %H:%M} UTC."
                 if not fund_ok and not fund_overdue
                 else ""
             ),
             session=session_s,
-            fix=None if fund_ok else _slot_fix("fundamentals-market", session, force=False),
-            auto_fixable=not fund_ok and fund_overdue,
+            fix=_slot_fix("fundamentals-market", session, force=False) if fund_late else None,
+            auto_fixable=fund_late,
         )
     )
 

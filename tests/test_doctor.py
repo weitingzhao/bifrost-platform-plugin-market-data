@@ -293,7 +293,7 @@ def test_session_is_today_after_eod_window_on_trading_day() -> None:
     assert doc.resolve_session(conn, early) == (SESSION, False)
 
 
-def test_today_session_missing_fundamentals_is_only_a_warning() -> None:
+def test_today_session_missing_fundamentals_is_not_yet_due() -> None:
     data = _healthy_data()
     data["ratios"] = 0
     data["short_volume"] = 0
@@ -303,8 +303,10 @@ def test_today_session_missing_fundamentals_is_only_a_warning() -> None:
     rep = doc.run_doctor(_Conn(data), now=late, watchlist=UNIVERSE)
     f = next(x for x in rep["findings"] if x["id"].startswith("fundamentals_market:"))
     assert rep["session_is_today"] is True
-    assert f["severity"] == "warn"
+    assert f["severity"] == "ok"
+    assert f["fix"] is None
     assert f["auto_fixable"] is False
+    assert "Not yet due" in f["detail"]
     assert "morning after" in f["detail"]
 
 
@@ -546,9 +548,22 @@ def test_fundamentals_are_not_critical_before_their_deadline() -> None:
     just_after_ny_midnight = datetime(2026, 9, 5, 4, 10, tzinfo=timezone.utc)
     rep = doc.run_doctor(_Conn(_no_fundamentals()), now=just_after_ny_midnight, watchlist=UNIVERSE)
     f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
-    assert f["severity"] == "warn"
+    assert f["severity"] == "ok"
     assert f["auto_fixable"] is False
     assert "due" in f["detail"]
+
+
+def test_fundamentals_not_yet_due_leave_the_self_heal_healthy() -> None:
+    """00:45 UTC is when the nightly self-heal asks; the slot runs at 04:30.
+
+    A warning here was the whole of the "degraded" verdict on 7 of 7 nights
+    from 09-16 to 09-26.
+    """
+    self_heal_hour = datetime(2026, 9, 5, 0, 45, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(_no_fundamentals()), now=self_heal_hour, watchlist=UNIVERSE)
+    assert not [f["id"] for f in rep["findings"] if f["severity"] != "ok"
+                and f["id"].startswith("fundamentals_market")]
+    assert not [p for p in rep["prescriptions"] if p.get("slot") == "fundamentals-market"]
 
 
 def test_fundamentals_are_critical_once_the_deadline_passes() -> None:
