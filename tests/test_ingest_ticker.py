@@ -133,3 +133,119 @@ async def test_ticker_sync_detail() -> None:
     row = conn.statements[0][1][0]
     assert row[0] == "AAPL"
     assert row[13] == 3e12  # market_cap
+
+
+# ── delisted mode ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delisted_mode_stores_the_retired_listing() -> None:
+    """The universe walk asks for active names, so a symbol already gone when it
+    first ran has no row — and without one, no rename through it can be proven,
+    because the proof is the old symbol's CIK and FIGI.
+
+    SATS is the case: delisted 2026-06-24, and its 32,263 pre-rename option_daily
+    rows stayed split from ECHO's because nothing could show the pair was a
+    rename. `/v3/reference/tickers/{symbol}` 404s on a retired listing, so this is
+    the list form with an exact ticker and active=false.
+    """
+    client = mock_client(
+        fetch_reference_tickers={
+            "results": [
+                {
+                    "ticker": "SATS",
+                    "name": "EchoStar Corporation",
+                    "type": "CS",
+                    "active": False,
+                    "cik": "0001415404",
+                    "composite_figi": "BBG000TGLV00",
+                    "delisted_utc": "2026-06-24",
+                }
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_ticker_sync(
+        make_job("ticker_sync", {"mode": "delisted", "symbol": "SATS"}),
+        client,
+        conn,
+    )
+    assert result == {
+        "rows_written": 1,
+        "mode": "delisted",
+        "symbol": "SATS",
+        "delisted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_answer_of_nothing_writes_nothing_and_says_so() -> None:
+    """Five of the seven symbols in that state are not retired listings at all —
+    SPY, QQQ and IWM are ETFs the CS-only walk never writes, SPX is an index and
+    SW1 an adjusted root. Asking about them has to be free, because the caller's
+    selection is deliberately loose: the vendor judges what is retired.
+    """
+    client = mock_client(fetch_reference_tickers={"results": [], "pages": 1})
+    conn = FakeConn()
+    result = await handle_ticker_sync(
+        make_job("ticker_sync", {"mode": "delisted", "symbol": "SW1"}),
+        client,
+        conn,
+    )
+    assert result["rows_written"] == 0
+    assert result["delisted"] is False, "absence is an answer: do not look for a rename"
+
+
+@pytest.mark.asyncio
+async def test_delisted_mode_ignores_a_row_for_another_symbol() -> None:
+    """An unfiltered type means the answer can carry more than was asked for."""
+    client = mock_client(
+        fetch_reference_tickers={
+            "results": [
+                {"ticker": "SATSW", "name": "warrant", "active": False},
+                {"ticker": "SATS", "name": "EchoStar", "active": False, "cik": "0001415404"},
+            ],
+            "pages": 1,
+        }
+    )
+    conn = FakeConn()
+    result = await handle_ticker_sync(
+        make_job("ticker_sync", {"mode": "delisted", "symbol": "SATS"}),
+        client,
+        conn,
+    )
+    assert result["rows_written"] == 1, "only the exact ticker"
+
+
+@pytest.mark.asyncio
+async def test_delisted_mode_needs_a_symbol() -> None:
+    client = mock_client(fetch_reference_tickers={"results": []})
+    with pytest.raises(ValueError):
+        await handle_ticker_sync(
+            make_job("ticker_sync", {"mode": "delisted"}), client, FakeConn()
+        )
+
+
+def test_the_nightly_walk_cannot_erase_a_retirement_date() -> None:
+    """This is the one that would have bitten quietly.
+
+    The universe list asks for active listings and those never report a
+    delisted_utc, so putting the column in the on-conflict update set would null
+    out what the delisted lookup stored — every night, invisibly, and the repair
+    that depends on it would just stop finding pairs again.
+    """
+    from bifrost_market_data.ingest.ticker_sync import _COLS, _UNIVERSE_UPDATE_COLS
+
+    assert "delisted_utc" in _COLS, "the delisted lookup writes it"
+    assert "delisted_utc" not in _UNIVERSE_UPDATE_COLS, "and the walk must not touch it"
+
+
+def test_the_client_can_ask_about_a_retired_symbol() -> None:
+    """The param builder always accepted `ticker`; nothing passed it through."""
+    import inspect
+
+    from bifrost_market_data.polygon.client import PolygonClient
+
+    sig = inspect.signature(PolygonClient.fetch_reference_tickers)
+    assert "ticker" in sig.parameters

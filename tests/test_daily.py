@@ -236,6 +236,10 @@ class _DailyCursor:
                 rows.append((ticker,))
             self.parent._fetchall = rows
             self.parent._fetchone = None
+        elif "/* delisted-lookup */" in q:
+            limit = int(params[1]) if params and len(params) > 1 else 25
+            self.parent._fetchall = [(s,) for s in self.parent.delisted_candidates[:limit]]
+            self.parent._fetchone = None
         elif "/* retired-underlyings */" in q:
             scope = set(params[0]) if params else set()
             self.parent._fetchall = [
@@ -340,6 +344,7 @@ class _DailyConn:
         cs_universe: list[str] | None = None,
         income_covered: list[str] | None = None,
         retired: list[str] | None = None,
+        delisted_candidates: list[str] | None = None,
         session_evidence: bool = False,
         session_symbols: list[str] | None = None,
         spots: dict[str, float] | None = None,
@@ -370,6 +375,8 @@ class _DailyConn:
         #: active ticker row. The fake answers from this rather than deriving it,
         #: so a test can put a name in exactly one state.
         self.retired = retired or []
+        #: What the delisted-lookup query finds, blocking cases first.
+        self.delisted_candidates = delisted_candidates or []
         self.raise_on_watchlist = raise_on_watchlist
         self.raise_on_readiness = raise_on_readiness
         self.calendar = calendar or {}
@@ -2413,3 +2420,81 @@ def test_the_probe_needs_both_signals_in_its_sql() -> None:
     sql = " ".join(raw.lower().split())
     assert "coalesce(t.active, false) = false" in sql, "absent counts as inactive"
     assert "not exists" in sql and "stock_daily" in sql, "and no recent close"
+
+
+# ── asking the vendor about a retired listing ──────────────────────────────
+
+
+def test_the_reference_slot_asks_about_symbols_the_walk_cannot_see() -> None:
+    """The walk inserts what the vendor lists as active, so a symbol already gone
+    when it first ran has no row — and the rename proof is that row's CIK and FIGI.
+
+    Measured 2026-09-27: four underlyings hold option rows with no ticker row, and
+    two of them are retired listings — SATS, whose 32,263 pre-rename option_daily
+    rows stayed split from ECHO's for exactly this reason, and FI, whose bars stop
+    2025-11-10 while FISV's run to 2026-09-25. Nobody knew about the second one.
+    """
+    conn = _DailyConn(["AAPL"], delisted_candidates=["SATS", "FI"])
+    out = enqueue_slot(
+        conn,
+        "reference",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={"slots": {"reference": {"priority": 5}}},
+        force=True,
+    )
+    jobs = [(j["kind"], j["payload"].get("mode"), j["payload"].get("symbol")) for j in out["jobs"]]
+    assert ("ticker_sync", "universe", None) in jobs, "the walk still runs"
+    assert ("ticker_sync", "delisted", "SATS") in jobs
+    assert ("ticker_sync", "delisted", "FI") in jobs
+
+
+def test_the_lookup_is_capped_per_run() -> None:
+    """Seventy-nine candidates on the first pass; a slot must not fan out."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    syms = [f"D{i:03d}" for i in range(80)]
+    conn = _DailyConn(["AAPL"], delisted_candidates=syms)
+    got = dmod.load_delisted_lookup_candidates(conn, as_of=date(2024, 6, 20))
+    assert len(got) == dmod.DELISTED_LOOKUP_PER_RUN == 25
+
+
+def test_the_candidate_query_excludes_anything_that_still_trades() -> None:
+    """A recent close settles it: whatever else the symbol is, it is not retired.
+
+    That is what keeps SPY, QQQ and IWM out — ETFs the CS-only walk never writes,
+    which would otherwise look exactly like the blocking case.
+    """
+    from bifrost_market_data.scheduler import daily as dmod
+
+    conn = _DailyConn(["AAPL"], delisted_candidates=["SATS"])
+    dmod.load_delisted_lookup_candidates(conn, as_of=date(2024, 6, 20))
+    sql = next(
+        " ".join(q.lower().split())
+        for q, _p in conn.statements
+        if "/* delisted-lookup */" in q
+    )
+    assert "raw_market.stock_daily" in sql and "not exists" in sql
+    assert "delisted_utc is null" in sql, "and inactive rows still missing the date"
+    assert "order by rank" in sql, "blocking cases first, so one run unblocks them"
+
+
+def test_an_unanswerable_candidate_query_asks_about_nobody() -> None:
+    """A lookup nobody requested is not a failure worth propagating."""
+    from bifrost_market_data.scheduler import daily as dmod
+
+    class _Boom(_DailyConn):
+        def cursor(self) -> Any:
+            cur = super().cursor()
+            inner = cur.execute
+
+            def execute(query: str, params: Any = None) -> None:
+                if "/* delisted-lookup */" in " ".join(query.lower().split()):
+                    raise RuntimeError("relation does not exist")
+                inner(query, params)
+
+            cur.execute = execute  # type: ignore[method-assign]
+            return cur
+
+    conn = _Boom(["AAPL"], delisted_candidates=["SATS"])
+    assert dmod.load_delisted_lookup_candidates(conn, as_of=date(2024, 6, 20)) == []

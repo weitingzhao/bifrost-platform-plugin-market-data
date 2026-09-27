@@ -1,4 +1,4 @@
-"""kind=ticker_sync → market.ticker (universe or detail mode)."""
+"""kind=ticker_sync → market.ticker (universe, detail or delisted mode)."""
 
 from __future__ import annotations
 
@@ -26,9 +26,13 @@ _COLS = (
     "homepage_url",
     "total_employees",
     "description",
+    "delisted_utc",
 )
 
-# List/universe API does not return overview fields; never overwrite them on conflict.
+# List/universe API does not return overview fields; never overwrite them on
+# conflict. ``delisted_utc`` is deliberately absent for a sharper reason: the walk
+# asks for active listings, which never report one, so including it here would
+# null out what the delisted lookup stored every single night.
 _UNIVERSE_UPDATE_COLS = (
     "name",
     "market",
@@ -66,6 +70,7 @@ def _row_from_list_item(item: Mapping[str, Any]) -> tuple[Any, ...] | None:
         item.get("homepage_url"),
         as_int(item.get("total_employees")),
         item.get("description"),
+        parse_date(item.get("delisted_utc")),
     )
 
 
@@ -80,6 +85,64 @@ def _row_from_detail(data: Mapping[str, Any]) -> tuple[Any, ...] | None:
 async def handle_ticker_sync(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
     payload = job.payload or {}
     mode = str(payload.get("mode") or "universe").strip().lower()
+
+    if mode == "delisted":
+        # A symbol the vendor has retired. ``/v3/reference/tickers/{symbol}``
+        # serves live listings only and 404s on every delisted name measured
+        # 2026-09-26, so this is the list form with an exact ticker and
+        # ``active=false`` -- the only route that answers at all.
+        #
+        # Nothing is invented when it answers nothing: a symbol that is not
+        # retired, or is an ETF or an index rather than a listing, simply writes
+        # no row. That is what makes the caller's selection cheap to be wrong
+        # about -- the vendor is the judge of whether a symbol is delisted, not
+        # the predicate that chose to ask.
+        symbol = str(payload.get("symbol") or payload.get("ticker") or "").strip().upper()
+        if not symbol:
+            raise ValueError("ticker_sync delisted mode requires symbol")
+        data = await client.fetch_reference_tickers(
+            market=str(payload.get("market") or "stocks"),
+            active=False,
+            locale=str(payload.get("locale") or "us"),
+            # Unfiltered: a retired listing's type is not worth guessing, and the
+            # exact ticker already bounds the answer to a handful of rows.
+            ticker_type=None,
+            ticker=symbol,
+            max_pages=1,
+        )
+        results = data.get("results") if isinstance(data, dict) else None
+        rows = []
+        for item in results or []:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("ticker") or "").strip().upper() != symbol:
+                continue
+            row = _row_from_list_item(item)
+            if row is not None:
+                rows.append(row)
+        try:
+            n = batch_upsert(
+                conn,
+                "market.ticker",
+                _COLS,
+                rows,
+                conflict_keys=("symbol",),
+                update_cols=tuple(c for c in _COLS if c != "symbol"),
+                set_fetched_at=False,
+                auto_commit=False,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return {
+            "rows_written": n,
+            "mode": "delisted",
+            "symbol": symbol,
+            # Absence is an answer, and a useful one: it says the symbol is not a
+            # retired listing, so nobody should look for a rename through it.
+            "delisted": bool(rows),
+        }
 
     if mode == "detail":
         symbol = str(payload.get("symbol") or payload.get("ticker") or "").strip().upper()

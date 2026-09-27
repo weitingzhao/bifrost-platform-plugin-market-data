@@ -1037,6 +1037,85 @@ def tickers_needing_detail(conn: Any, *, limit: int = 200) -> list[str]:
     return out
 
 
+#: Per run, so a first pass cannot fan out. Measured 2026-09-27 the blocking set
+#: is one symbol and the backlog of inactive rows without a retirement date is 94,
+#: so this drains in a handful of nightly runs and stays idle afterwards.
+DELISTED_LOOKUP_PER_RUN = 25
+
+
+def load_delisted_lookup_candidates(
+    conn: Any,
+    *,
+    as_of: date,
+    limit: int = DELISTED_LOOKUP_PER_RUN,
+) -> list[str]:
+    """Symbols worth asking the vendor's retired-listing endpoint about.
+
+    Two states, and the first is the one that blocks something concrete. An
+    underlying that holds option rows and has **no** ``raw_market.ticker`` row at
+    all cannot be shown to be a rename: that proof needs the old symbol's CIK and
+    FIGI, and the universe walk only ever inserts what the vendor lists as active.
+    SATS is the case -- delisted 2026-06-24, before the walk first ran -- and its
+    32,263 pre-rename ``option_daily`` rows stayed split from ECHO's for exactly
+    that reason. Second, and not blocking: a row already marked inactive but with
+    no retirement date, of which there were 94 on 2026-09-27.
+
+    Deliberately **not** a careful predicate. Measured, the first state holds seven
+    symbols and only two are retired listings -- SATS, and FI, whose bars stop
+    2025-11-10 while FISV's run to 2026-09-25. The other five are SPY, QQQ and IWM
+    (ETFs, which the CS-only walk never writes), SPX (an index) and SW1 (an
+    adjusted root, not a symbol at all). Asking about those costs one empty answer
+    each and writes nothing, because the handler only stores what comes back from
+    ``active=false``. The vendor is the judge of what is retired; this only decides
+    who to ask. A predicate sharp enough to pre-empt it would be a second, worse
+    copy of that judgement -- and the absence of a ticker row is evidence of
+    nothing, as five of those seven show.
+
+    A recent close excludes a symbol outright: whatever else it is, it trades.
+    """
+    floor = as_of - timedelta(days=RETIRED_CLOSE_LOOKBACK_DAYS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                /* delisted-lookup */
+                SELECT symbol FROM (
+                  SELECT DISTINCT o.underlying AS symbol, 0 AS rank
+                  FROM raw_market.option_daily o
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM raw_market.ticker t WHERE t.symbol = o.underlying
+                  )
+                  UNION
+                  SELECT t.symbol, 1 AS rank
+                  FROM raw_market.ticker t
+                  WHERE NOT t.active AND t.delisted_utc IS NULL
+                ) c
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM raw_market.stock_daily s
+                  WHERE s.symbol = c.symbol AND s.bar_date >= %s AND s.close IS NOT NULL
+                )
+                ORDER BY rank, symbol
+                LIMIT %s
+                """,
+                (floor, max(0, int(limit))),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- a lookup nobody asked for is not a failure
+        logger.warning("delisted-lookup candidate query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+    out: list[str] = []
+    for row in rows or []:
+        sym = row.get("symbol") if isinstance(row, Mapping) else (row[0] if row else None)
+        if sym:
+            out.append(str(sym).strip().upper())
+    return out
+
+
 def load_retired_underlyings(
     conn: Any,
     underlyings: Sequence[str],
@@ -2088,6 +2167,11 @@ def enqueue_slot(
     elif slot_key == "reference":
         # Universe ticker sync — run on weekends/holidays too (calendar-like).
         _add("ticker_sync", {"mode": "universe"}, pri=priority)
+        # And the listings the walk structurally cannot see: it asks for active
+        # names, so a symbol already retired when it first ran has no row, and
+        # without one no rename through it can ever be proven.
+        for sym in load_delisted_lookup_candidates(conn, as_of=day):
+            _add("ticker_sync", {"mode": "delisted", "symbol": sym}, pri=priority)
 
     elif slot_key == "fundamentals-rotate":
         # Per-symbol financials (+ optional SEPA extras) with deterministic rotation.

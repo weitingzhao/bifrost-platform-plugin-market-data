@@ -503,3 +503,22 @@ def test_an_empty_proxy_map_still_builds_a_legal_view() -> None:
     # An all-NULL row never matches p.storage = os.underlying, so the view
     # behaves exactly as it did before any root had a proxy.
     assert empty == "(VALUES (NULL::text, NULL::text, NULL::double precision, NULL::text))"
+
+
+def test_the_retirement_date_column_lands_on_both_ddl_paths() -> None:
+    """raw_market.ticker is owned by the plugin's role, so wave8 may alter it.
+
+    That is the difference from add_financials_filing_date, which is deliberately
+    absent from the wave8 path because its tables are owned by postgres. Measured
+    2026-09-27: pg_tables.tableowner for raw_market.ticker is `bifrost`. A column
+    only apply_ddl reaches runs nowhere, and this one has a repair depending on it.
+    """
+    from bifrost_market_data.schema.ddl import apply_wave8_migrations
+
+    for apply in (apply_ddl, apply_wave8_migrations):
+        conn = _FakeConn()
+        apply(conn)
+        joined = "\n".join(conn.cur.statements)
+        assert "ADD COLUMN IF NOT EXISTS delisted_utc date" in joined, (
+            f"{apply.__name__} does not add the retirement date"
+        )

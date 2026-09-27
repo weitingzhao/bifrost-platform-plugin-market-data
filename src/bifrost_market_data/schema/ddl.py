@@ -62,6 +62,10 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         # can be created on this path rather than waiting for a superuser run.
         create_coverage_sample(cur)
         tune_job_ingest_autovacuum(cur)
+        # raw_market.ticker is owned by the plugin's role (pg_tables.tableowner =
+        # bifrost), unlike the tables add_financials_filing_date has to skip, so
+        # this ALTER runs on the path the cluster actually uses.
+        add_ticker_delisted_utc(cur)
         # Owned by the plugin's role (pg_views.viewowner = bifrost), so this
         # path may replace it even though it cannot own raw_market tables.
         rebuild_option_snapshot_with_stock_view(cur)
@@ -133,6 +137,7 @@ def apply_ddl(conn: _Connection) -> None:
         retire_data_ops_compat_schema(cur)
         migrate_option_snapshot_observed_time(cur)
         migrate_corporate_action_identity(cur)
+        add_ticker_delisted_utc(cur)
         _create_views(cur)
         _ensure_partitions(cur)
     conn.commit()
@@ -474,6 +479,13 @@ def _create_market_tables(cur: _Cursor) -> None:
             homepage_url      text,
             total_employees   integer,
             description       text,
+            -- The session the vendor retired the listing. Only its
+            -- ``?ticker=X&active=false`` form reports it, so this is NULL for
+            -- every row the universe walk writes and set only by the delisted
+            -- lookup. It is what lets a rename be proven after the fact: the
+            -- repair needs the old symbol's CIK and FIGI, and a symbol that was
+            -- already gone when the walk first ran has no row to read them from.
+            delisted_utc      date,
             updated_at        timestamptz DEFAULT now()
         )
         """
@@ -1094,6 +1106,11 @@ OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
         """,
     OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL,
 )
+
+
+def add_ticker_delisted_utc(cur: _Cursor) -> None:
+    """Idempotent, and on both paths: the cluster's Job runs ``--wave8-only``."""
+    cur.execute("ALTER TABLE raw_market.ticker ADD COLUMN IF NOT EXISTS delisted_utc date")
 
 
 def _create_views(cur: _Cursor) -> None:

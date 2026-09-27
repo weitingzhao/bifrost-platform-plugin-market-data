@@ -392,8 +392,15 @@ class PolygonClient:
         ticker_type: str | None = "CS",
         cursor: str | None = None,
         max_pages: int = 1,
+        ticker: str | None = None,
     ) -> dict[str, Any]:
-        """GET ``/v3/reference/tickers``. Default single page (cursor-driven by caller)."""
+        """GET ``/v3/reference/tickers``. Default single page (cursor-driven by caller).
+
+        ``ticker`` with ``active=False`` is the only form that answers for a symbol
+        the vendor has retired: ``/v3/reference/tickers/{symbol}`` serves live
+        listings only and 404s on all four of the delisted names measured
+        2026-09-26. The param builder has always accepted it; nothing passed it.
+        """
         path = ep.reference_tickers_path()
         params = ep.reference_tickers_params(
             market=market,
@@ -401,6 +408,7 @@ class PolygonClient:
             locale=locale,
             ticker_type=ticker_type,
             cursor=cursor,
+            ticker=ticker,
         )
         return await self._paginate(path, params, max_pages=max_pages)
 
