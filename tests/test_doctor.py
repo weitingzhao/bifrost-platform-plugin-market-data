@@ -67,6 +67,9 @@ class _Cur:
             self._rows = [{"count": d.get("daily", 0)}]
         elif "from raw_market.stock_snapshot" in q:
             self._rows = [{"count": d.get("snap_rows", 0)}]
+        elif "/* doctor: session-baseline */" in q:
+            table = "ratios" if "from raw_market.ratios" in q else "short_volume"
+            self._rows = list(d.get("session_baseline", {}).get(table, []))
         elif "from raw_market.ratios" in q:
             # By date when the fixture says which dates it holds: the check asks
             # for a different date than the session it reports on.
@@ -595,7 +598,10 @@ def test_ratios_are_read_a_session_behind_the_one_reported() -> None:
     assert rep["session"] == SESSION.isoformat()
     assert f["severity"] == "ok"
     assert thursday.isoformat() in f["expected"]
-    asked = [p for q, p in conn.statements if "from raw_market.ratios" in q]
+    asked = [
+        p for q, p in conn.statements
+        if "from raw_market.ratios" in q and "session-baseline" not in q
+    ]
     assert asked == [(thursday,)]
 
 
@@ -608,6 +614,69 @@ def test_a_missing_ratios_session_is_still_critical() -> None:
     f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
     assert f["severity"] == "crit"
     assert f["actual"] == {"ratios": 0, "short_volume": data["short_volume"]}
+
+
+# ── Landed short: a whole-market count against its own recent sessions ──
+
+
+def _ratios_baseline(n: int = 4790) -> list[tuple[date, int]]:
+    return [(d, n) for d in SESSIONS[:-1]]
+
+
+def test_ratios_a_third_short_are_refetched_before_the_deadline() -> None:
+    """2026-09-21 and 09-22: 3,217 ratios against ~4,790, and the doctor said ok.
+
+    Above the absolute floor of 2,000, and inside the 30h deadline at every hour
+    the heal asks — while the vendor serves the publication for a day at most.
+    """
+    data = _healthy_data()
+    data["ratios"] = 3217
+    data["session_baseline"] = {"ratios": _ratios_baseline()}
+    after_the_slot = datetime(2026, 9, 5, 5, 30, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(data), now=after_the_slot, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "warn"
+    assert f["auto_fixable"] is True
+    assert "ratios >= 4311" in f["expected"]
+    assert "Landed short" in f["detail"]
+    assert [p for p in rep["prescriptions"] if p.get("slot") == "fundamentals-market"]
+
+
+def test_short_volume_short_is_refetched_too() -> None:
+    data = _healthy_data()
+    data["short_volume"] = 9000
+    data["session_baseline"] = {"short_volume": [(d, 15300) for d in SESSIONS[:-1]]}
+    rep = doc.run_doctor(
+        _Conn(data), now=datetime(2026, 9, 5, 5, 30, tzinfo=timezone.utc), watchlist=UNIVERSE
+    )
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "warn"
+    assert f["auto_fixable"] is True
+
+
+def test_a_whole_session_against_its_baseline_is_ok() -> None:
+    data = _healthy_data()
+    data["ratios"] = 4796
+    data["session_baseline"] = {"ratios": _ratios_baseline()}
+    rep = doc.run_doctor(
+        _Conn(data), now=datetime(2026, 9, 5, 5, 30, tzinfo=timezone.utc), watchlist=UNIVERSE
+    )
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "ok"
+    assert f["auto_fixable"] is False
+
+
+def test_too_little_history_falls_back_to_the_absolute_floor() -> None:
+    """A new feed has no sessions to be judged against; two are not a median."""
+    data = _healthy_data()
+    data["ratios"] = 2500
+    data["session_baseline"] = {"ratios": _ratios_baseline()[:2]}
+    rep = doc.run_doctor(
+        _Conn(data), now=datetime(2026, 9, 5, 5, 30, tzinfo=timezone.utc), watchlist=UNIVERSE
+    )
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "ok"
+    assert f"ratios >= {doc.RATIOS_MIN_ROWS}" in f["expected"]
 
 
 # ── Failure counts come from the record; retries come from what is still there ──

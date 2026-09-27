@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -96,6 +97,13 @@ EOD_CRITICAL_CHECKS = (
 )
 RATIOS_MIN_ROWS = 2000
 SHORT_VOLUME_MIN_ROWS = 4000
+#: The floors above say "the pull happened"; this says "it came back whole". They
+#: date from before the feeds reached full width, and ratios ran ~4,790 a session
+#: against 2,000, so 2026-09-21 and 09-22 landed a third short (3,217) and read
+#: ok — and ratios cannot be asked for again once the vendor moves on. A session
+#: must also reach this share of the median of the ones before it.
+SESSION_COUNT_FLOOR_RATIO = 0.9
+SESSION_COUNT_BASELINE_SESSIONS = 10
 #: Hours after the close by which the whole-market ratio and short-volume pull
 #: is due — the tightest of the contracts the `fundamentals-market` slot owns.
 FUNDAMENTALS_MARKET_DEADLINE_H = staleness_by_slot()["fundamentals-market"][1]
@@ -250,6 +258,41 @@ def _counts(conn: Any, sql: str, params: tuple[Any, ...]) -> dict[str, int] | No
         if key:
             out[str(key).strip().upper()] = int(value or 0)
     return out
+
+
+#: Rows per publication date for the whole-market tables judged against their
+#: own recent sessions. Table and column are fixed here, never taken from input.
+_SESSION_BASELINE_SQL = {
+    "ratios": (
+        "SELECT period_date, count(*)::bigint /* doctor: session-baseline */ "
+        "FROM raw_market.ratios WHERE period_date < %s AND period_date >= %s "
+        "GROUP BY 1 ORDER BY 1 DESC LIMIT %s"
+    ),
+    "short_volume": (
+        "SELECT period_date, count(*)::bigint /* doctor: session-baseline */ "
+        "FROM raw_market.short_volume WHERE period_date < %s AND period_date >= %s "
+        "GROUP BY 1 ORDER BY 1 DESC LIMIT %s"
+    ),
+}
+
+
+def _session_floor(conn: Any, dataset: str, before: date, absolute: int) -> int:
+    """The row count ``dataset`` owes for the session after ``before``.
+
+    The absolute floor, or ``SESSION_COUNT_FLOOR_RATIO`` of the median of the
+    last ``SESSION_COUNT_BASELINE_SESSIONS`` dates, whichever is higher. With
+    fewer than three dates to judge by — a new feed, a failed read — the
+    absolute floor stands alone.
+    """
+    counts = _counts(
+        conn,
+        _SESSION_BASELINE_SQL[dataset],
+        (before, before - timedelta(days=31), SESSION_COUNT_BASELINE_SESSIONS),
+    )
+    values = [n for n in (counts or {}).values() if n > 0]
+    if len(values) < 3:
+        return absolute
+    return max(absolute, int(statistics.median(values) * SESSION_COUNT_FLOOR_RATIO))
 
 
 def _coverage_finding(
@@ -509,15 +552,15 @@ def _continuity_findings(
     whose slot carries its own lookback repairs itself and needs none.
 
     A contract with ``refill_narrow`` also has its present sessions judged on
-    breadth — distinct symbols against the sessions before it (``thin_days``).
+    breadth — distinct symbols against the sessions around it (``narrow_days``).
     Only sessions before ``session``: the one being written tonight is narrow
     until its batch drains, and the heal would refill it mid-write.
     """
     from bifrost_market_data.continuity import (
         has_continuity,
         missing_sessions,
+        narrow_days,
         per_day_breadth,
-        thin_days,
     )
     from bifrost_market_data.trading_calendar import expected_trading_days
 
@@ -570,7 +613,7 @@ def _continuity_findings(
             on_calendar = set(calendar)
             series = [(d, n) for d, n in breadth or [] if d in on_calendar]
             cutoff = session or today
-            for day, n, baseline in thin_days(series):
+            for day, n, baseline in narrow_days(series):
                 if start <= day < cutoff:
                     narrow[day] = (n, baseline)
         name = c.dataset.replace("raw_market.", "")
@@ -1420,7 +1463,14 @@ def run_doctor(
     n_sv = _count(
         conn, "SELECT count(*) FROM raw_market.short_volume WHERE period_date = %s", (session,)
     )
-    fund_ok = n_ratios >= RATIOS_MIN_ROWS and n_sv >= SHORT_VOLUME_MIN_ROWS
+    ratios_floor = _session_floor(conn, "ratios", ratios_session, RATIOS_MIN_ROWS)
+    sv_floor = _session_floor(conn, "short_volume", session, SHORT_VOLUME_MIN_ROWS)
+    fund_ok = n_ratios >= ratios_floor and n_sv >= sv_floor
+    # Landed, and short. Not "not yet due": the publication is already here and
+    # came back partial, and ratios can only be asked for again until the vendor
+    # issues the next date — the 30h deadline below is days past that. A refetch
+    # while the first pull is still writing dedups on the running job's payload.
+    fund_short = 0 < n_ratios < ratios_floor or 0 < n_sv < sv_floor
     # C-F2: overdue is measured against the deadline the contract declares, not
     # against a calendar rollover. This read `session_is_today`, which flips at
     # New York midnight — 04:00 UTC in daylight time, half an hour before the
@@ -1434,24 +1484,32 @@ def run_doctor(
     # said degraded every night and meant nothing by it. `is_late` in
     # ``session`` already draws the line here for the quality gate.
     fund_late = not fund_ok and fund_overdue
+    fund_fix = fund_late or fund_short
     findings.append(
         Finding(
             f"fundamentals_market:{session_s}",
             "fundamentals-market",
-            "crit" if fund_late else "ok",
+            "crit" if fund_late else ("warn" if fund_short else "ok"),
             "Ratios + short volume (whole market)",
-            f"ratios >= {RATIOS_MIN_ROWS} for {ratios_s}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
+            f"ratios >= {ratios_floor} for {ratios_s}, short_volume >= {sv_floor}",
             {"ratios": n_ratios, "short_volume": n_sv},
             f"ratios={n_ratios} rows for {ratios_s}, short_volume={n_sv} rows for {session_s}."
             + (
+                f" Landed short of {SESSION_COUNT_FLOOR_RATIO:.0%} of the"
+                f" {SESSION_COUNT_BASELINE_SESSIONS} sessions before; refetching while"
+                " the vendor still serves this publication."
+                if fund_short and not fund_late
+                else ""
+            )
+            + (
                 " Not yet due: short volume is published the morning after the session"
                 f" and ratios a session later; due {fund_due:%Y-%m-%d %H:%M} UTC."
-                if not fund_ok and not fund_overdue
+                if not fund_ok and not fund_overdue and not fund_short
                 else ""
             ),
             session=session_s,
-            fix=_slot_fix("fundamentals-market", session, force=False) if fund_late else None,
-            auto_fixable=fund_late,
+            fix=_slot_fix("fundamentals-market", session, force=False) if fund_fix else None,
+            auto_fixable=fund_fix,
         )
     )
 

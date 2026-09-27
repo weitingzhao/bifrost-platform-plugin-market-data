@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from bifrost_market_data.queue_history import KEEP_DAYS as QUEUE_SAMPLE_KEEP_DAYS
 from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
 from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
@@ -938,6 +939,7 @@ def build_queue_dashboard(
 
 
 _HISTORY_STATUSES = ("done", "failed", "pending", "running")
+HISTORY_MAX_DAYS = QUEUE_SAMPLE_KEEP_DAYS
 
 
 def build_ingest_history(
@@ -946,13 +948,16 @@ def build_ingest_history(
     days: int = 14,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Daily job volume from ``ops_jobs.job_ingest`` (UTC calendar days).
+    """Daily job volume, UTC calendar days.
 
-    Buckets by ``COALESCE(finished_at, created_at)``. Empty calendar days are
-    filled with zeros so the UI can draw a continuous series. Trim typically
-    keeps ~7 days of rows — older days may be empty even when ``days`` is larger.
+    Finished work comes from ``ops_jobs.queue_sample``, not from the job rows:
+    the trim keeps finished rows for 48 hours, so reading them drew every day
+    before the day before yesterday as zero — a week of full ingest looked like
+    a week of nothing. A sample is stamped with the boundary that closes its
+    interval, so the one at 00:00 belongs to the day before. Pending and running
+    are still read from the queue, where they stay until they finish.
     """
-    days_n = max(1, min(int(days), 30))
+    days_n = max(1, min(int(days), HISTORY_MAX_DAYS))
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
@@ -964,18 +969,27 @@ def build_ingest_history(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT
-              (COALESCE(finished_at, created_at) AT TIME ZONE 'UTC')::date AS day,
-              kind,
-              status,
-              COUNT(*)::bigint AS n
-            FROM ops_jobs.job_ingest
-            WHERE COALESCE(finished_at, created_at) >= %s
-              AND status IN ('done', 'failed', 'pending', 'running')
+            SELECT day, kind, status, sum(n)::bigint AS n
+            FROM (
+              SELECT ((sample_ts - interval '1 second') AT TIME ZONE 'UTC')::date AS day,
+                     kind, 'done' AS status, done_delta AS n
+              FROM ops_jobs.queue_sample
+              WHERE sample_ts > %s AND done_delta > 0
+              UNION ALL
+              SELECT ((sample_ts - interval '1 second') AT TIME ZONE 'UTC')::date,
+                     kind, 'failed', failed_delta
+              FROM ops_jobs.queue_sample
+              WHERE sample_ts > %s AND failed_delta > 0
+              UNION ALL
+              SELECT (created_at AT TIME ZONE 'UTC')::date, kind, status, 1
+              FROM ops_jobs.job_ingest
+              WHERE status IN ('pending', 'running')
+            ) t
+            WHERE day >= %s
             GROUP BY 1, 2, 3
             ORDER BY 1, 2, 3
             """,
-            (cutoff,),
+            (cutoff, cutoff, start_day),
         )
         rows = cur.fetchall() or []
 
@@ -1036,7 +1050,10 @@ def build_ingest_history(
         "days": days_n,
         "start_day": start_day.isoformat(),
         "end_day": today.isoformat(),
-        "retention_note": ("job_ingest trim typically keeps ~7d; older calendar days may be empty"),
+        "retention_note": (
+            f"done/failed from queue_sample (kept {HISTORY_MAX_DAYS}d; a gap means the sampler "
+            "was down, not that nothing ran) · pending/running from live queue rows"
+        ),
         "days_series": days_series,
         "kind_totals": kind_total_rows,
         "generated_at": iso_z(now_utc),

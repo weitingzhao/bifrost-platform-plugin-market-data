@@ -395,9 +395,9 @@ def ingest_queue_dashboard(
 
 @router.get("/history")
 def ingest_history(
-    days: int = Query(14, ge=1, le=30),
+    days: int = Query(14, ge=1, le=90),
 ) -> dict[str, Any]:
-    """Daily job volume histogram from job_ingest (UTC days; trim ~7d)."""
+    """Daily job volume, UTC days: finished from queue_sample (90d), active from the queue."""
     from bifrost_market_data.api.ingest_dashboard import build_ingest_history
 
     conn = require_db()

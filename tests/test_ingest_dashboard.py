@@ -341,17 +341,33 @@ def test_build_ingest_history_fills_empty_days() -> None:
     assert kinds["stock_daily"]["done"] == 18
 
     assert conn.statements
-    assert conn.statements[0][1] == (datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc),)
+    cutoff = datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
+    assert conn.statements[0][1] == (cutoff, cutoff, date(2026, 8, 29))
 
 
-def test_build_ingest_history_clamps_days() -> None:
+def test_build_ingest_history_reads_finished_work_from_samples() -> None:
+    """Finished rows are trimmed after 48h; the samples are what outlives them."""
     from bifrost_market_data.api.ingest_dashboard import build_ingest_history
 
     conn = _HistConn()
+    build_ingest_history(conn, days=14, now=datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc))
+    sql = conn.statements[0][0]
+    assert "ops_jobs.queue_sample" in sql
+    assert "done_delta" in sql and "failed_delta" in sql
+    # Only live rows come from the queue — a finished row there may already be gone.
+    assert "status IN ('pending', 'running')" in sql
+    assert "COALESCE(finished_at" not in sql
+
+
+def test_build_ingest_history_clamps_days() -> None:
+    from bifrost_market_data.api.ingest_dashboard import HISTORY_MAX_DAYS, build_ingest_history
+
+    conn = _HistConn()
     now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
-    report = build_ingest_history(conn, days=99, now=now)
-    assert report["days"] == 30
-    assert len(report["days_series"]) == 30
+    report = build_ingest_history(conn, days=999, now=now)
+    assert HISTORY_MAX_DAYS == 90
+    assert report["days"] == HISTORY_MAX_DAYS
+    assert len(report["days_series"]) == HISTORY_MAX_DAYS
 
 
 def test_maintenance_slot_miss_does_not_flip_verdict(monkeypatch: pytest.MonkeyPatch) -> None:

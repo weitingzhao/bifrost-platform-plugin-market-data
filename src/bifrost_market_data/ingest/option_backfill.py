@@ -73,6 +73,51 @@ def _close_on_or_before(dates: list[date], values: list[float], when: date) -> f
     return values[idx - 1] if idx else None
 
 
+def _splits_after(conn: Any, underlying: str, since: date) -> list[tuple[date, float]]:
+    """``(ex_date, shares after per share before)`` for splits on or after ``since``."""
+    out: list[tuple[date, float]] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ex_date, ratio_from, ratio_to FROM raw_market.corporate_action
+                WHERE symbol = %s AND action_type = 'split' AND ex_date >= %s
+                """,
+                (underlying, since),
+            )
+            for row in cur.fetchall() or []:
+                if isinstance(row, Mapping):
+                    ex, r_from, r_to = row.get("ex_date"), row.get("ratio_from"), row.get("ratio_to")
+                else:
+                    ex, r_from, r_to = row[0], row[1], row[2]
+                f, t = as_float(r_from), as_float(r_to)
+                if isinstance(ex, date) and f and t and f > 0 and t > 0:
+                    out.append((ex, t / f))
+    except Exception as exc:  # noqa: BLE001 — no split record means the adjusted close, as before
+        logger.warning("split lookup failed for %s: %s", underlying, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return out
+
+
+def _unadjust_factor(splits: list[tuple[date, float]], expiry: date) -> float:
+    """What turns an adjusted close into the price a contract expiring then was struck in.
+
+    ``stock_daily`` is split-adjusted all the way back; a contract's strike is
+    not, unless it was still open on the ex-date and the exchange adjusted it.
+    KLAC split ten for one on 2026-06-12, so its October 2024 closes read ~$70
+    against strikes near $700, and every one of the 124–198 contracts a month
+    fell outside the ±30% band: two years planned, nothing enqueued.
+    """
+    factor = 1.0
+    for ex, ratio in splits:
+        if expiry < ex:
+            factor *= ratio
+    return factor
+
+
 async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
     """Payload: ``{"underlying", "expiry_gte", "expiry_lte", "strike_pct", "dte"}``."""
     payload = job.payload or {}
@@ -111,6 +156,7 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
             dates, raw = _closes(conn, symbol, window_start, expiry_lte)
             values = [v * multiplier for v in raw]
             spot_source = f"{symbol}x{multiplier:g}"
+    splits = _splits_after(conn, storage, expiry_gte)
 
     today = date.today()
     specs: list[tuple[str, dict[str, Any], int, int]] = []
@@ -129,6 +175,8 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         if win_to < win_from:
             continue
         spot = _close_on_or_before(dates, values, win_from)
+        if spot is not None:
+            spot *= _unadjust_factor(splits, expiry)
         if spot is None:
             no_spot += 1
         elif strike is not None and spot > 0 and abs(strike - spot) / spot > strike_pct:

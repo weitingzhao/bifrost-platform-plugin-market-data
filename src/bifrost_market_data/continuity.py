@@ -50,6 +50,13 @@ MIN_TRAILING = 3
 #: of their neighbours, and nothing legitimate sat near the line.
 FLOOR_RATIO = 0.5
 
+#: The doctor's narrow test, the one that refills what it finds. Over the 75
+#: sessions to 2026-09-27 stock_daily and short_volume never fell below 0.99 of
+#: their trailing median and option_daily's quiet days sat at 0.97, while the
+#: option_daily hole of 2026-08-24..09-04 held 425 of ~650 underlyings — 0.65,
+#: which half let through for ten sessions.
+NARROW_FLOOR_RATIO = 0.85
+
 
 def has_continuity(contract: DatasetContract) -> bool:
     """Whether a session-level gap means anything for this dataset."""
@@ -83,6 +90,40 @@ def thin_days(
         baseline = statistics.median(trailing)
         if baseline > 0 and n < baseline * floor_ratio:
             out.append((day, n, int(baseline)))
+    return out
+
+
+def narrow_days(
+    counts: Sequence[tuple[date, int]],
+    *,
+    neighbourhood: int = NEIGHBOURHOOD,
+    floor_ratio: float = NARROW_FLOOR_RATIO,
+    min_trailing: int = MIN_TRAILING,
+) -> list[tuple[date, int, int]]:
+    """Days below the sessions before them *and* the best of those after.
+
+    A floor this close to the baseline needs the second side. Judged on the
+    trailing median alone, a feed that steps down and stays down — a universe
+    that shed names — reads its first sessions as narrow for the whole window,
+    and every nightly heal refills the same days to no effect. A hole is
+    bounded: something after it recovers. The best of the following sessions
+    rather than their median, so a hole as long as the neighbourhood is still
+    seen from its first day. The newest day has nothing after it and is judged
+    on the trailing side alone; if it was a step, the next session clears it.
+    """
+    ordered = sorted(counts)
+    out: list[tuple[date, int, int]] = []
+    for i, (day, n) in enumerate(ordered):
+        trailing = [c for _d, c in ordered[max(0, i - neighbourhood) : i]]
+        if len(trailing) < min_trailing:
+            continue
+        baseline = statistics.median(trailing)
+        if baseline <= 0 or n >= baseline * floor_ratio:
+            continue
+        following = [c for _d, c in ordered[i + 1 : i + 1 + neighbourhood]]
+        if following and n >= max(following) * floor_ratio:
+            continue
+        out.append((day, n, int(baseline)))
     return out
 
 
@@ -364,8 +405,10 @@ __all__ = [
     "WINDOW_DAYS",
     "NEIGHBOURHOOD",
     "FLOOR_RATIO",
+    "NARROW_FLOOR_RATIO",
     "has_continuity",
     "thin_days",
+    "narrow_days",
     "per_day_counts",
     "per_day_breadth",
     "missing_sessions",

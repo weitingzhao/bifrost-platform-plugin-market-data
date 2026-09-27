@@ -49,10 +49,17 @@ async def test_treasury_yields_upsert() -> None:
 class _CloseConn(FakeConn):
     """Serves the underlying's daily closes to the strike filter."""
 
-    def __init__(self, closes: list[tuple[date, float]], *, only_symbol: str | None = None) -> None:
+    def __init__(
+        self,
+        closes: list[tuple[date, float]],
+        *,
+        only_symbol: str | None = None,
+        splits: list[tuple[date, int, int]] | None = None,
+    ) -> None:
         super().__init__()
         self.closes = closes
         self.only_symbol = only_symbol
+        self.splits = splits or []
 
     def cursor(self) -> Any:
         return _CloseCursor(self)
@@ -68,6 +75,8 @@ class _CloseCursor:
         wanted = self.parent.only_symbol
         if "stock_daily" in query and (wanted is None or (params and params[0] == wanted)):
             self._rows = list(self.parent.closes)
+        elif "corporate_action" in query:
+            self._rows = list(self.parent.splits)
         else:
             self._rows = []
 
@@ -130,6 +139,46 @@ async def test_backfill_plan_keeps_only_strikes_near_spot() -> None:
     assert "O:AAPL_C" not in queued and "O:AAPL_D" not in queued
     # Each contract is priced over at most its last 90 days of life.
     assert window_start.isoformat() in queued
+
+
+@pytest.mark.asyncio
+async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_prices() -> None:
+    """KLAC split ten for one on 2026-06-12; stock_daily is adjusted all the way back.
+
+    Its October 2024 closes read ~$70 against strikes near $700, and all 124
+    contracts that month fell outside the band. A contract still open on the
+    ex-date was adjusted by the exchange and is judged on the adjusted close.
+    """
+    expired = date(2024, 10, 18)
+    after_split = date(2026, 7, 17)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [
+                _contract("O:KLAC241018C00700000", expired.isoformat(), 700.0),
+                _contract("O:KLAC241018C00070000", expired.isoformat(), 70.0),
+                _contract("O:KLAC260717C00180000", after_split.isoformat(), 180.0),
+            ],
+            "pages": 1,
+            "truncated": False,
+        }
+    )
+    conn = _CloseConn(
+        [(expired - timedelta(days=90), 70.0), (after_split - timedelta(days=90), 175.0)],
+        splits=[(date(2026, 6, 12), 1, 10)],
+    )
+    result = await handle_option_backfill_plan(
+        make_job(
+            "option_backfill_plan",
+            {"underlying": "KLAC", "expiry_gte": "2024-10-01", "expiry_lte": "2026-07-31"},
+        ),
+        client,
+        conn,
+    )
+    queued = str(next(st for st in conn.statements if "job_ingest" in st[0])[1])
+    assert "O:KLAC241018C00700000" in queued
+    assert "O:KLAC241018C00070000" not in queued
+    assert "O:KLAC260717C00180000" in queued
+    assert result["contracts_kept"] == 2
 
 
 @pytest.mark.asyncio

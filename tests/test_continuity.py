@@ -59,6 +59,40 @@ def test_the_threshold_is_a_share_of_the_neighbourhood() -> None:
     assert cont.thin_days(above) == []
 
 
+# ── narrow_days: the doctor's tighter, two-sided test ──
+
+
+def test_a_two_week_hole_at_two_thirds_is_narrow_from_its_first_day() -> None:
+    """option_daily 2026-08-24..09-04: 425 of ~650 underlyings for ten sessions.
+
+    Half let it through. The trailing median still sees it on the first days;
+    the best of the following ten reaches past its end to the recovery.
+    """
+    series = _series(date(2026, 8, 1), [650] * 12 + [425] * 10 + [650] * 5)
+    days = [d for d, _n, _m in cont.narrow_days(series)]
+    assert days[0] == date(2026, 8, 13)
+    assert cont.thin_days(series) == []
+
+
+def test_a_step_down_that_stays_is_not_narrow() -> None:
+    """A universe that shed names: refilling its first days would change nothing,
+    every night, for as long as they sat in the window."""
+    series = _series(date(2026, 8, 1), [650] * 12 + [425] * 15)
+    assert cont.narrow_days(series) == []
+
+
+def test_the_newest_day_is_judged_on_what_came_before() -> None:
+    """Nothing follows it yet; tonight's heal is its only chance to be refilled."""
+    series = _series(date(2026, 8, 1), [650] * 12 + [425])
+    assert [d for d, _n, _m in cont.narrow_days(series)] == [date(2026, 8, 13)]
+
+
+def test_quiet_sessions_are_not_narrow() -> None:
+    """option_daily's quiet days sat at 0.97 of their trailing median."""
+    series = _series(date(2026, 8, 1), [650, 639, 653, 640, 658, 646, 651, 640, 649, 653] * 3)
+    assert cont.narrow_days(series) == []
+
+
 def test_which_datasets_have_a_session_cadence() -> None:
     """Derived from the contract, not a hand list: a catalogue has no cadence."""
     assert cont.has_continuity(contract_for("raw_market.stock_daily"))

@@ -27,6 +27,7 @@ from bifrost_market_data.api.ingest_ticker import router as ingest_ticker_router
 from bifrost_market_data.api.ingest_options import router as ingest_options_router
 from bifrost_market_data.api.ingest_bars import router as ingest_bars_router
 from bifrost_market_data.api.market_ops import router as market_ops_router
+from bifrost_market_data.api.metrics import router as metrics_router
 from bifrost_market_data.api.option_daily import router as option_daily_router
 from bifrost_market_data.api.option_minute import router as option_minute_router
 from bifrost_market_data.api.options import router as options_router
@@ -69,6 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(dimensions_router)
     app.include_router(docs_router)
     app.include_router(health_router)
+    app.include_router(metrics_router)
     # Mount under /market (P5 contract). Order: static prefixes before /stocks/{symbol}.
     market_prefix = "/market"
     app.include_router(analytics_router, prefix=market_prefix)
