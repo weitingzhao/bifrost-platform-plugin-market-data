@@ -22,6 +22,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
 )
+from bifrost_market_data.ingest.index_options import spot_proxy_pairs
 from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
 from bifrost_market_data.schema.ctid_damage_restore import restore_ctid_damage
 from bifrost_market_data.schema.corporate_action_identity import (
@@ -60,6 +61,9 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         # can be created on this path rather than waiting for a superuser run.
         create_coverage_sample(cur)
         tune_job_ingest_autovacuum(cur)
+        # Owned by the plugin's role (pg_views.viewowner = bifrost), so this
+        # path may replace it even though it cannot own raw_market tables.
+        rebuild_option_snapshot_with_stock_view(cur)
     # The schema is what the deploy needs, so it lands first and on its own. The
     # data repair below commits per root and may run out of budget; committing
     # here means it cannot take the schema down with it.
@@ -960,9 +964,95 @@ def _create_data_ops_tables(cur: _Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS ops_jobs.us_trading_calendar CASCADE")
 
 
+def _index_spot_proxy_values() -> str:
+    """The ``spot_proxy_for`` map as a SQL VALUES list, generated from the same
+    Python map the ingest paths read — the view must not carry a second copy.
+
+    An empty map still has to produce a legal VALUES, so it yields one all-NULL
+    row; ``p.storage = os.underlying`` never matches NULL, which leaves the view
+    exactly as it was before any root had a proxy.
+    """
+    pairs = spot_proxy_pairs()
+    if not pairs:
+        return "(VALUES (NULL::text, NULL::text, NULL::double precision, NULL::text))"
+    rows = ", ".join(
+        # Roots and tickers are [A-Z] constants from a Python literal, never input.
+        f"('{storage}', '{symbol}', {multiplier!r}::double precision, '{label}')"
+        for storage, symbol, multiplier, label in pairs
+    )
+    return f"(VALUES {rows})"
+
+
+# An index level is not in stock_daily (that needs an Indices plan we do not
+# hold), so ``underlying_price`` was NULL for every index root and Research's
+# ATM IV path, which requires it to pick the at-the-money strike, produced no
+# row for SPX at all -- while its snapshot held 29,786 vendor IVs waiting.
+#
+# The tracking ETF fills that hole, as it already does for option_backfill and
+# the near-spot ladder. It is only ever used to *choose* a strike here: the IV
+# itself is the vendor's. That matters, because the proxy is not exact --
+# measured 2026-09-25 by put-call parity across six near-money strikes, SPY x 10
+# puts SPX at 7713.5 against a true 7744.8-7745.8, low by 0.41%. On an ATM pick
+# that is about 0.12 vol points of smile; fed into a solve it would be about 1.8.
+# So the number travels with its provenance in underlying_price_source, and
+# nothing downstream can mistake a derived level for a vendor close.
+OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL: str = f"""
+        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS
+        SELECT
+            os.option_ticker,
+            os.underlying,
+            os.snapshot_ts,
+            os.iv,
+            os.delta,
+            os.gamma,
+            os.theta,
+            os.vega,
+            os.open_interest,
+            os.day_open,
+            os.day_high,
+            os.day_low,
+            os.day_close,
+            os.day_previous_close,
+            os.day_change_percent,
+            os.day_volume,
+            os.day_vwap,
+            os.fetched_at,
+            COALESCE(sd.close, psd.close * p.multiplier) AS underlying_price,
+            COALESCE(sd.bar_date, psd.bar_date) AS underlying_bar_date,
+            (CASE
+                WHEN sd.close IS NOT NULL THEN 'vendor'
+                WHEN psd.close IS NOT NULL THEN p.label
+            END)::text AS underlying_price_source
+        FROM raw_market.option_snapshot os
+        LEFT JOIN raw_market.stock_daily sd
+            ON sd.symbol = os.underlying
+           AND sd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
+        LEFT JOIN {_index_spot_proxy_values()} AS p(storage, proxy_symbol, multiplier, label)
+            ON p.storage = os.underlying
+        LEFT JOIN raw_market.stock_daily psd
+            ON psd.symbol = p.proxy_symbol
+           AND psd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
+        """
+
+
+def rebuild_option_snapshot_with_stock_view(cur: _Cursor) -> None:
+    """Replace the view in place, without dropping it.
+
+    CREATE OR REPLACE tolerates an appended column, which is the whole reason
+    underlying_price_source goes last: a DROP would take any dependent object
+    with it, and this runs on the deploy path where nothing is watching.
+
+    It is here as well as in apply_ddl because the cluster's schema job runs
+    ``init_schema.py --wave8-only``. A view definition that only apply_ddl
+    reaches runs nowhere -- the same way the job_ingest autovacuum ALTER did
+    until 0.41.1.
+    """
+    cur.execute(OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL)
+
+
 # View statements that depend on raw_market.option_snapshot. Kept as constants
 # so the Wave 9 migration, which must drop them to swap the table, rebuilds
-# exactly what apply_ddl would create — one definition, two callers.
+# exactly what apply_ddl would create — one definition, three callers.
 OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
     "DROP VIEW IF EXISTS raw_market.v_option_snapshot_with_stock",
     "DROP VIEW IF EXISTS raw_market.v_option_chain_latest",
@@ -990,34 +1080,7 @@ OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
         FROM raw_market.option_snapshot s
         ORDER BY s.option_ticker, s.snapshot_ts DESC
         """,
-    """
-        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS
-        SELECT
-            os.option_ticker,
-            os.underlying,
-            os.snapshot_ts,
-            os.iv,
-            os.delta,
-            os.gamma,
-            os.theta,
-            os.vega,
-            os.open_interest,
-            os.day_open,
-            os.day_high,
-            os.day_low,
-            os.day_close,
-            os.day_previous_close,
-            os.day_change_percent,
-            os.day_volume,
-            os.day_vwap,
-            os.fetched_at,
-            sd.close AS underlying_price,
-            sd.bar_date AS underlying_bar_date
-        FROM raw_market.option_snapshot os
-        LEFT JOIN raw_market.stock_daily sd
-            ON sd.symbol = os.underlying
-           AND sd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
-        """,
+    OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL,
 )
 
 

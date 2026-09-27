@@ -414,3 +414,92 @@ def test_the_job_queue_vacuums_on_a_row_count_not_a_fraction() -> None:
     conn = _FakeConn()
     apply_ddl(conn)
     assert "job_ingest_dedup" in "\n".join(conn.cur.statements), "the indexes are still created"
+
+
+def test_an_index_root_gets_a_spot_and_the_column_says_where_it_came_from() -> None:
+    """SPX had 29,786 vendor IVs per session and no ATM IV row anywhere.
+
+    Research's primary path reads ``v_option_snapshot_with_stock`` and requires
+    ``underlying_price IS NOT NULL`` to pick the at-the-money strike. An index
+    level is not in ``stock_daily`` (that needs an Indices plan we do not hold),
+    so the LEFT JOIN produced NULL and every SPX row was discarded — measured
+    2026-09-26: 17 snapshot sessions, all with vendor IV, and zero rows in
+    ``features.option_metric_atm_iv_daily``.
+
+    The proxy is deliberately not exact. Put-call parity across six near-money
+    strikes on the 2026-09-28 expiry puts SPX at 7744.5-7745.8 (1.3 points of
+    dispersion) against SPY x 10 at 7713.5 — low by 0.41%, systematically, since
+    the gap is accumulated undistributed dividend. Choosing a strike with it
+    costs about 0.12 vol points of smile. Solving an IV with it would cost about
+    1.8. So the provenance travels in the row.
+    """
+    from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL as sql
+
+    assert "COALESCE(sd.close, psd.close * p.multiplier) AS underlying_price" in sql
+    assert "underlying_price_source" in sql
+    # A real close is never displaced: the CASE reads sd.close first.
+    assert sql.index("WHEN sd.close IS NOT NULL THEN 'vendor'") < sql.index("THEN p.label")
+    # The date has to follow the price it belongs to.
+    assert "COALESCE(sd.bar_date, psd.bar_date) AS underlying_bar_date" in sql
+
+
+def test_the_view_is_rebuilt_on_both_ddl_paths() -> None:
+    """The cluster's schema Job is ``init_schema.py --wave8-only``.
+
+    So a view definition only ``apply_ddl`` reaches runs nowhere. That is how
+    the job_ingest autovacuum ALTER came to be written and never applied until
+    0.41.1, and how 0.30.0's coverage_sample was declared and absent.
+    """
+    from bifrost_market_data.schema.ddl import apply_wave8_migrations
+
+    for apply in (apply_ddl, apply_wave8_migrations):
+        conn = _FakeConn()
+        apply(conn)
+        joined = "\n".join(conn.cur.statements)
+        assert "CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock" in joined, (
+            f"{apply.__name__} does not rebuild the view Research reads for ATM IV"
+        )
+        assert "underlying_price_source" in joined, f"{apply.__name__} omits the provenance column"
+
+    # Replaced, never dropped: a DROP would take any dependent object with it,
+    # and the wave8 path runs unattended on every deploy.
+    conn = _FakeConn()
+    apply_wave8_migrations(conn)
+    assert not any(
+        "DROP VIEW" in s and "v_option_snapshot_with_stock" in s for s in conn.cur.statements
+    ), "the wave8 path must replace the view in place"
+
+
+def test_the_proxy_map_has_exactly_one_definition() -> None:
+    """The view's VALUES is generated from the map the ingest paths read.
+
+    A second copy in SQL is how the near-spot ladder and the snapshot view would
+    drift apart, which is the whole failure this change is undoing.
+    """
+    from bifrost_market_data.ingest.index_options import spot_proxy_for, spot_proxy_pairs
+    from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL as sql
+
+    pairs = spot_proxy_pairs()
+    assert pairs, "SPX at least"
+    for storage, symbol, multiplier, label in pairs:
+        assert spot_proxy_for(storage) == (symbol, multiplier), f"{storage} disagrees with the map"
+        # The label is the string option_backfill already logs as spot_source.
+        assert label == f"{symbol}x{multiplier:g}"
+        assert f"('{storage}', '{symbol}', {multiplier!r}::double precision, '{label}')" in sql
+
+
+def test_an_empty_proxy_map_still_builds_a_legal_view() -> None:
+    """SQL has no empty VALUES, and a root may lose its proxy."""
+    import bifrost_market_data.schema.ddl as dmod
+
+    values = dmod._index_spot_proxy_values()
+    assert values.startswith("(VALUES ")
+    original = dmod.spot_proxy_pairs
+    dmod.spot_proxy_pairs = lambda: ()
+    try:
+        empty = dmod._index_spot_proxy_values()
+    finally:
+        dmod.spot_proxy_pairs = original
+    # An all-NULL row never matches p.storage = os.underlying, so the view
+    # behaves exactly as it did before any root had a proxy.
+    assert empty == "(VALUES (NULL::text, NULL::text, NULL::double precision, NULL::text))"

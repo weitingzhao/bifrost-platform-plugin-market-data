@@ -89,6 +89,23 @@ def spot_proxy_for(underlying: str) -> tuple[str, float] | None:
     return spec.spot_proxy if spec is not None else None
 
 
+def spot_proxy_pairs() -> tuple[tuple[str, str, float, str], ...]:
+    """Every root that stands in for its own level, as ``(storage, symbol,
+    multiplier, label)``.
+
+    The label is the same string ``option_backfill`` already logs as its
+    ``spot_source``, so one vocabulary covers the backfill's log line and the
+    ``underlying_price_source`` column of ``v_option_snapshot_with_stock``.
+    """
+    out: list[tuple[str, str, float, str]] = []
+    for storage, spec in sorted(_INDEX_OPTION_SPECS.items()):
+        if spec.spot_proxy is None:
+            continue
+        symbol, multiplier = spec.spot_proxy
+        out.append((storage, symbol, float(multiplier), f"{symbol}x{multiplier:g}"))
+    return tuple(out)
+
+
 def snapshot_api_underlying(underlying: str) -> str:
     """Ticker for ``/v3/snapshot/options/{underlying}`` (and OI via snapshot)."""
     spec = get_index_option_spec(underlying)
