@@ -89,6 +89,12 @@ def spot_proxy_for(underlying: str) -> tuple[str, float] | None:
     return spec.spot_proxy if spec is not None else None
 
 
+#: ``underlying_price_source`` when the close is the vendor's own. The proxy
+#: labels beside it are built by ``spot_proxy_pairs``; this one is a literal in
+#: the view's SQL, so it lives here rather than being spelled twice.
+VENDOR_SPOT_SOURCE = "vendor"
+
+
 def spot_proxy_pairs() -> tuple[tuple[str, str, float, str], ...]:
     """Every root that stands in for its own level, as ``(storage, symbol,
     multiplier, label)``.

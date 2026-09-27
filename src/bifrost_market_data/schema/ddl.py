@@ -22,7 +22,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
 )
-from bifrost_market_data.ingest.index_options import spot_proxy_pairs
+from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE, spot_proxy_pairs
 from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
 from bifrost_market_data.schema.ctid_damage_restore import restore_ctid_damage
 from bifrost_market_data.schema.corporate_action_identity import (
@@ -1020,7 +1020,7 @@ OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL: str = f"""
             COALESCE(sd.close, psd.close * p.multiplier) AS underlying_price,
             COALESCE(sd.bar_date, psd.bar_date) AS underlying_bar_date,
             (CASE
-                WHEN sd.close IS NOT NULL THEN 'vendor'
+                WHEN sd.close IS NOT NULL THEN '{VENDOR_SPOT_SOURCE}'
                 WHEN psd.close IS NOT NULL THEN p.label
             END)::text AS underlying_price_source
         FROM raw_market.option_snapshot os

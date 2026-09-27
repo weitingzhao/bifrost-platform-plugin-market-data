@@ -24,7 +24,7 @@ from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from bifrost_market_data.ingest._upsert import session_anchor
-from bifrost_market_data.ingest.index_options import storage_underlying
+from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE, storage_underlying
 from bifrost_market_data.quality import fetch_completed_trading_days, filter_optionable_underlyings
 from bifrost_market_data.scheduler.daily import (
     enqueue_slot,
@@ -140,6 +140,11 @@ DEGRADED_SNAPSHOT_MIN_BASELINE_ROWS = 20
 #: the report, so it gets its own budget and answers `unprobed` when it runs out
 #: rather than a clean bill. A cancelled query is not a reading of zero.
 DEGRADED_SNAPSHOT_TIMEOUT = "25s"
+#: One exact anchor across the optionable universe, measured 2026-09-27 at 1.8s
+#: (1.0s before the ticker join). The same read over a whole session's range
+#: costs 3.3s for an identical answer, because the spot is a fact about
+#: (underlying, session) and reading more of the chain cannot sharpen it.
+CHAIN_SPOT_TIMEOUT = "20s"
 
 # Above this the worker loop is wedged behind synchronous batch writes.
 WORKER_LOOP_LAG_WARN_SEC = 60.0
@@ -557,6 +562,165 @@ def _continuity_findings(
                 )
             )
     return out
+
+
+@dataclass
+class ChainSpot:
+    """What the view hands Research as the spot behind one underlying's chain."""
+
+    underlying: str
+    price: float | None
+    source: str | None
+    #: True only when ``raw_market.ticker`` still calls the symbol active. An
+    #: unpriced chain means something different either side of this: the
+    #: whole-market grouped pull only returns active tickers, so an inactive one
+    #: losing its close is the universe going stale, while an active one losing
+    #: it is the pull dropping a name it should have had.
+    ticker_active: bool
+
+
+def _chain_spots(
+    conn: Any,
+    underlyings: Sequence[str],
+    *,
+    session: date,
+) -> list[ChainSpot] | None:
+    """The spot each chain carries for ``session``, read from the view itself.
+
+    Deliberately a read of ``v_option_snapshot_with_stock`` rather than a
+    recomputation of what it does: this check exists to report what Research
+    actually sees, and a second implementation of the fallback would eventually
+    disagree with the first. Returns None when the probe cannot be answered --
+    a cancelled query is not a reading of "no spot anywhere".
+    """
+    syms = sorted({str(u).strip().upper() for u in underlyings if str(u).strip()})
+    if not syms:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{CHAIN_SPOT_TIMEOUT}'")
+            cur.execute(
+                """
+                /* doctor: chain-spot */
+                SELECT DISTINCT ON (v.underlying)
+                       v.underlying, v.underlying_price, v.underlying_price_source,
+                       COALESCE(t.active, false) AS ticker_active
+                FROM raw_market.v_option_snapshot_with_stock v
+                LEFT JOIN raw_market.ticker t ON t.symbol = v.underlying
+                WHERE v.underlying = ANY(%s) AND v.snapshot_ts = %s
+                ORDER BY v.underlying
+                """,
+                (syms, session_anchor(session)),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 -- an unanswerable check is not a clean one
+        logger.warning("chain-spot probe failed: %s", exc)
+        _rollback(conn)
+        return None
+    out: list[ChainSpot] = []
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            und, price, src, active = (
+                row.get("underlying"),
+                row.get("underlying_price"),
+                row.get("underlying_price_source"),
+                row.get("ticker_active"),
+            )
+        else:
+            und, price, src, active = (tuple(row) + (None, None, None, None))[:4]
+        if not und:
+            continue
+        out.append(
+            ChainSpot(
+                str(und).strip().upper(),
+                float(price) if price is not None else None,
+                str(src) if src is not None else None,
+                bool(active),
+            )
+        )
+    return out
+
+
+def _sample(names: Sequence[str], limit: int = 12) -> str:
+    head = ", ".join(names[:limit])
+    return head + (f" (+{len(names) - limit} more)" if len(names) > limit else "")
+
+
+def _chain_spot_finding(
+    conn: Any,
+    underlyings: Sequence[str],
+    *,
+    session: date,
+    session_s: str,
+) -> Finding:
+    """Where the spot behind each chain came from, and who has none.
+
+    Research cannot place an at-the-money strike without one: its primary ATM IV
+    read requires ``underlying_price IS NOT NULL``, so an underlying with no spot
+    contributes nothing no matter how complete its chain is. SPX sat in exactly
+    that state with 29,786 vendor IVs a session until 0.43.0, and nothing said so.
+
+    A derived spot is not a fault -- an index level needs a plan we do not hold,
+    and the tracking ETF is the answer we chose. It is reported so that no reader
+    mistakes it for a vendor close: SPY x 10 measured 0.41% below SPX on
+    2026-09-25, fine for placing a strike and about 1.8 vol points wrong in a
+    solve. Having *no* spot is a fault, because the chain is then invisible.
+    """
+    spots = _chain_spots(conn, underlyings, session=session)
+    if spots is None:
+        return Finding(
+            f"chain_spot:{session_s}",
+            "eod-pipeline",
+            "warn",
+            "Spot behind the chain",
+            "every chain carries a spot",
+            None,
+            "unprobed — the view could not be read, so no underlying was cleared "
+            "and none was accused. See API log.",
+            session=session_s,
+        )
+    unpriced_live = sorted(s.underlying for s in spots if s.price is None and s.ticker_active)
+    unpriced_gone = sorted(
+        s.underlying for s in spots if s.price is None and not s.ticker_active
+    )
+    derived: dict[str, list[str]] = {}
+    for s in spots:
+        if s.price is not None and s.source and s.source != VENDOR_SPOT_SOURCE:
+            derived.setdefault(s.source, []).append(s.underlying)
+    vendor = sum(1 for s in spots if s.source == VENDOR_SPOT_SOURCE)
+
+    parts = [f"{vendor} of {len(spots)} chains carry a vendor close for {session_s}."]
+    for source in sorted(derived):
+        names = sorted(derived[source])
+        parts.append(
+            f"{len(names)} on a derived spot ({source}): {', '.join(names)} — "
+            "good enough to place a strike, not to solve an IV."
+        )
+    if unpriced_live:
+        parts.append(
+            f"{len(unpriced_live)} are active tickers with no close for the session, "
+            f"so the whole-market pull dropped a name it should have had and "
+            f"Research's ATM IV cannot see their chains: {_sample(unpriced_live)}."
+        )
+    if unpriced_gone:
+        parts.append(
+            f"{len(unpriced_gone)} carry no spot because raw_market.ticker no longer "
+            f"calls them active, and the whole-market pull only returns active "
+            f"tickers: {_sample(unpriced_gone)}. Their chains are still collected "
+            "every session and can never be priced, so the fix is upstream — the "
+            "option universe, or a symbol_source_void entry."
+        )
+    return Finding(
+        f"chain_spot:{session_s}",
+        "eod-pipeline",
+        "warn" if unpriced_live else "ok",
+        "Spot behind the chain",
+        "every chain carries a spot",
+        len(unpriced_live) + len(unpriced_gone),
+        " ".join(parts),
+        session=session_s,
+        missing_sample=(unpriced_live + unpriced_gone)[:12],
+    )
 
 
 def _presence_findings(
@@ -996,6 +1160,15 @@ def run_doctor(
                         fixable=fixable,
                     )
                 )
+
+        # ── The chain arrived, and nothing can price it ──
+        # Coverage answers "did the rows come" and the degraded check below
+        # answers "are they the session's". This one answers "can anything place
+        # a strike in them", which is a separate way for a complete chain to be
+        # useless. Also outside EOD_CRITICAL_CHECKS: it reports, it does not gate.
+        findings.append(
+            _chain_spot_finding(conn, optionable, session=session, session_s=session_s)
+        )
 
         # ── The chain arrived, and it is wrong ──
         # Coverage above answers "did the rows come"; this answers "are they the

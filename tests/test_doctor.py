@@ -48,6 +48,15 @@ class _Cur:
                 for u, n, iv in d.get("iv_by_session", {}).get(ts.date().isoformat(), [])
                 if scope is None or u in scope
             ]
+        elif "/* doctor: chain-spot */" in q:
+            # (underlying, underlying_price, underlying_price_source), one per
+            # name, exactly as DISTINCT ON hands it back. A name absent from the
+            # fixture has no snapshot row at the anchor and so no row here.
+            self._rows = [
+                (u, px, src, act)
+                for u, px, src, act in d.get("chain_spot", [])
+                if scope is None or u in scope
+            ]
         elif "from raw_market.option_snapshot" in q:
             self._rows = _scoped("snapshot")
         elif "from raw_market.option_open_interest" in q:
@@ -157,6 +166,7 @@ def _healthy_data() -> dict[str, Any]:
         "snapshot": {u: 1000 for u in UNIVERSE},
         "oi": {u: 1000 for u in UNIVERSE},
         "iv_by_session": _steady_iv(),
+        "chain_spot": [(u, 100.0, "vendor", True) for u in UNIVERSE],
         "daily": 12496,
         "daily_watch": UNIVERSE,
         "snap_rows": 13157,
@@ -838,3 +848,109 @@ def test_heal_enqueues_one_job_per_named_underlying(monkeypatch: pytest.MonkeyPa
     assert [spec[1]["underlying"] for spec in sent[0]] == ["MSFT", "SPY"]
     assert all(spec[0] == "option_snapshot" for spec in sent[0])
     assert out["enqueued"] == 2
+
+
+# ── Spot behind the chain ────────────────────────────────────────────────────
+
+
+def _spot_report(spots: list[tuple[str, Any, Any, bool]], **over: Any) -> dict[str, Any]:
+    data = _healthy_data()
+    data["chain_spot"] = spots
+    data.update(over)
+    return doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+
+
+def test_an_active_ticker_with_no_close_is_a_fault() -> None:
+    """The whole-market pull returns every active ticker, so a gap there is ours.
+
+    Research's primary ATM IV read requires ``underlying_price IS NOT NULL``, so
+    an underlying with no spot contributes nothing however complete its chain is
+    — and nothing said so until this check. SPX sat in exactly that state with
+    29,786 vendor IVs a session until 0.43.0.
+    """
+    spots = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-1]] + [
+        (UNIVERSE[-1], None, None, True)
+    ]
+    f = _by_id(_spot_report(spots))["chain_spot"]
+    assert f["severity"] == "warn"
+    assert f["actual"] == 1 and UNIVERSE[-1] in f["detail"]
+    assert "dropped a name it should have had" in f["detail"]
+
+
+def test_an_inactive_ticker_with_no_close_is_named_but_is_not_our_fault() -> None:
+    """Measured 2026-09-25: AVB, ISSC, SATS and WBS had chains and no close.
+
+    Their stock_daily stops in June and August 2026, and raw_market.ticker has
+    AVB / ISSC / WBS at active=false with no row at all for SATS. The
+    whole-market grouped pull only returns active tickers, so the close stopping
+    is a consequence, not a fault — while their chains are still collected every
+    session. Reporting that at ``warn`` would leave the doctor permanently amber
+    for something no refetch can fix, which is how a surface teaches people to
+    ignore it. It is counted and named, and the remedy is said to be upstream.
+    """
+    spots = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-2]] + [
+        (UNIVERSE[-2], None, None, False),
+        (UNIVERSE[-1], None, None, False),
+    ]
+    f = _by_id(_spot_report(spots))["chain_spot"]
+    assert f["severity"] == "ok", "no refetch would fix it, so it must not gate or shout"
+    assert f["actual"] == 2, "still counted — silence would be worse"
+    assert UNIVERSE[-1] in f["detail"] and UNIVERSE[-2] in f["detail"]
+    assert "symbol_source_void" in f["detail"], "the detail names where the fix lives"
+    assert set(f["missing_sample"]) == {UNIVERSE[-1], UNIVERSE[-2]}
+
+
+def test_a_derived_spot_is_named_but_is_not_a_fault() -> None:
+    """An index level needs a plan we do not hold; the ETF is the answer we chose.
+
+    So it reports at ``ok`` — but it reports, because SPY x 10 measured 0.41%
+    below SPX and a reader who cannot tell it from a vendor close will eventually
+    solve an IV with it, which costs about 1.8 vol points.
+    """
+    spots = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-1]] + [
+        (UNIVERSE[-1], 7713.5, "SPYx10", True)
+    ]
+    f = _by_id(_spot_report(spots))["chain_spot"]
+    assert f["severity"] == "ok", "the plan's edge is not a defect"
+    assert f["actual"] == 0
+    assert "SPYx10" in f["detail"] and UNIVERSE[-1] in f["detail"]
+    assert "not to solve an IV" in f["detail"]
+
+
+def test_the_spot_check_does_not_gate_the_research_batch() -> None:
+    """Widening what blocks the batch is a decision about the gate."""
+    assert "chain_spot" not in doc.EOD_CRITICAL_CHECKS
+    rep = _spot_report([(u, None, None, True) for u in UNIVERSE])
+    assert _by_id(rep)["chain_spot"]["severity"] == "warn"
+    assert rep["eod_critical"]["verdict"] == "healthy", "it reports, it does not gate"
+
+
+def test_an_unanswerable_spot_probe_is_not_a_clean_bill() -> None:
+    """A cancelled query reads neither as "no spot anywhere" nor as "all fine"."""
+
+    class _Boom(_Conn):
+        def cursor(self) -> Any:
+            cur = super().cursor()
+            inner = cur.execute
+
+            def execute(query: str, params: Any = None) -> None:
+                if "/* doctor: chain-spot */" in " ".join(query.lower().split()):
+                    raise RuntimeError("canceling statement due to statement timeout")
+                inner(query, params)
+
+            cur.execute = execute  # type: ignore[method-assign]
+            return cur
+
+    rep = doc.run_doctor(_Boom(_healthy_data()), now=NOW, watchlist=UNIVERSE)
+    f = _by_id(rep)["chain_spot"]
+    assert f["severity"] == "warn" and "unprobed" in f["detail"]
+    assert f["actual"] is None, "no count was measured, so none is claimed"
+
+
+def test_the_vendor_label_has_one_definition() -> None:
+    """The view writes it, the doctor compares against it, nobody spells it twice."""
+    from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE
+    from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL as sql
+
+    assert f"THEN '{VENDOR_SPOT_SOURCE}'" in sql
+    assert doc.VENDOR_SPOT_SOURCE is VENDOR_SPOT_SOURCE
