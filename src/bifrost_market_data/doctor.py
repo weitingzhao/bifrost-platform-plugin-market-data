@@ -40,6 +40,7 @@ from bifrost_market_data.trading_calendar import chain_session, is_trading_day
 from bifrost_market_data.contracts import (
     CONTRACTS,
     STOCK_DAILY_MIN_SESSION_SYMBOLS,
+    contract_for,
     staleness_by_slot,
 )
 from bifrost_market_data.session import EOD_EXPECTED_BY_NY as _EOD_BY_NY
@@ -98,6 +99,11 @@ SHORT_VOLUME_MIN_ROWS = 4000
 #: Hours after the close by which the whole-market ratio and short-volume pull
 #: is due — the tightest of the contracts the `fundamentals-market` slot owns.
 FUNDAMENTALS_MARKET_DEADLINE_H = staleness_by_slot()["fundamentals-market"][1]
+#: The same slot run carries short volume for the session and ratios for the
+#: one before it. Asking for the session's own ratios read 0 rows every hour the
+#: session was current — warn on weekdays, critical from Sunday 02:00 UTC to
+#: Monday evening — while the table held every session the vendor had issued.
+RATIOS_LAG_SESSIONS = contract_for("raw_market.ratios").publication_lag_sessions
 
 # The slots whose staleness the doctor polices. The list is deliberate — widening
 # it is a decision about what raises a warning, not a consequence of declaring a
@@ -967,6 +973,18 @@ def resolve_session(conn: Any, now: datetime) -> tuple[date, bool]:
     )
 
 
+def _sessions_before(conn: Any, session: date, lag: int) -> date:
+    """The trading session ``lag`` sessions before ``session``; itself at zero.
+
+    Filtered rather than sliced: while ``session`` is still today in UTC the
+    calendar helper leaves it out, and after midnight it keeps it in.
+    """
+    if lag <= 0:
+        return session
+    prior = [d for d in fetch_completed_trading_days(conn, lag + 1, as_of=session) if d < session]
+    return prior[-lag] if len(prior) >= lag else session
+
+
 def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[str, Any]:
     fix: dict[str, Any] = {"action": "enqueue-slot", "slot": slot, "force": force}
     if session is not None:
@@ -1347,8 +1365,12 @@ def run_doctor(
     )
 
     # ── Financials & Ratios by date (published the morning after) ──
+    # Short volume for this session, ratios for the one the vendor has issued
+    # by the time the slot runs — see RATIOS_LAG_SESSIONS.
+    ratios_session = _sessions_before(conn, session, RATIOS_LAG_SESSIONS)
+    ratios_s = ratios_session.isoformat()
     n_ratios = _count(
-        conn, "SELECT count(*) FROM raw_market.ratios WHERE period_date = %s", (session,)
+        conn, "SELECT count(*) FROM raw_market.ratios WHERE period_date = %s", (ratios_session,)
     )
     n_sv = _count(
         conn, "SELECT count(*) FROM raw_market.short_volume WHERE period_date = %s", (session,)
@@ -1367,11 +1389,12 @@ def run_doctor(
             "fundamentals-market",
             "ok" if fund_ok else ("crit" if fund_overdue else "warn"),
             "Ratios + short volume (whole market)",
-            f"ratios >= {RATIOS_MIN_ROWS}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
+            f"ratios >= {RATIOS_MIN_ROWS} for {ratios_s}, short_volume >= {SHORT_VOLUME_MIN_ROWS}",
             {"ratios": n_ratios, "short_volume": n_sv},
-            f"ratios={n_ratios}, short_volume={n_sv} rows for {session_s}."
+            f"ratios={n_ratios} rows for {ratios_s}, short_volume={n_sv} rows for {session_s}."
             + (
-                f" Published the morning after the session; due {fund_due:%Y-%m-%d %H:%M} UTC."
+                " Short volume is published the morning after the session and ratios"
+                f" a session later; due {fund_due:%Y-%m-%d %H:%M} UTC."
                 if not fund_ok and not fund_overdue
                 else ""
             ),

@@ -68,7 +68,11 @@ class _Cur:
         elif "from raw_market.stock_snapshot" in q:
             self._rows = [{"count": d.get("snap_rows", 0)}]
         elif "from raw_market.ratios" in q:
-            self._rows = [{"count": d.get("ratios", 0)}]
+            # By date when the fixture says which dates it holds: the check asks
+            # for a different date than the session it reports on.
+            by_date = d.get("ratios_by_date")
+            n = by_date.get(params[0], 0) if by_date is not None else d.get("ratios", 0)
+            self._rows = [{"count": n}]
         elif "from raw_market.short_volume" in q:
             self._rows = [{"count": d.get("short_volume", 0)}]
         elif "from ops_jobs.ingest_freshness" in q:
@@ -553,6 +557,42 @@ def test_fundamentals_are_critical_once_the_deadline_passes() -> None:
     f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
     assert f["severity"] == "crit"
     assert f["auto_fixable"] is True
+
+
+# ── Ratios are a session behind short volume ──
+
+
+def test_ratios_are_read_a_session_behind_the_one_reported() -> None:
+    """The Sunday that read critical with nothing missing.
+
+    The slot run the morning after a Friday brought Friday's short volume and
+    Thursday's ratios, because Thursday's was the vendor's latest when it
+    asked. Friday's ratios come with Monday's short volume. Asking for Friday's
+    ratios on Sunday found none, past a deadline that fell at 02:00 UTC.
+    """
+    thursday = SESSIONS[-2]
+    data = _healthy_data()
+    data["ratios_by_date"] = {thursday: 4000}
+    conn = _Conn(data)
+    sunday_afternoon = datetime(2026, 9, 6, 15, 54, tzinfo=timezone.utc)
+    rep = doc.run_doctor(conn, now=sunday_afternoon, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert rep["session"] == SESSION.isoformat()
+    assert f["severity"] == "ok"
+    assert thursday.isoformat() in f["expected"]
+    asked = [p for q, p in conn.statements if "from raw_market.ratios" in q]
+    assert asked == [(thursday,)]
+
+
+def test_a_missing_ratios_session_is_still_critical() -> None:
+    """Holding the reported session's ratios does not excuse the one owed."""
+    data = _healthy_data()
+    data["ratios_by_date"] = {SESSION: 4000}
+    past_the_deadline = datetime(2026, 9, 6, 3, 0, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(data), now=past_the_deadline, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"].startswith("fundamentals_market"))
+    assert f["severity"] == "crit"
+    assert f["actual"] == {"ratios": 0, "short_volume": data["short_volume"]}
 
 
 # ── Failure counts come from the record; retries come from what is still there ──

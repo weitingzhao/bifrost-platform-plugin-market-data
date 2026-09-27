@@ -114,6 +114,11 @@ class DatasetContract:
     #: while nothing was wrong. Whether the collector is still running is the
     #: ingest_freshness question, not this one.
     cadence: Cadence = "session"
+    #: Sessions between a session and the first slot run that can bring rows
+    #: dated to it, beyond the run the morning after. Zero for a feed the vendor
+    #: has ready by then. A check that asks for today's date from a feed that is
+    #: a session behind is never satisfied, whatever its deadline says.
+    publication_lag_sessions: int = 0
 
     #: Why breadth against this tier's scope is not a fair question. Absence
     #: means it is. A top-N list is not partial coverage of the market, and a
@@ -313,6 +318,12 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         "period_date",
         freshness_dimension="ratios",
         grain="daily",
+        # The vendor's "latest" is the session before last when the 04:30 UTC
+        # slot asks. Measured 2026-09-27: all 13 sessions 09-08..09-24 first
+        # landed at the second slot run after them (Mon-Thu two mornings later,
+        # Fridays the Tuesday), none at the first. The slot that brings short
+        # volume for a session brings ratios for the one before it.
+        publication_lag_sessions=1,
         refill=Refill("unrecoverable", why="the endpoint ignores ?date and always answers with the latest values, so this history only accrues"),
         # The vendor's ratio population and our active-ticker list are two
         # different sets that happen to overlap. Measured 2026-09-10: each pull
