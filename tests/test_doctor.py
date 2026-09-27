@@ -877,6 +877,57 @@ def test_an_active_ticker_with_no_close_is_a_fault() -> None:
     assert "dropped a name it should have had" in f["detail"]
 
 
+def test_a_limit_the_vendor_will_not_move_is_a_boundary_not_a_fault() -> None:
+    """``boundary`` is the Console's own definition, from the coverage matrix:
+    "a boundary is not a gap: the vendor cannot backfill it".
+
+    Both unpriced causes this side cannot fix land there. With three severities
+    the check had to spend either ``warn`` or ``ok`` on them and got it wrong
+    either way: ``warn`` leaves the report permanently amber for something no
+    refetch touches, and ``ok`` paints a derived spot green, which claims a
+    vendor close nobody holds.
+    """
+    derived = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-1]] + [
+        (UNIVERSE[-1], 7713.5, "SPYx10", True)
+    ]
+    inactive = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-1]] + [
+        (UNIVERSE[-1], None, None, False)
+    ]
+    for spots in (derived, inactive):
+        rep = _spot_report(spots)
+        f = _by_id(rep)["chain_spot"]
+        assert f["severity"] == "boundary"
+        assert rep["verdict"] != "degraded", "a boundary moves no verdict"
+
+    # And a live ticker the pull dropped is still ours, even beside a boundary.
+    both = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-2]] + [
+        (UNIVERSE[-2], 7713.5, "SPYx10", True),
+        (UNIVERSE[-1], None, None, True),
+    ]
+    assert _by_id(_spot_report(both))["chain_spot"]["severity"] == "warn"
+
+
+def test_the_summary_accounts_for_every_severity() -> None:
+    """A hard-coded "crit · warn · ok" dropped findings out of the count the
+    moment a fourth severity existed, and the line still read as complete."""
+    spots = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-1]] + [
+        (UNIVERSE[-1], 7713.5, "SPYx10", True)
+    ]
+    rep = _spot_report(spots)
+    counted = sum(int(part.split()[0]) for part in rep["summary"].split(" · "))
+    assert counted == len(rep["findings"]), rep["summary"]
+    assert "boundary" in rep["summary"]
+    for sev in doc.SEVERITIES:
+        assert any(sev in part for part in rep["summary"].split(" · ")) or sev == "crit"
+
+
+def test_every_finding_uses_a_severity_from_the_vocabulary() -> None:
+    """Nothing invents a fifth value the Console cannot colour."""
+    rep = doc.run_doctor(_Conn(_healthy_data()), now=NOW, watchlist=UNIVERSE)
+    unknown = sorted({f["severity"] for f in rep["findings"]} - set(doc.SEVERITIES))
+    assert not unknown, unknown
+
+
 def test_an_inactive_ticker_with_no_close_is_named_but_is_not_our_fault() -> None:
     """Measured 2026-09-25: AVB, ISSC, SATS and WBS had chains and no close.
 
@@ -893,7 +944,7 @@ def test_an_inactive_ticker_with_no_close_is_named_but_is_not_our_fault() -> Non
         (UNIVERSE[-1], None, None, False),
     ]
     f = _by_id(_spot_report(spots))["chain_spot"]
-    assert f["severity"] == "ok", "no refetch would fix it, so it must not gate or shout"
+    assert f["severity"] == "boundary", "no refetch would fix it, so it must not shout"
     assert f["actual"] == 2, "still counted — silence would be worse"
     assert UNIVERSE[-1] in f["detail"] and UNIVERSE[-2] in f["detail"]
     assert "symbol_source_void" in f["detail"], "the detail names where the fix lives"
@@ -911,7 +962,7 @@ def test_a_derived_spot_is_named_but_is_not_a_fault() -> None:
         (UNIVERSE[-1], 7713.5, "SPYx10", True)
     ]
     f = _by_id(_spot_report(spots))["chain_spot"]
-    assert f["severity"] == "ok", "the plan's edge is not a defect"
+    assert f["severity"] == "boundary", "the plan's edge is not a defect"
     assert f["actual"] == 0
     assert "SPYx10" in f["detail"] and UNIVERSE[-1] in f["detail"]
     assert "not to solve an IV" in f["detail"]

@@ -155,11 +155,23 @@ DEFAULT_WORKER_HEALTH_URLS = {
 }
 
 
+#: The severity vocabulary, worst first. ``boundary`` is the Console's own
+#: definition, carried over from the coverage matrix: "a boundary is not a gap:
+#: the vendor cannot backfill it". So it separates a limit no action on this side
+#: can move from a fault that a refetch would fix — a distinction the three-value
+#: vocabulary had to spend either ``warn`` or ``ok`` on, and got wrong both ways.
+#: ``warn`` left the report permanently amber for something unfixable, which is
+#: how a surface teaches people to ignore it; ``ok`` painted it green, which
+#: claims a vendor number nobody holds.
+SEVERITIES: tuple[str, ...] = ("crit", "warn", "boundary", "ok")
+
+
 @dataclass
 class Finding:
     id: str
     slot: str
-    severity: str  # ok | warn | crit
+    #: One of ``SEVERITIES``. Only ``crit`` and ``warn`` move a verdict.
+    severity: str
     title: str
     expected: Any
     actual: Any
@@ -710,10 +722,13 @@ def _chain_spot_finding(
             "every session and can never be priced, so the fix is upstream — the "
             "option universe, or a symbol_source_void entry."
         )
+    # A derived spot and an inactive ticker are both limits the vendor will not
+    # move; only a live ticker missing from the whole-market pull is ours.
+    severity = "warn" if unpriced_live else ("boundary" if (unpriced_gone or derived) else "ok")
     return Finding(
         f"chain_spot:{session_s}",
         "eod-pipeline",
-        "warn" if unpriced_live else "ok",
+        severity,
         "Spot behind the chain",
         "every chain carries a spot",
         len(unpriced_live) + len(unpriced_gone),
@@ -1622,7 +1637,17 @@ def run_doctor(
             "windowed": len(windowed),
         },
         "verdict": verdict,
-        "summary": f"{len(crit)} critical · {len(warn)} warning · {sum(1 for f in findings if f.severity == 'ok')} ok",
+        # Every severity is named, so adding one cannot silently drop findings
+        # out of the count the way a hard-coded "crit · warn · ok" would.
+        "summary": " · ".join(
+            f"{sum(1 for f in findings if f.severity == sev)} {label}"
+            for sev, label in (
+                ("crit", "critical"),
+                ("warn", "warning"),
+                ("boundary", "boundary"),
+                ("ok", "ok"),
+            )
+        ),
         "eod_critical": {
             "verdict": eod_verdict,
             "checks": list(EOD_CRITICAL_CHECKS),
