@@ -17,6 +17,7 @@ from bifrost_market_data.ingest.index_options import (
     is_index_option_underlying,
     storage_underlying,
 )
+from bifrost_market_data.symbol_rename import resolve_storage
 from bifrost_market_data.worker.claim import JobRow
 
 _CONTRACT_COLS = (
@@ -55,6 +56,14 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         max_pages=max_pages,
     )
     results = list(data.get("results") or [])
+    # Same rename resolution as the chain snapshot: the catalogue is keyed by
+    # option_ticker and its underlying is an update column, so a stale request
+    # symbol here rewrites rows the snapshot handler had already labelled.
+    storage = resolve_storage(
+        conn,
+        storage,
+        [str(i.get("ticker")) for i in results if isinstance(i, dict) and i.get("ticker")],
+    )
     contract_rows: list[tuple[Any, ...]] = []
     expiries: set[Any] = set()
 

@@ -1,0 +1,162 @@
+"""Moving rows already filed under a symbol the vendor has renamed.
+
+The forward fix stops new rows arriving that way; 24,238 were already written
+when it landed, and a chain split across two labels is a chain no reader can ask
+for. These pin the two discovery routes — one of the three renames is invisible
+to each of them — and the shape of the update that moves the rows.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+from bifrost_market_data.schema.rename_label_repair import (
+    RENAME_TABLES,
+    rename_pairs,
+    repair_renamed_labels,
+)
+
+
+class _Cur:
+    def __init__(self, parent: _Conn) -> None:
+        self.parent = parent
+        self.rowcount = 0
+        self._rows: list[tuple[Any, ...]] = []
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        q = " ".join(str(sql).split())
+        self.parent.statements.append((q, params))
+        if "FROM raw_market.ticker dead" in q:
+            self._rows = list(self.parent.ticker_pairs)
+            return
+        if "FROM raw_market.option_contract" in q and q.startswith("WITH r AS"):
+            self._rows = list(self.parent.catalogue_pairs)
+            return
+        if q.startswith("UPDATE raw_market."):
+            table = q.split("UPDATE raw_market.")[1].split(" ")[0]
+            alive, dead, root = params
+            assert alive == root, "the label moves to the root, so those two are one value"
+            self.rowcount = self.parent.hits.get((table, dead), 0)
+            return
+        self._rows = []
+
+    def fetchall(self) -> Sequence[Any]:
+        return self._rows
+
+    def __enter__(self) -> _Cur:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _Conn:
+    def __init__(
+        self,
+        *,
+        ticker_pairs: Sequence[tuple[str, str]] = (),
+        catalogue_pairs: Sequence[tuple[str, str]] = (),
+        hits: dict[tuple[str, str], int] | None = None,
+    ) -> None:
+        self.ticker_pairs = list(ticker_pairs)
+        self.catalogue_pairs = list(catalogue_pairs)
+        self.hits = hits or {}
+        self.statements: list[tuple[str, Any]] = []
+        self.commits = 0
+
+    def cursor(self) -> _Cur:
+        return _Cur(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+# ── discovery ─────────────────────────────────────────────────────────────
+
+
+def test_both_routes_are_needed_and_neither_is_enough() -> None:
+    """Measured 2026-09-26: the reference table proves ISSC → IA and EQR → VMRK
+    and cannot see SATS → ECHO, because SATS has no row. The catalogue shows
+    SATS → ECHO and ISSC → IA and cannot see EQR → VMRK, because
+    option_contract's underlying is an update column and a later VMRK job had
+    already rewritten it."""
+    conn = _Conn(
+        ticker_pairs=[("ISSC", "IA"), ("EQR", "VMRK")],
+        catalogue_pairs=[("SATS", "ECHO"), ("ISSC", "IA")],
+    )
+    with conn.cursor() as cur:
+        assert rename_pairs(cur) == [("EQR", "VMRK"), ("ISSC", "IA"), ("SATS", "ECHO")]
+
+
+def test_a_pair_that_is_not_a_move_is_dropped() -> None:
+    conn = _Conn(ticker_pairs=[("IA", "IA"), ("", "IA"), ("ISSC", None)])
+    with conn.cursor() as cur:
+        assert rename_pairs(cur) == []
+
+
+def test_pairs_are_deduplicated_across_routes() -> None:
+    conn = _Conn(ticker_pairs=[("ISSC", "IA")], catalogue_pairs=[("issc", "ia")])
+    with conn.cursor() as cur:
+        assert rename_pairs(cur) == [("ISSC", "IA")]
+
+
+# ── the move ──────────────────────────────────────────────────────────────
+
+
+def test_every_option_table_is_visited_for_every_pair() -> None:
+    conn = _Conn(ticker_pairs=[("ISSC", "IA")])
+    repair_renamed_labels(conn)
+    updated = [q for q, _ in conn.statements if q.startswith("UPDATE raw_market.")]
+    assert len(updated) == len(RENAME_TABLES)
+    assert {q.split("UPDATE raw_market.")[1].split(" ")[0] for q in updated} == set(RENAME_TABLES)
+
+
+def test_the_update_only_moves_rows_whose_root_spells_the_successor() -> None:
+    """438 of EQR's rows are rooted VMRK1 and 26 of SATS's ECHO1 — adjusted
+    roots, not tickers. They stay for adjusted_root_repair, whose direction is
+    root → catalogue underlying rather than the reverse."""
+    conn = _Conn(ticker_pairs=[("EQR", "VMRK")])
+    repair_renamed_labels(conn)
+    update = next(q for q, _ in conn.statements if q.startswith("UPDATE raw_market.option_snapshot"))
+    assert "substring(option_ticker FROM 3 FOR length(option_ticker) - 17) = %s" in update
+    assert "WHERE underlying = %s" in update, "equality, so the label index carries it"
+
+
+def test_rows_moved_are_reported_per_table() -> None:
+    conn = _Conn(
+        ticker_pairs=[("ISSC", "IA")],
+        catalogue_pairs=[("SATS", "ECHO")],
+        hits={
+            ("option_snapshot", "SATS"): 8012,
+            ("option_snapshot", "ISSC"): 1672,
+            ("option_daily", "SATS"): 1562,
+        },
+    )
+    moved = repair_renamed_labels(conn)
+    assert moved == {"option_snapshot": 9684, "option_daily": 1562}
+
+
+def test_nothing_to_move_is_an_empty_answer_and_no_updates() -> None:
+    conn = _Conn()
+    assert repair_renamed_labels(conn) == {}
+    assert not [q for q, _ in conn.statements if q.startswith("UPDATE")]
+
+
+def test_each_statement_commits_so_a_budget_keeps_what_it_moved() -> None:
+    """The adjusted-root repair learned this the hard way: one transaction for
+    every rewrite meant a timeout rolled back the lot, and the run after it
+    printed "nothing written", which reads exactly like nothing left to do."""
+    conn = _Conn(ticker_pairs=[("ISSC", "IA")])
+    repair_renamed_labels(conn)
+    updates = len([q for q, _ in conn.statements if q.startswith("UPDATE")])
+    assert conn.commits >= updates
+
+
+def test_a_spent_budget_returns_what_it_did_rather_than_raising() -> None:
+    conn = _Conn(
+        ticker_pairs=[("ISSC", "IA")],
+        hits={("option_snapshot", "ISSC"): 5},
+    )
+    moved = repair_renamed_labels(conn, budget_sec=-1.0)
+    assert moved == {}
+    assert not [q for q, _ in conn.statements if q.startswith("UPDATE")]

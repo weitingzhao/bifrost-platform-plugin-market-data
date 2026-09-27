@@ -25,6 +25,7 @@ from bifrost_market_data.schema.wave8_migrations import (
 from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE, spot_proxy_pairs
 from bifrost_market_data.schema.adjusted_root_repair import repair_adjusted_underlyings
 from bifrost_market_data.schema.ctid_damage_restore import restore_ctid_damage
+from bifrost_market_data.schema.rename_label_repair import repair_renamed_labels
 from bifrost_market_data.schema.corporate_action_identity import (
     CONSTRAINT_NAME as CORPORATE_ACTION_KEY,
     IDENTITY as CORPORATE_ACTION_IDENTITY,
@@ -84,6 +85,17 @@ def apply_wave8_migrations(conn: _Connection) -> None:
     else:
         if restored:
             print(f"ctid damage restored: {restored}")
+
+    # Before the adjusted-root repair, not after: this one leaves each renamed
+    # root under a single underlying, which is what that repair's ambiguity
+    # check needs to stop seeing ECHO filed under both ECHO and SATS.
+    try:
+        moved = repair_renamed_labels(conn)
+    except Exception as exc:  # noqa: BLE001 — a data fix must not fail a schema deploy
+        print(f"rename label repair skipped: {exc}")
+    else:
+        if moved:
+            print(f"renamed labels moved: {moved}")
 
     try:
         repaired = repair_adjusted_underlyings(conn)

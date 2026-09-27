@@ -22,6 +22,10 @@ class FakeCursor:
         """INSERT ... RETURNING id — the continuation job's id."""
         return (self.parent.next_job_id,)
 
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        """Rows for SELECTs a handler makes; empty unless a test supplies them."""
+        return self.parent.rows
+
     def __enter__(self) -> FakeCursor:
         return self
 
@@ -30,8 +34,9 @@ class FakeCursor:
 
 
 class FakeConn:
-    def __init__(self) -> None:
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
         self.statements: list[tuple[str, Any]] = []
+        self.rows: list[tuple[Any, ...]] = rows if rows is not None else []
         self.next_job_id = 4242
         self.committed = 0
         self.rolled_back = 0

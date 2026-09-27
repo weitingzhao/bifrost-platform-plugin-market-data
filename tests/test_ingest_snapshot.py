@@ -322,3 +322,71 @@ async def test_continuation_stops_at_the_depth_cap(chain_on) -> None:
     assert not [st for st in conn.statements if "job_ingest" in st[0]]
     client.fetch_options_snapshot.assert_awaited_once()
     assert client.fetch_options_snapshot.await_args.kwargs["cursor"] == "PREV"
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_symbol_files_its_chain_under_the_live_one(chain_on) -> None:
+    """Asking for SATS returns O:ECHO contracts, and they belong to ECHO.
+
+    Measured 2026-09-25: the request symbol on the row split ECHO's 776-contract
+    chain into 362 under ECHO and 414 under SATS, and Research wrote two max
+    pains for the 2026-10-16 expiry off the two halves.
+    """
+    chain_on(date(2026, 9, 25))
+    # SATS has no row in raw_market.ticker; ECHO is active.
+    conn = FakeConn(rows=[(None, None, None, True, "0001415404", "BBG000TGLV00")])
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:ECHO261016C00055000",
+                        "expiration_date": "2026-10-16",
+                        "strike_price": 55,
+                        "contract_type": "call",
+                    },
+                    "open_interest": 10,
+                }
+            ]
+        }
+    )
+    out = await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "SATS", "trade_date": "2026-09-25"}),
+        client,
+        conn,
+    )
+    assert out["underlying"] == "ECHO"
+    assert client.fetch_options_snapshot.await_args.args[0] == "SATS", (
+        "the vendor is still asked by the symbol the universe named"
+    )
+    rows = [p for q, p in conn.statements if "INSERT INTO raw_market.option_snapshot" in q]
+    assert rows and all("ECHO" in row and "SATS" not in row for row in rows[0])
+
+
+@pytest.mark.asyncio
+async def test_an_unrenamed_symbol_keeps_the_label_it_was_asked_under(chain_on) -> None:
+    """BRK.B's root is BRKB and SPX's is SPXW; neither is a listing, so neither moves."""
+    chain_on(date(2026, 9, 25))
+    conn = FakeConn(rows=[(True, "1", "F1", None, None, None)])
+    client = mock_client(
+        fetch_options_snapshot={
+            "results": [
+                {
+                    "details": {
+                        "ticker": "O:BRKB270115C00500000",
+                        "expiration_date": "2027-01-15",
+                        "strike_price": 500,
+                        "contract_type": "call",
+                    },
+                    "open_interest": 1,
+                }
+            ]
+        }
+    )
+    out = await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "BRK.B", "trade_date": "2026-09-25"}),
+        client,
+        conn,
+    )
+    assert out["underlying"] == "BRK.B"
+

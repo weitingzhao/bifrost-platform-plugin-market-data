@@ -37,6 +37,7 @@ from bifrost_market_data.ingest.index_options import (
     storage_underlying,
 )
 from bifrost_market_data.scheduler.enqueue import insert_job
+from bifrost_market_data.symbol_rename import resolve_storage
 from bifrost_market_data.trading_calendar import chain_session
 from bifrost_market_data.worker.claim import JobRow
 
@@ -170,6 +171,19 @@ def _contract_parts(item: Mapping[str, Any], storage: str) -> dict[str, Any] | N
     }
 
 
+def _response_tickers(results: list[Any]) -> list[str]:
+    """Contract keys in the order the vendor listed them."""
+    out: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        ticker = details.get("ticker") or item.get("ticker")
+        if ticker:
+            out.append(str(ticker))
+    return out
+
+
 def _opt_float(v: Any) -> float | None:
     try:
         return None if v is None or v == "" else float(v)
@@ -244,6 +258,10 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
         expiration_lte=str(payload["expiration_lte"]) if payload.get("expiration_lte") else None,
     )
     results = list(data.get("results") or [])
+    # A renamed ticker answers under its old symbol with its successor's chain,
+    # so the requested underlying would file live contracts under a dead name.
+    # Resolved from the roots in hand, once per job rather than once per row.
+    storage = resolve_storage(conn, storage, _response_tickers(results))
     snap_rows: list[tuple[Any, ...]] = []
     contract_rows: list[tuple[Any, ...]] = []
     oi_rows: list[tuple[Any, ...]] = []
