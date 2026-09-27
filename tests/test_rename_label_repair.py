@@ -34,6 +34,17 @@ class _Cur:
             return
         if q.startswith("UPDATE raw_market."):
             table = q.split("UPDATE raw_market.")[1].split(" ")[0]
+            if len(params) == 4:
+                # The history move: root spells the *retired* symbol, and the
+                # fourth parameter is that symbol again, for the date bound.
+                alive, dead, root, dated = params
+                assert root == dead, "pre-rename rows are the ones still rooted the old way"
+                assert dated == dead, "the bound is the retired symbol's own last bar"
+                assert "FROM raw_market.stock_daily WHERE symbol = %s" in q, (
+                    "an unbounded history move would sweep up a stale writer's rows"
+                )
+                self.rowcount = self.parent.history_hits.get((table, dead), 0)
+                return
             alive, dead, root = params
             assert alive == root, "the label moves to the root, so those two are one value"
             self.rowcount = self.parent.hits.get((table, dead), 0)
@@ -57,10 +68,14 @@ class _Conn:
         ticker_pairs: Sequence[tuple[str, str]] = (),
         catalogue_pairs: Sequence[tuple[str, str]] = (),
         hits: dict[tuple[str, str], int] | None = None,
+        history_hits: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.ticker_pairs = list(ticker_pairs)
         self.catalogue_pairs = list(catalogue_pairs)
         self.hits = hits or {}
+        #: Rows under the dead label that are rooted the dead way — the company's
+        #: own history from before the rename, which `_MOVE` correctly leaves.
+        self.history_hits = history_hits or {}
         self.statements: list[tuple[str, Any]] = []
         self.commits = 0
 
@@ -107,8 +122,12 @@ def test_every_option_table_is_visited_for_every_pair() -> None:
     conn = _Conn(ticker_pairs=[("ISSC", "IA")])
     repair_renamed_labels(conn)
     updated = [q for q, _ in conn.statements if q.startswith("UPDATE raw_market.")]
-    assert len(updated) == len(RENAME_TABLES)
     assert {q.split("UPDATE raw_market.")[1].split(" ")[0] for q in updated} == set(RENAME_TABLES)
+    # One mislabelled-move statement per table, plus a history move for each table
+    # that stamps a date. option_contract stamps none, so it gets only the first.
+    from bifrost_market_data.schema.rename_label_repair import _HISTORY_DATE_COLUMN
+
+    assert len(updated) == len(RENAME_TABLES) + len(_HISTORY_DATE_COLUMN)
 
 
 def test_the_update_only_moves_rows_whose_root_spells_the_successor() -> None:
@@ -226,3 +245,79 @@ def test_a_missing_price_series_on_either_side_moves_nothing() -> None:
         flat = " ".join(sql.split())
         assert "last_bar IS NOT NULL" in flat, f"{name} route acts without the dead date"
         assert "next_bar IS NOT NULL" in flat, f"{name} route acts without the live date"
+
+
+# ── the history before the rename ──────────────────────────────────────────
+
+
+def test_the_companys_own_history_moves_too() -> None:
+    """OCC renames the contracts, so the series is split by ticker as well as label.
+
+    ECHO's option_daily begins at the handover and the two years before it sit
+    under `O:SATS…` labelled SATS. Those rows are not mislabelled — the label
+    agrees with the root — so `_MOVE` leaves them, and the company's series stays
+    torn on the time axis. Research reads option_daily by (bar_date, underlying),
+    so asking ECHO for a date before 2026-06-24 returns nothing and says nothing.
+    Measured 2026-09-27: 39,449 rows, option_daily SATS 32,263, EQR 5,571,
+    ISSC 1,615, and none in any other table.
+    """
+    conn = _Conn(
+        catalogue_pairs=[("SATS", "ECHO")],
+        history_hits={("option_daily", "SATS"): 32263},
+    )
+    assert repair_renamed_labels(conn) == {"option_daily": 32263}
+
+
+def test_the_history_move_is_bounded_by_the_handover() -> None:
+    """A row dated after the handover is a stale writer, not old history.
+
+    That is a different fault and must not be swept up by a repair aimed at this
+    one. Unlike `_MOVE`, this statement's root check matches the ordinary case, so
+    it is not self-limiting: every row under the dead label qualifies and the date
+    bound is the only structural limit there is.
+    """
+    conn = _Conn(catalogue_pairs=[("SATS", "ECHO")])
+    repair_renamed_labels(conn)
+    hist = [
+        (q, p)
+        for q, p in conn.statements
+        if q.startswith("UPDATE raw_market.option_daily") and len(p or ()) == 4
+    ]
+    assert len(hist) == 1, "one history statement for option_daily"
+    q, _p = hist[0]
+    assert "bar_date <= ( SELECT max(bar_date) FROM raw_market.stock_daily" in q
+    # And the mislabelled move is still a separate statement, still root=successor.
+    plain = [
+        p
+        for q2, p in conn.statements
+        if q2.startswith("UPDATE raw_market.option_daily") and len(p or ()) == 3
+    ]
+    assert plain and plain[0][0] == plain[0][2] == "ECHO"
+
+
+def test_a_table_with_no_date_gets_no_history_move() -> None:
+    """option_contract stamps no date, so there is nothing to bound by."""
+    from bifrost_market_data.schema.rename_label_repair import _HISTORY_DATE_COLUMN
+
+    assert "option_contract" not in _HISTORY_DATE_COLUMN
+    conn = _Conn(catalogue_pairs=[("SATS", "ECHO")])
+    repair_renamed_labels(conn)
+    contract = [
+        p
+        for q, p in conn.statements
+        if q.startswith("UPDATE raw_market.option_contract")
+    ]
+    assert all(len(p or ()) == 3 for p in contract), "no unbounded rewrite of the catalogue"
+
+
+def test_the_two_moves_commit_separately() -> None:
+    """The history move reaches wider, so a timeout on it must not cost the other."""
+    conn = _Conn(
+        catalogue_pairs=[("SATS", "ECHO")],
+        hits={("option_daily", "SATS"): 1562},
+        history_hits={("option_daily", "SATS"): 32263},
+    )
+    moved = repair_renamed_labels(conn)
+    assert moved["option_daily"] == 1562 + 32263
+    updates = len([q for q, _ in conn.statements if q.startswith("UPDATE")])
+    assert conn.commits >= updates

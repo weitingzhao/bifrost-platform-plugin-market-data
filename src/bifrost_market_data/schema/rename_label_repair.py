@@ -167,6 +167,54 @@ WHERE underlying = %s
   AND substring(option_ticker FROM {start} FOR length(option_ticker) - {span}) = %s
 """
 
+#: The other half of a rename: the history the company wrote under its old
+#: symbol. OCC renames option contracts when the underlying renames, so ECHO's
+#: ``option_daily`` begins at the handover and the two years before it sit under
+#: ``O:SATS…`` tickers labelled SATS. Those rows are not mislabelled -- the label
+#: agrees with the root, which is why ``_MOVE`` correctly leaves them -- but the
+#: same company's series is still torn, on the time axis instead of within a
+#: session, and Research reads ``option_daily`` by ``(bar_date, underlying)``.
+#: Asking ECHO for a date before the handover returns nothing and says nothing.
+#:
+#: ⚠️ **This statement is not self-limiting and ``_MOVE`` is.** ``_MOVE`` only
+#: touches rows whose ticker spells the *successor*, which is why eighteen of the
+#: twenty-one pairs moved nothing: the root check does the work. Here the root
+#: check matches the ordinary case, so every row under the dead label qualifies
+#: and the only limits are the pair discovery's guards and the date bound below.
+#: Measured 2026-09-27 that bounds it to 39,449 rows -- option_daily SATS 32,263,
+#: EQR 5,571, ISSC 1,615 -- because the other eighteen dead symbols hold no option
+#: rows at all in any table. That is the data's doing, not the statement's, so the
+#: adjacency test and ``HAVING count(*) = 1`` are load-bearing here in a way they
+#: were not for ``_MOVE``.
+#:
+#: The date bound is the one structural limit: a row dated after the handover is
+#: not pre-rename history, it is a writer still using the old label, which is a
+#: different fault and must not be swept up silently. Measured, every one of the
+#: 39,449 falls on or before its symbol's last stock bar -- SATS 2026-06-23,
+#: EQR and ISSC 2026-08-17 -- so today it costs nothing and it is the guard that
+#: keeps this honest tomorrow. A dead symbol with no stock bars yields NULL and
+#: therefore moves nothing: no dates is no evidence.
+#:
+#: ``option_contract`` is absent deliberately. It stamps no date, so there is
+#: nothing to bound by, and it holds no such row today.
+_HISTORY_DATE_COLUMN: dict[str, str] = {
+    "option_daily": "bar_date",
+    "option_open_interest": "trade_date",
+    "option_snapshot": "date(snapshot_ts AT TIME ZONE 'America/New_York')",
+    "option_minute": "date(bar_time AT TIME ZONE 'America/New_York')",
+}
+
+_MOVE_HISTORY = """
+UPDATE raw_market.{table}
+SET underlying = %s
+WHERE underlying = %s
+  AND length(option_ticker) > {span}
+  AND substring(option_ticker FROM {start} FOR length(option_ticker) - {span}) = %s
+  AND {date_col} <= (
+    SELECT max(bar_date) FROM raw_market.stock_daily WHERE symbol = %s
+  )
+"""
+
 #: How long one deploy may spend on this. The whole backlog measured 24,238
 #: rows, so the budget is a guard against a surprise rather than a schedule.
 DEFAULT_BUDGET_SEC = 30.0
@@ -242,12 +290,40 @@ def repair_renamed_labels(
             if n > 0:
                 moved[table] = moved.get(table, 0) + n
                 logger.info("moved %s %s rows from %s to %s", n, table, dead, alive)
+            # The same company's rows from before the handover, still under the old
+            # symbol because that is what the contracts were called then. Separate
+            # statement and separate commit: it is a wider reach than the one above
+            # and a timeout on it must not cost what that one moved.
+            date_col = _HISTORY_DATE_COLUMN.get(table)
+            if date_col is None:
+                continue
+            hist_sql = _MOVE_HISTORY.format(
+                table=table,
+                span=_TICKER_TAIL + _TICKER_PREFIX,
+                start=_TICKER_PREFIX + 1,
+                date_col=date_col,
+            )
+            with conn.cursor() as cur:
+                cur.execute(hist_sql, (alive, dead, dead, dead))
+                h = int(getattr(cur, "rowcount", 0) or 0)
+            conn.commit()
+            if h > 0:
+                moved[table] = moved.get(table, 0) + h
+                logger.info(
+                    "moved %s %s pre-rename rows from %s to %s (rooted %s)",
+                    h,
+                    table,
+                    dead,
+                    alive,
+                    dead,
+                )
     return moved
 
 
 __all__ = [
     "DEFAULT_BUDGET_SEC",
     "RENAME_TABLES",
+    "_HISTORY_DATE_COLUMN",
     "_RENAME_MAX_GAP_DAYS",
     "rename_pairs",
     "repair_renamed_labels",
