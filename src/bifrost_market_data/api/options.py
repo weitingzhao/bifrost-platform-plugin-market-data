@@ -663,6 +663,7 @@ _EOD_COLS: tuple[str, ...] = (
     "iv",
     "delta",
     "underlying_price",
+    "underlying_price_source",
     "snapshot_ts",
     "_option_ticker",
     "_underlying",
@@ -704,13 +705,22 @@ def _fetch_chain_eod(
     view_schema = resolve_market_schema(conn, "market", "v_option_snapshot_with_stock")
     if view_schema is not None:
         snapshot_table = f"{view_schema}.v_option_snapshot_with_stock"
-        price_col = "v.underlying_price"
+        # An index root has no stock_daily close of its own, so the view fills it
+        # from the tracking ETF. That number is good enough to place a strike and
+        # not good enough to solve an IV -- SPY x 10 measured 0.41% below SPX on
+        # 2026-09-25 -- so it never travels without saying what it is.
+        price_cols = "v.underlying_price, v.underlying_price_source"
     else:
         table_schema = resolve_market_schema(conn, "market", "option_snapshot")
         if table_schema is None:
             return []
         snapshot_table = f"{table_schema}.option_snapshot"
-        price_col = "NULL::double precision AS underlying_price"
+        # No view means no stock join at all, so neither column has a value. The
+        # source stays NULL rather than reading 'vendor', which would claim a
+        # vendor close nobody looked up.
+        price_cols = (
+            "NULL::double precision AS underlying_price, NULL::text AS underlying_price_source"
+        )
 
     out: List[Dict[str, Any]] = []
 
@@ -757,7 +767,7 @@ def _fetch_chain_eod(
                   DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
                   v.iv,
                   v.delta,
-                  {price_col},
+                  {price_cols},
                   v.snapshot_ts,
                   oc.option_ticker AS _option_ticker,
                   oc.underlying AS _underlying,
@@ -792,7 +802,7 @@ def _fetch_chain_eod(
                   DATE(timezone('America/New_York', v.snapshot_ts)) AS snap_day,
                   v.iv,
                   v.delta,
-                  {price_col},
+                  {price_cols},
                   v.snapshot_ts,
                   oc.option_ticker AS _option_ticker,
                   oc.underlying AS _underlying,

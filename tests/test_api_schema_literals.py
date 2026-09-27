@@ -85,6 +85,7 @@ EOD_SNAPSHOT = {
     "iv": 0.37,
     "delta": 0.21,
     "underlying_price": 245.0,
+    "underlying_price_source": "vendor",
     "snapshot_ts": datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc),
     "_option_ticker": "O:NVDA261120C00245000",
     "_underlying": "NVDA",
@@ -113,6 +114,7 @@ EOD_TUPLE_IB = (
     0.37,
     0.21,
     245.0,
+    "vendor",
     datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc),
     "O:NVDA261120C00245000",
     "NVDA",
@@ -135,6 +137,7 @@ def test_chain_eod_reads_the_tuple_rows_the_database_returns() -> None:
     assert rows[0]["iv"] == 0.37 and rows[0]["snap_day"] == "2026-09-14"
     assert rows[0]["delta"] == 0.21, "the caller asked for the greek, not only the vol"
     assert rows[0]["underlying_price"] == 245.0
+    assert rows[0]["underlying_price_source"] == "vendor"
 
 
 def test_chain_eod_reads_a_polygon_keyed_tuple_row_too() -> None:
@@ -182,3 +185,53 @@ def test_chain_by_expiry_reads_each_contract_through_its_key() -> None:
     assert not any("v_option_chain_latest" in s for s in sql)
     for statement in sql:
         assert not BAD_SCHEMA.search(statement), statement
+
+
+def test_the_price_never_leaves_without_saying_where_it_came_from() -> None:
+    """An index root's price is the tracking ETF's, and a reader cannot tell.
+
+    SPY x 10 measured 0.41% below SPX on 2026-09-25 (put-call parity across six
+    near-money strikes, 1.3 points of dispersion). That is fine for placing a
+    strike and wrong for solving an IV, so the two columns are selected together
+    and sit next to each other in the row.
+    """
+    assert "underlying_price_source" in opt._EOD_COLS
+    i = opt._EOD_COLS.index("underlying_price")
+    assert opt._EOD_COLS[i + 1] == "underlying_price_source", "adjacent, so neither is read alone"
+
+    conn = _ResolvingConn([])
+    opt._fetch_chain_eod(conn, ["O:SPXW261005C07700000"], datetime(2026, 9, 1, tzinfo=timezone.utc))
+    for statement in _query_sql(conn):
+        assert ("v.underlying_price" in statement) == ("v.underlying_price_source" in statement), (
+            f"one column without the other: {statement}"
+        )
+
+
+def test_without_the_view_the_source_is_null_not_vendor() -> None:
+    """No view means no stock join, so nobody looked up a vendor close.
+
+    Answering 'vendor' there would assert a provenance that was never checked --
+    the same error class as reporting a probe timeout as a measured zero.
+    """
+
+    class _NoViewCur(_Cur):
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.owner.sql.append(sql)
+            self.owner.last_params = tuple(params) if params else None
+
+    class _NoViewConn(_Conn):
+        def cursor(self) -> _NoViewCur:
+            return _NoViewCur(self)
+
+    conn = _NoViewConn([])
+    original = opt.resolve_market_schema
+    # The view is absent; the base table is not.
+    opt.resolve_market_schema = lambda c, s, rel: None if rel.startswith("v_") else "raw_market"
+    try:
+        opt._fetch_chain_eod(conn, ["O:NVDA261120C00245000"], datetime(2026, 9, 1, tzinfo=timezone.utc))
+    finally:
+        opt.resolve_market_schema = original
+
+    joined = "\n".join(_query_sql(conn))
+    assert "NULL::text AS underlying_price_source" in joined
+    assert "v.underlying_price_source" not in joined
