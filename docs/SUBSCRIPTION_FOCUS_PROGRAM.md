@@ -205,6 +205,24 @@ Options Starter 没有实时 WS，`polygon-ws-ingestor` 常驻只写一个 `ws_m
 - 下游同批：trade-core（0.25.0，删 massive Redis URL / 心跳键 / `socket_massive_disconnected`）、trade-api（`/status` 不再有 `socket.polygon_ws`）、trade-frontend（状态灯与拓扑节点）、bifrost-platform（卫星总线组件、Critical Processes、sessions-catalog、Tier B `massive-ws-quotes`）、bifrost-trade-infra（Trade 配置 `redis_massive`、`REDIS_MASSIVE_*` secrets、verify-phase-b、NetworkPolicy、platform overlay sessions-catalog）。
 - 顺序：心跳 TTL 180 秒，消费端在读不到时会判红，所以先发代码与消费端，最后才删集群里的 Deployment、redis-massive、ExternalName 与 Secret（`kubectl apply -k` 不 prune，删掉 manifest 不会让线上立即消失）。
 
+进度（2026-09-27）：六个 repo 已推 main；Platform STG 与 Trade STG 已发布（DEV 同用 `:stg` 镜像，api-monitor 已重启），`/status` 与卫星总线都不再有 polygon_ws。**PROD 随 Owner 下一次正常发布带上**，之后执行运行时删除。
+
+PROD 发布时必须先做：三个环境的 api-monitor 都挂着手工 ConfigMap `api-monitor-status-hotfix`（2026-08-25，不在任何 repo），用它覆盖镜像里的 `status.py` 与 core 的 `common.py` / `accounts.py`。旧 `status.py` 会 import core 0.25.0 已删的名字，新 Pod 起不来（STG 首次发布即因此卡在 rollout）。STG / DEV 已把其中 `status.py` 换成 repo 版本；PROD 发布前对 `bifrost-prod` 做同样的替换。另两个文件与 repo 分别差 9 / 160 行，即三个环境一直跑着 08-25 版的 core 读取代码 —— 独立问题，待定是否撤掉这个 hotfix。
+
+PROD 发布之后的运行时删除清单：
+
+```
+kubectl -n plugin-market-data delete deploy/polygon-ws-ingestor secret/redis-massive-ws-secret svc/redis-massive
+kubectl -n data delete deploy/redis-massive svc/redis-massive networkpolicy/redis-massive-ingress secret/redis-massive-acl
+kubectl -n bifrost-dev delete svc/redis-massive
+kubectl -n bifrost-stg delete svc/redis-massive
+kubectl -n bifrost-prod delete svc/redis-massive
+```
+
+`bifrost-*-secrets` 里残留的 `REDIS_MASSIVE_*` 键已无人读取，下次重新生成 Secret 时自然消失。
+
+深度回填结果：158,084 个合约作业、0 失败；不达深度的标的 134 → 31（另 13 个没有任何期权日线，多为无挂牌期权的 edge 小盘）。余下 31 个多为近两年上市 / 分拆 / 改代码（HONA、FDXF、CBRS、FIG、CRCL、CRWV、XYZ、PSKY…）或拆股后合约改名（ORLY、IBKR、ETR），属已知代价；KLAC 最早只到 2025-06，原因待查。
+
 ---
 
 ## 4. 发布方式
