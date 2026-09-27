@@ -84,6 +84,10 @@ SLOT_NAMES = (
     "intraday-chain",
     "treasury",
     "option-backfill",
+    # option-backfill for the names short of their depth target only, and only
+    # the months they are short. Scheduled weekly: a name that joins the
+    # universe gets its history without anyone firing the one-off.
+    "option-depth",
     # Reference data, not session data: it has no holiday gate because a
     # company's listing date does not depend on the market being open.
     "ticker-details",
@@ -1274,6 +1278,47 @@ def load_retired_underlyings(
     return out
 
 
+def load_oldest_option_daily(conn: Any, underlyings: Sequence[str]) -> dict[str, date] | None:
+    """Each underlying's oldest ``option_daily`` bar; absent means none held.
+
+    None when the read fails, which the caller must not read as "no history".
+    One min() per name rather than a GROUP BY: each is a short walk of the
+    (underlying, bar_date) index per partition, where the aggregate would scan
+    tens of millions of rows.
+    """
+    syms = sorted({str(s).strip().upper() for s in underlyings if str(s).strip()})
+    if not syms:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '120s'")
+            cur.execute(
+                """
+                /* oldest-option-daily */
+                SELECT u.sym,
+                       (SELECT min(d.bar_date) FROM raw_market.option_daily d
+                        WHERE d.underlying = u.sym) AS first_bar
+                FROM unnest(%s::text[]) AS u(sym)
+                """,
+                (syms,),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- the caller skips rather than guesses
+        logger.warning("oldest option_daily read failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    out: dict[str, date] = {}
+    for row in rows or []:
+        sym, first = (row.get("sym"), row.get("first_bar")) if isinstance(row, Mapping) else (row[0], row[1])
+        if sym and isinstance(first, date):
+            out[str(sym).strip().upper()] = first
+    return out
+
+
 def load_option_tickers_near_spot(
     conn: Any,
     underlyings: Sequence[str],
@@ -1841,6 +1886,7 @@ def enqueue_slot(
         in (
             "option-refresh",
             "option-backfill",
+            "option-depth",
             "eod-pipeline",
             "option-bars",
             "option-contract-expired",
@@ -2003,6 +2049,61 @@ def enqueue_slot(
                     },
                     pri=_tier_pri(sym),
                 )
+
+    elif slot_key == "option-depth":
+        # option-backfill plans every month of every name, and job dedup only
+        # covers pending/running rows, so scheduling it would re-fetch the whole
+        # two years each run. This plans what is missing: names whose oldest
+        # option_daily bar is short of their tier's depth, and for those only the
+        # expiry months whose priced window reaches before that bar. 2026-09-27:
+        # the ~230 names the universe gained on 2026-09-10 had no history before
+        # 2026-09-08 because nothing ever fired the one-off for them.
+        months = int(scfg.get("months") or 24)
+        strike_pct = float(scfg.get("strike_pct") or 0.30)
+        dte = int(scfg.get("dte") or 90)
+        grace = timedelta(days=int(scfg.get("grace_days") or 30))
+        names = union_iv_radar_benchmarks(symbols, cfg)
+        oldest = load_oldest_option_daily(conn, [storage_underlying(s) for s in names])
+        if oldest is None:
+            # Unreadable is not "no history": planning everything on a failed
+            # read is the million-job run this slot exists to avoid.
+            return {
+                "slot": slot_key,
+                "target_date": day_s,
+                "skipped": True,
+                "reason": "oldest_bar_unreadable",
+                "enqueued": 0,
+                "deduped": 0,
+                "jobs": [],
+            }
+        short: list[str] = []
+        for sym in names:
+            storage = storage_underlying(sym)
+            need = months_of.get(sym, months)
+            floor = day - timedelta(days=round(need * 365 / 12))
+            first_bar = oldest.get(storage)
+            if first_bar is not None and first_bar <= floor + grace:
+                continue
+            short.append(storage)
+            for back in range(need):
+                first = _month_start(day, back)
+                # Contracts expiring this month are priced from `dte` days before
+                # expiry; if that whole window is after the first bar we hold,
+                # the month adds nothing to depth.
+                if first_bar is not None and first - timedelta(days=dte) > first_bar:
+                    continue
+                _add(
+                    "option_backfill_plan",
+                    {
+                        "underlying": storage,
+                        "expiry_gte": first.isoformat(),
+                        "expiry_lte": _month_end(first).isoformat(),
+                        "strike_pct": strike_pct,
+                        "dte": dte,
+                    },
+                    pri=_tier_pri(sym),
+                )
+        logger.info("option-depth: %d of %d names short of depth", len(short), len(names))
 
     elif slot_key == "corporate-backfill":
         # Per-symbol full history, no date filter. The daily `corporate` slot walks

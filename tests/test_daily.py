@@ -21,6 +21,7 @@ from bifrost_market_data.scheduler.daily import (
     resolve_target_date,
     union_iv_radar_benchmarks,
 )
+from bifrost_market_data.scheduler import daily as daily_mod
 from bifrost_market_data.scheduler.enqueue import payload_hash
 
 
@@ -1770,6 +1771,55 @@ def test_option_backfill_takes_history_months_from_the_row() -> None:
     assert per["HALO"] == 12, "an edge name carries a year"
     assert per["AAPL"] == 24 and per["SPY"] == 24, "core and resident carry two"
     assert per["QQQ"] == 24, "a benchmark outside the table gets the slot default"
+
+
+_DEPTH_CFG = {
+    "slots": {"option-depth": {"universe": "research", "months": 24, "dte": 90, "grace_days": 30}},
+    "iv_radar_benchmarks": [],
+}
+
+
+def test_option_depth_plans_only_the_names_and_months_short_of_depth(monkeypatch) -> None:
+    """2026-09-27: ~130 names that joined on 09-10 had nothing before 09-08.
+
+    option-backfill would have re-fetched all 650; this plans the short ones,
+    and for a name holding part of its history only the months that reach
+    before its oldest bar.
+    """
+    oldest = {
+        "SPY": date(2024, 9, 30),  # at depth: within the grace of 2024-09-27
+        "MSFT": date(2025, 6, 15),  # holds the last fifteen months
+        "HALO": date(2025, 10, 20),  # edge carries a year; at depth
+    }  # AAPL: none held
+    monkeypatch.setattr(daily_mod, "load_oldest_option_daily", lambda conn, syms: dict(oldest))
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+
+    per: dict[str, list[str]] = {}
+    for j in r["jobs"]:
+        assert j["kind"] == "option_backfill_plan"
+        per.setdefault(j["payload"]["underlying"], []).append(j["payload"]["expiry_gte"])
+    assert set(per) == {"AAPL", "MSFT"}
+    assert len(per["AAPL"]) == 24, "a name with no history gets its whole depth"
+    # Expiries from 2025-09 on are priced from mid-June 2025 or later: held.
+    assert sorted(per["MSFT"]) == [f"{y}-{m:02d}-01" for y, m in
+                                   [(2024, 10), (2024, 11), (2024, 12)] + [(2025, m) for m in range(1, 10)]]
+
+
+def test_option_depth_skips_rather_than_plans_everything_on_a_failed_read(monkeypatch) -> None:
+    monkeypatch.setattr(daily_mod, "load_oldest_option_daily", lambda conn, syms: None)
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+    assert r["skipped"] is True and r["reason"] == "oldest_bar_unreadable"
+    assert r["enqueued"] == 0
+
+
+def test_option_depth_fires_on_a_sunday() -> None:
+    """Its cron is Sunday; a holiday gate would make it never run."""
+    from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, SLOT_NAMES
+
+    assert "option-depth" in SLOT_NAMES
+    assert "option-depth" not in SKIP_ON_HOLIDAY_SLOTS
 
 
 def test_option_refresh_falls_back_to_the_watchlist_when_the_universe_is_empty() -> None:

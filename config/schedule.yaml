@@ -227,6 +227,21 @@ scheduler:
       universe: research
       strike_pct: 0.30
       dte: 90
+    option-depth:
+      # option-backfill's rule, for the names short of their tier's depth and
+      # only the months they are short (0.56.0). Sunday 07:30 UTC: the queue is
+      # idle and it is far from the 21:05-23:15 collection window. Dagster
+      # fires it (bifrost-research market_option_depth_schedule).
+      cron: "30 7 * * 0"
+      priority: 1
+      months: 24
+      universe: research
+      strike_pct: 0.30
+      dte: 90
+      # A name counts as at depth when its oldest bar is within this many days
+      # of the target: the vendor's two-year window rolls daily and retention
+      # truncates to a month start.
+      grace_days: 30
     filings-backfill:
       # Manual / one-off: two years of 8-K text, the vendor's 8-K classification
       # and 10-K risk-factor / MD&A sections for every universe name. The daily

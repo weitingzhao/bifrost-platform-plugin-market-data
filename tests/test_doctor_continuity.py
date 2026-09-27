@@ -143,6 +143,82 @@ def test_a_self_healing_dataset_gets_no_prescription(wired) -> None:
     assert not [f for f in out if "treasury_yield" in f.id]
 
 
+@pytest.fixture()
+def breadth(wired, monkeypatch: pytest.MonkeyPatch):
+    """Distinct symbols per session: ``series[table]`` overrides a flat 340."""
+    sessions, gaps = wired
+    series: dict[str, dict[date, int] | None] = {}
+
+    def fake_breadth(conn: Any, table: str, date_col: str, sym_col: str, **kw: Any):
+        if table in series and series[table] is None:
+            return None
+        override = series.get(table) or {}
+        return [(d, override.get(d, 340)) for d in sessions if d not in (gaps.get(table) or [])]
+
+    monkeypatch.setattr(cont, "per_day_breadth", fake_breadth)
+    return sessions, gaps, series
+
+
+def test_a_narrow_session_is_prescribed_like_a_missing_one(breadth) -> None:
+    """2026-09-09: 26 underlyings against ~340 either side. Present, so the
+    presence probe passed it, and nothing prescribed the refill."""
+    sessions, _gaps, series = breadth
+    day = sessions[20]
+    series["raw_market.option_daily"] = {day: 26}
+    out = _continuity_findings(None, today=TODAY, session=sessions[-1])
+    hit = [f for f in out if f.id == f"continuity:option_daily:{day}"]
+    assert len(hit) == 1
+    f = hit[0]
+    assert f.severity == "warn" and f.auto_fixable is True
+    assert f.title == "Narrow session: option_daily"
+    assert f.fix == {"action": "enqueue-slot", "slot": "option-bars", "force": True, "date": day.isoformat()}
+    assert "26 symbols" in f.detail and "340" in f.detail
+
+
+def test_a_step_up_in_breadth_is_not_narrow(breadth) -> None:
+    """The universe grew from 337 to 575 on 2026-09-08; the days before are not holes."""
+    sessions, _gaps, series = breadth
+    series["raw_market.option_daily"] = {d: (337 if i < 25 else 575) for i, d in enumerate(sessions)}
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1]) if "option_daily" in f.id]
+    assert [f.severity for f in out] == ["ok"]
+
+
+def test_the_session_being_written_is_not_judged_narrow(breadth) -> None:
+    """At 22:05 UTC tonight's rows are half written; the heal must not refill them mid-write."""
+    sessions, _gaps, series = breadth
+    series["raw_market.stock_daily"] = {sessions[-1]: 12}
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1]) if "stock_daily" in f.id]
+    assert [f.severity for f in out] == ["ok"]
+
+
+def test_minute_tables_are_not_judged_on_breadth(breadth) -> None:
+    """They rotate by design; a narrow minute session is the rotation, not a hole."""
+    sessions, _gaps, series = breadth
+    for t in ("raw_market.stock_minute", "raw_market.option_minute"):
+        series[t] = {sessions[20]: 1}
+    out = _continuity_findings(None, today=TODAY, session=sessions[-1])
+    assert not [f for f in out if "minute" in f.id and f.severity != "ok"]
+
+
+def test_narrow_and_missing_share_one_cap_oldest_first(breadth) -> None:
+    sessions, gaps, series = breadth
+    gaps["raw_market.option_daily"] = [sessions[22], sessions[24]]
+    series["raw_market.option_daily"] = {sessions[21]: 5, sessions[23]: 5}
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1])
+           if f.id.startswith("continuity:option_daily:")]
+    assert [f.session for f in out] == [d.isoformat() for d in sessions[21:24]]
+    assert any("left for the next" in f.detail for f in out)
+
+
+def test_an_unreadable_breadth_still_reports_missing_sessions(breadth) -> None:
+    sessions, gaps, series = breadth
+    gaps["raw_market.option_daily"] = [sessions[20]]
+    series["raw_market.option_daily"] = None
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1])
+           if f.id.startswith("continuity:option_daily:")]
+    assert [f.session for f in out] == [sessions[20].isoformat()]
+
+
 def test_short_volume_is_prescribed_by_kind_not_by_slot(wired) -> None:
     """Its slot would also fire ratios_market, whose endpoint ignores the date."""
     sessions, gaps = wired

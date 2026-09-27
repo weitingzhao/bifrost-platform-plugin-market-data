@@ -88,6 +88,13 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "freshness": "option_daily",
         "maintenance": True,
     },
+    # Weekly and usually a no-op once the universe is at depth, so it must not
+    # be able to fail the Research gate either.
+    "option-depth": {
+        "kinds": ["option_backfill_plan"],
+        "freshness": "option_daily",
+        "maintenance": True,
+    },
     # Owner-run one-offs. Marked maintenance for the same reason option-backfill
     # is: without a cron there is no session they could have missed, and an
     # unscheduled slot must not be able to fail the Research gate.
@@ -159,6 +166,7 @@ SLOT_NOTES: dict[str, str] = {
     "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",
+    "option-depth": "Option history for names short of their depth target, weekly (only the missing months)",
     "corporate-backfill": "Full dividend / split history per symbol (Owner-run)",
     "filings-backfill": "Two years of SEC 8-Ks and 10-K sections per universe name (Owner-run)",
     "option-contract-expired": "Expired option catalogue, a quarter at a time (Owner-run)",

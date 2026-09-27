@@ -128,6 +128,48 @@ def per_day_counts(
         return None
 
 
+def per_day_breadth(
+    conn: Any,
+    table: str,
+    date_column: str,
+    symbol_column: str,
+    *,
+    window_days: int,
+    statement_timeout: str = "60s",
+) -> list[tuple[date, int]] | None:
+    """Distinct symbols per day over the window, or None when the read failed.
+
+    Symbols rather than rows, for the doctor's narrow-session refill. On
+    option_daily the two disagree: 2026-08-31..09-04 held 337 underlyings like
+    their neighbours but half the rows, because the one-off backfill priced
+    each contract only for its last 90 days. Judged on rows those three days
+    are holes no refill can close, prescribed every night until they age out.
+    Measured 2026-09-27 over sixty days: 2.7s on option_daily, under 5s on the
+    others.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+            cur.execute(
+                f"""
+                SELECT {date_column}::date AS d, count(DISTINCT {symbol_column})::bigint AS n
+                FROM {table}
+                WHERE {date_column} >= current_date - %s
+                GROUP BY 1 ORDER BY 1
+                """,
+                (int(window_days),),
+            )
+            rows = _rows(cur)
+        return [(r[0], int(r[1] or 0)) for r in rows if r and r[0] is not None]
+    except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the check
+        logger.warning("breadth read failed for %s: %s", table, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def missing_sessions(
     conn: Any,
     table: str,
@@ -325,6 +367,7 @@ __all__ = [
     "has_continuity",
     "thin_days",
     "per_day_counts",
+    "per_day_breadth",
     "missing_sessions",
     "measure",
     "window_start",

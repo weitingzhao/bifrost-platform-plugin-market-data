@@ -161,6 +161,13 @@ class DatasetContract:
     #: acts differently on each. See ``Refill``.
     refill: Refill = field(default_factory=lambda: Refill("unrecoverable"))
 
+    #: Whether a session far narrower than its neighbours is refilled like an
+    #: absent one. Only for datasets whose symbol count per session is meant to
+    #: be steady: the minute tables rotate and the snapshot ones are sparse by
+    #: design. 2026-09-09 option_daily held 26 underlyings against ~340 either
+    #: side; continuity only asked "any rows?", so no one prescribed a refill.
+    refill_narrow: bool = False
+
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
 STOCK_WINDOW_DAYS = 5 * 365
@@ -203,6 +210,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # ninety days before the fourth axis existed.
         grain="daily",
         refill=Refill("slot", "universe-daily", why="the grouped whole-market pull; a blank session is blank for all 5,317"),
+        refill_narrow=True,
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -361,6 +369,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # the alternative is a second prescription vocabulary.
         grain="daily",
         refill=Refill("kind", "short_volume_market", why="the slot would also fire ratios_market, whose endpoint ignores the date, and short_interest_market, whose 45-day lookback already covers it"),
+        refill_narrow=True,
     ),
     DatasetContract(
         "raw_market.short_interest",
@@ -475,13 +484,14 @@ CONTRACTS: tuple[DatasetContract, ...] = (
             "Options Starter: rolling 2 years; resident/core 24 months, edge 12",
         ),
         24.0,
-        ("option-bars", "option-backfill"),
+        ("option-bars", "option-backfill", "option-depth"),
         "underlying",
         "bar_date",
         low_cardinality=True,
         freshness_dimension="option_daily",
         grain="daily",
         refill=Refill("slot", "option-bars", why="near-spot contracts for the named session, at the universe scope"),
+        refill_narrow=True,
     ),
     # SEC filings as text (0.37.0). Universe tier because the Owner scoped the
     # collection to Research's names (2026-09-23), though the 8-K pulls are

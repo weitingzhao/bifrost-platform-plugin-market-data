@@ -482,15 +482,20 @@ CONTINUITY_WINDOW_DAYS = 60
 #: clear nine days, and the finding says plainly when the cap is biting.
 CONTINUITY_MAX_PRESCRIBED = 3
 
+#: Days read before the window so its first sessions have a trailing baseline
+#: for the narrow test (``continuity.NEIGHBOURHOOD`` sessions and change).
+NARROW_BASELINE_LEAD_DAYS = 21
+
 
 def _continuity_findings(
     conn: Any,
     *,
     today: date,
+    session: date | None = None,
     window_days: int = CONTINUITY_WINDOW_DAYS,
     statement_timeout: str = "30s",
 ) -> list[Finding]:
-    """Sessions that never landed and a slot can still refill.
+    """Sessions that never landed, or landed narrow, and a slot can still refill.
 
     The doctor has always been a per-session check with no memory: it reported
     2026-08-11 as critical on 2026-08-11 and forgot by the next morning, so the
@@ -502,17 +507,30 @@ def _continuity_findings(
     considered — ``refill.how`` of ``slot`` or ``kind``. A missed EOD option
     chain is gone for good and a prescription for it would be a lie; a dataset
     whose slot carries its own lookback repairs itself and needs none.
+
+    A contract with ``refill_narrow`` also has its present sessions judged on
+    breadth — distinct symbols against the sessions before it (``thin_days``).
+    Only sessions before ``session``: the one being written tonight is narrow
+    until its batch drains, and the heal would refill it mid-write.
     """
-    from bifrost_market_data.continuity import has_continuity, missing_sessions
+    from bifrost_market_data.continuity import (
+        has_continuity,
+        missing_sessions,
+        per_day_breadth,
+        thin_days,
+    )
     from bifrost_market_data.trading_calendar import expected_trading_days
 
     start = today - timedelta(days=int(window_days))
+    # The narrow test's trailing baseline needs the weeks before the window.
+    lead = timedelta(days=NARROW_BASELINE_LEAD_DAYS)
     try:
-        sessions = sorted(set(expected_trading_days(conn, start=start, end=today)))
+        calendar = sorted(set(expected_trading_days(conn, start=start - lead, end=today)))
     except Exception as exc:  # noqa: BLE001 — without the calendar there is no question to ask
         logger.warning("continuity findings: calendar unavailable: %s", exc)
         _rollback(conn)
         return []
+    sessions = [d for d in calendar if d >= start]
     if not sessions:
         return []
 
@@ -539,8 +557,24 @@ def _continuity_findings(
         # newest session may simply not be due yet.
         first, last = present[0], present[-1]
         absent = [d for d in gaps if first <= d <= last]
+        narrow: dict[date, tuple[int, int]] = {}
+        if c.refill_narrow and c.symbol_column:
+            breadth = per_day_breadth(
+                conn,
+                c.dataset,
+                str(c.date_column),
+                str(c.symbol_column),
+                window_days=int(window_days) + NARROW_BASELINE_LEAD_DAYS,
+                statement_timeout=statement_timeout,
+            )
+            on_calendar = set(calendar)
+            series = [(d, n) for d, n in breadth or [] if d in on_calendar]
+            cutoff = session or today
+            for day, n, baseline in thin_days(series):
+                if start <= day < cutoff:
+                    narrow[day] = (n, baseline)
         name = c.dataset.replace("raw_market.", "")
-        if not absent:
+        if not absent and not narrow:
             out.append(
                 Finding(
                     f"continuity:{name}",
@@ -548,35 +582,46 @@ def _continuity_findings(
                     "ok",
                     f"Continuity: {name}",
                     f"every session in {window_days}d",
-                    f"{len(present)} sessions, none missing",
+                    f"{len(present)} sessions, none missing"
+                    + (", none narrow" if c.refill_narrow else ""),
                     f"No session missing from {name} between {first} and {last}.",
                 )
             )
             continue
-        prescribed = absent[:CONTINUITY_MAX_PRESCRIBED]
+        # One cap across both: a narrow option-bars day refills as many jobs as
+        # an absent one.
+        due = sorted(set(absent) | set(narrow))
+        prescribed = due[:CONTINUITY_MAX_PRESCRIBED]
         for day in prescribed:
-            detail = (
-                f"{name} has no rows for {day}, a trading day between {first} and {last}. "
-                f"{len(absent)} such session(s) in the last {window_days} days"
-            )
-            if len(absent) > len(prescribed):
+            if day in narrow:
+                n, baseline = narrow[day]
+                detail = (
+                    f"{name} holds {n} symbols for {day} against {baseline} in the sessions before it. "
+                    f"{len(narrow)} narrow and {len(absent)} missing session(s) in the last {window_days} days"
+                )
+            else:
+                detail = (
+                    f"{name} has no rows for {day}, a trading day between {first} and {last}. "
+                    f"{len(absent)} such session(s) in the last {window_days} days"
+                )
+            if len(due) > len(prescribed):
                 detail += (
                     f"; prescribing the {len(prescribed)} oldest this run, "
-                    f"{len(absent) - len(prescribed)} left for the next"
+                    f"{len(due) - len(prescribed)} left for the next"
                 )
             out.append(
                 Finding(
                     f"continuity:{name}:{day.isoformat()}",
                     c.refill.target,
                     "warn",
-                    f"Missing session: {name}",
-                    "rows for every trading day",
-                    "no rows",
+                    f"Narrow session: {name}" if day in narrow else f"Missing session: {name}",
+                    "symbols in line with the sessions before" if day in narrow else "rows for every trading day",
+                    f"{narrow[day][0]} symbols" if day in narrow else "no rows",
                     detail + ".",
                     session=day.isoformat(),
                     fix=_refill_fix(c, day),
                     auto_fixable=True,
-                    missing_sample=[d.isoformat() for d in absent[:10]],
+                    missing_sample=[d.isoformat() for d in due[:10]],
                 )
             )
     return out
@@ -1635,7 +1680,7 @@ def run_doctor(
     # looks past the current session; a fault in it must not erase the
     # per-session findings that already succeeded.
     try:
-        findings.extend(_continuity_findings(conn, today=now_utc.date()))
+        findings.extend(_continuity_findings(conn, today=now_utc.date(), session=session))
     except Exception as exc:  # noqa: BLE001
         logger.warning("continuity findings failed: %s", exc)
         _rollback(conn)
