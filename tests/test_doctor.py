@@ -932,12 +932,15 @@ def test_an_inactive_ticker_with_no_close_is_named_but_is_not_our_fault() -> Non
     """Measured 2026-09-25: AVB, ISSC, SATS and WBS had chains and no close.
 
     Their stock_daily stops in June and August 2026, and raw_market.ticker has
-    AVB / ISSC / WBS at active=false with no row at all for SATS. The
-    whole-market grouped pull only returns active tickers, so the close stopping
-    is a consequence, not a fault — while their chains are still collected every
-    session. Reporting that at ``warn`` would leave the doctor permanently amber
-    for something no refetch can fix, which is how a surface teaches people to
-    ignore it. It is counted and named, and the remedy is said to be upstream.
+    AVB / ISSC / WBS at active=false with no row at all for SATS. Measured
+    2026-09-26, all four are delisted: the vendor's reference listing gives each
+    a delisted_utc and its own per-ticker aggregates end on the same session
+    ours do, so there is no close to fetch. The inactive flag is not why the
+    closes stopped — stock_daily_grouped never reads it — so the detail must not
+    say it is. Reporting this at ``warn`` would leave the doctor permanently
+    amber for something no refetch can fix, which is how a surface teaches
+    people to ignore it. It is counted and named, and the detail points at the
+    one lever that works.
     """
     spots = [(u, 100.0, "vendor", True) for u in UNIVERSE[:-2]] + [
         (UNIVERSE[-2], None, None, False),
@@ -947,7 +950,11 @@ def test_an_inactive_ticker_with_no_close_is_named_but_is_not_our_fault() -> Non
     assert f["severity"] == "boundary", "no refetch would fix it, so it must not shout"
     assert f["actual"] == 2, "still counted — silence would be worse"
     assert UNIVERSE[-1] in f["detail"] and UNIVERSE[-2] in f["detail"]
-    assert "symbol_source_void" in f["detail"], "the detail names where the fix lives"
+    assert "option universe" in f["detail"], "the detail names the one lever that works"
+    assert "symbol_source_void" not in f["detail"], (
+        "a skip list only the fundamentals and SEC rotates read — prescribing it "
+        "would send a reader to a table that cannot change what the chain slot collects"
+    )
     assert set(f["missing_sample"]) == {UNIVERSE[-1], UNIVERSE[-2]}
 
 

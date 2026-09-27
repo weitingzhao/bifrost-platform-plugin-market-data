@@ -584,10 +584,15 @@ class ChainSpot:
     price: float | None
     source: str | None
     #: True only when ``raw_market.ticker`` still calls the symbol active. An
-    #: unpriced chain means something different either side of this: the
-    #: whole-market grouped pull only returns active tickers, so an inactive one
-    #: losing its close is the universe going stale, while an active one losing
-    #: it is the pull dropping a name it should have had.
+    #: unpriced chain means something different either side of this: an active
+    #: one losing its close is the whole-market pull dropping a name it should
+    #: have had, while an inactive one has no close anywhere to be dropped from.
+    #: Measured 2026-09-26 on AVB, ISSC, SATS and WBS -- the vendor's reference
+    #: listing gives each a ``delisted_utc``, and its own per-ticker aggregates
+    #: end on the same session ``stock_daily`` does. The flag is not the cause of
+    #: either state; ``stock_daily_grouped`` writes every bar the vendor returns
+    #: and never reads it. It only says which of the two a reader is looking at,
+    #: and it is all the probe has: we store ``active``, not ``delisted_utc``.
     ticker_active: bool
 
 
@@ -676,7 +681,10 @@ def _chain_spot_finding(
     and the tracking ETF is the answer we chose. It is reported so that no reader
     mistakes it for a vendor close: SPY x 10 measured 0.41% below SPX on
     2026-09-25, fine for placing a strike and about 1.8 vol points wrong in a
-    solve. Having *no* spot is a fault, because the chain is then invisible.
+    solve. Having *no* spot is a fault while the ticker is active: the chain is
+    invisible and a close was there to be had. Once the vendor has stopped
+    listing the name there is no close to fetch, and the same silence is a
+    boundary rather than a fault.
     """
     spots = _chain_spots(conn, underlyings, session=session)
     if spots is None:
@@ -716,13 +724,15 @@ def _chain_spot_finding(
         )
     if unpriced_gone:
         parts.append(
-            f"{len(unpriced_gone)} carry no spot because raw_market.ticker no longer "
-            f"calls them active, and the whole-market pull only returns active "
-            f"tickers: {_sample(unpriced_gone)}. Their chains are still collected "
-            "every session and can never be priced, so the fix is upstream — the "
-            "option universe, or a symbol_source_void entry."
+            f"{len(unpriced_gone)} carry no spot and raw_market.ticker no longer "
+            f"calls them active: {_sample(unpriced_gone)}. The vendor publishes no "
+            "close for a name it has stopped listing — their own per-ticker "
+            "aggregates end on the same session — so no refetch reaches these. "
+            "Their chains are still collected every session and Research cannot "
+            "see them; what to do about that is upstream of this check, in who is "
+            "still in the option universe."
         )
-    # A derived spot and an inactive ticker are both limits the vendor will not
+    # A derived spot and a delisted ticker are both limits the vendor will not
     # move; only a live ticker missing from the whole-market pull is ours.
     severity = "warn" if unpriced_live else ("boundary" if (unpriced_gone or derived) else "ok")
     return Finding(
