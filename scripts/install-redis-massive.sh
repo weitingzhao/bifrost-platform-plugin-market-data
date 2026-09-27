@@ -61,8 +61,19 @@ kubectl create secret generic redis-massive-acl \
   --from-literal=acl.conf="$ACL" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# The ingestor reads its own copy of the polygon-ws password. Writing it from the
+# same .env value keeps a rotation from leaving it behind the ACL (2026-08-19:
+# the ACL was rotated, this Secret was not, and every heartbeat failed WRONGPASS
+# for 39 days).
+kubectl create namespace plugin-market-data --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic redis-massive-ws-secret \
+  --namespace=plugin-market-data \
+  --from-literal=password="$REDIS_MASSIVE_POLYGON_WS_PASS" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply -k "$ROOT/k8s/redis-massive"
 # Ensure replicas in case a prior crash/scale left it at 0
 kubectl -n data scale deploy/redis-massive --replicas=1
 
 echo "redis-massive applied. Verify: kubectl get pods,svc -n data -l app.kubernetes.io/name=redis-massive"
+echo "Then: kubectl -n plugin-market-data rollout restart deploy/polygon-ws-ingestor"
