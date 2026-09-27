@@ -187,6 +187,32 @@ Owner 的判断：全自动自维护但每天照样失败且无法自愈，等�
 
 首轮 `option-depth` 手动触发（2026-09-27 22:25 UTC）：134 个标的、2,511 个规划作业，展开约 15.8 万个合约作业。已知代价：天然历史较短的标的（新上市）每周会重拉最早几个月，约 30 个名字，周日空闲时段内消化。
 
+### 2026-09-27 兜底加固（Plugin 0.57.0 · Research 0.147.0 · Console · infra monitoring）
+
+起因：Ingest 面板 Daily Volume 只有最近三天有柱子。**数据没有丢**——面板读的是 `job_ingest`，而 trim 只保留 48 小时的已完成行，caption 却写着 ~7d。评估兜底链时另找出五处缺口，Owner 选择全部处理：
+
+| 缺口 | 处理 |
+|---|---|
+| Daily Volume 只看得到 48 小时 | `/ingest/history` 的 done / failed 改读 `ops_jobs.queue_sample`（保留 90 天，按 `sample_ts - 1s` 归日，因为样本覆盖的是前一个区间），pending / running 仍读 live 行；`days` 上限 90，Console 加 90d 选项并改正 caption。断档表示 sampler 停了，不表示没有运行 |
+| 部分丢失判不出来：ratios 09-21 / 09-22、08-11 只落了一部分，doctor 仍判 ok（绝对底线太低） | `fundamentals-market` 的 ratios / short_volume 底线改为 `max(绝对底线, 前 10 个会话中位数 × 0.9)`，不足 3 个会话时退回绝对底线；落库不足判 warn 并开 `fundamentals-market` 重拉处方（vendor 仍在提供这一期时有效） |
+| `refill_narrow` 的「低于邻居一半」太宽 | `continuity.narrow_days`：低于前 10 日中位数 × 0.85，且（有后续日时）低于后 10 日最大值 × 0.85 才判窄——回填边缘那种逐日递减的形态不误报 |
+| 自愈只在 00:45 UTC 跑一次，早于 fundamentals（04:30） | Research 新增 `market_self_heal_late_schedule`（`30 5 * * 2-6` UTC），同一个 doctor → heal → recheck 作业，进 husbandry 白名单 |
+| 没有 market-data 告警，doctor 结论只在打开页面时可见 | Plugin `GET /metrics`（读 doctor 缓存，不另查库）：`bifrost_market_data_doctor_findings{severity}`、每条 crit / warn 的 `bifrost_market_data_doctor_finding{id,slot,severity,title}`、报告时间戳、处方数。infra `k8s/monitoring/bifrost-market-data.yaml` ServiceMonitor + 规则组 `bifrost-market-data`：Critical（3h）、WarningLingering（26h，即跨过两次自愈仍未消除）、DoctorStale、ScrapeDown、WorkersDown |
+| KLAC 期权深度规划每月 0 个合约 | `option_backfill_plan` 用今天的拆股调整现价筛 ±30% 行权价带，而拆股前到期的合约行权价未调整（KLAC 2026-06-12 1 拆 10，拆股前到期的合约对应的 spot 只剩约十分之一；ORLY 2025-06 1 拆 15、IBKR 1 拆 4、ETR 1 拆 2 同类），全部落在带外。现按 `corporate_action` 把 spot 反调到到期日口径。实测 KLAC 2024-10～2025-09 每月保留 42–98 个合约（原为 0），共 906 个作业 |
+
+上线核对（2026-09-27 23:50 UTC 后）：Prometheus target `market-data-api` up，5 条规则 loaded，指标与 doctor 一致（0 crit / 3 warn：`option_daily` 08-24 / 08-25 / 08-26 被新 `narrow_days` 判窄）。这三天已手动执行处方，约 27.6 万个 `option_daily` 作业（按每 30 分钟约 2 万个排空）；08-27～09-04 的其余窄日由 00:45 / 05:30 两轮自愈按每轮 3 天上限、先旧后新陆续补。根因是 P4 回填终点与 09-10 `option-bars` 扩到全宇宙之间的空档，每个标的只有到期前 90 天的合约。
+
+hotfix ConfigMap 盘点（只盘点，撤不撤由 Owner 决定）：
+
+| ConfigMap | 挂载 | 与 repo 的差异 |
+|---|---|---|
+| `plugin-market-data/market-data-api-schema-hotfix`（`deps.py`，08-25） | 无 | 孤儿，可删 |
+| `plugin-market-data/market-data-quality-hotfix`（`quality.py`，09-05） | 无 | 孤儿，可删 |
+| `api-monitor-status-hotfix`（dev / stg / prod） | api-monitor 覆盖 `status.py`、core `monitor/reader/common.py`、`portfolio/reader/accounts.py` | `status.py`：dev / stg 已与 repo 一致，prod 差 88 行；`common.py` 缺 `get_short_option_legs`；`accounts.py` 差 160 行，缺 core 0.19.0 期权成本口径修复与 0.18.2 的 Golden `raw_broker` 目标 |
+| `bifrost-core-accounts-hotfix`（dev / prod） | api-account 覆盖 `accounts.py` | 差 23 行，同样缺 0.19.0 修复 |
+
+也就是说，后两个 hotfix 把镜像里更新的代码压回了旧版本。
+
 ---
 
 ## 3. Owner 待决事项
@@ -221,7 +247,7 @@ kubectl -n bifrost-prod delete svc/redis-massive
 
 `bifrost-*-secrets` 里残留的 `REDIS_MASSIVE_*` 键已无人读取，下次重新生成 Secret 时自然消失。
 
-深度回填结果：158,084 个合约作业、0 失败；不达深度的标的 134 → 31（另 13 个没有任何期权日线，多为无挂牌期权的 edge 小盘）。余下 31 个多为近两年上市 / 分拆 / 改代码（HONA、FDXF、CBRS、FIG、CRCL、CRWV、XYZ、PSKY…）或拆股后合约改名（ORLY、IBKR、ETR），属已知代价；KLAC 最早只到 2025-06，原因待查。
+深度回填结果：158,084 个合约作业、0 失败；不达深度的标的 134 → 31（另 13 个没有任何期权日线，多为无挂牌期权的 edge 小盘）。余下 31 个多为近两年上市 / 分拆 / 改代码（HONA、FDXF、CBRS、FIG、CRCL、CRWV、XYZ、PSKY…）或拆股后合约改名（ORLY、IBKR、ETR），属已知代价；KLAC 最早只到 2025-06，原因是拆股后的行权价带错位，0.57.0 已修（见「兜底加固」一节）。
 
 ---
 
