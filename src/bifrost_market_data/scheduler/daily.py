@@ -2159,8 +2159,17 @@ def enqueue_slot(
                 )
 
     elif slot_key == "minute-bars":
+        # The benchmark-only tier is the watchlist ∪ the IV-radar benchmarks, and
+        # the coverage contract divides by that union. This slot walked the
+        # watchlist alone, so SPY QQQ IWM SPX AAPL MSFT AMZN META never got a
+        # minute bar — option_minute measured 18/26 on 2026-09-27.
+        minute_syms = union_iv_radar_benchmarks(symbols, cfg)
         # Stock intraday: 1min / 5min / 1hour (replaces retired Trade stocks_ib Celery path).
-        for sym in symbols:
+        # An index level is not a stock aggregate (Indices plan), so SPX gets
+        # option bars below but no stock bars here.
+        for sym in minute_syms:
+            if is_index_option_underlying(sym):
+                continue
             for multiplier, timespan in ((1, "minute"), (5, "minute"), (1, "hour")):
                 _add(
                     "stock_minute",
@@ -2180,7 +2189,7 @@ def enqueue_slot(
         # or `hourly_backfill_days` back when it has none — so the first run
         # fills the history and a missed night is picked up by the next.
         if str(scfg.get("hourly_universe") or "").lower() == "research":
-            listed = set(symbols)
+            listed = set(minute_syms)
             names = [
                 u["symbol"]
                 for u in load_research_universe(conn)
@@ -2206,7 +2215,7 @@ def enqueue_slot(
         batch_size = int(scfg.get("batch_size") or 80)
         tickers = load_option_tickers_near_spot(
             conn,
-            symbols,
+            minute_syms,
             as_of=day,
             expiries=int(scfg.get("expiries") or 2),
             strikes_each_side=int(scfg.get("strikes_each_side") or 5),

@@ -893,6 +893,7 @@ def test_enqueue_minute_bars() -> None:
         target_date=date(2024, 6, 20),
         watchlist_symbols=["AAPL"],
         scheduler_cfg={
+            "iv_radar_benchmarks": [],
             "slots": {
                 "minute-bars": {
                     "priority": 3,
@@ -910,6 +911,30 @@ def test_enqueue_minute_bars() -> None:
     assert {j["payload"]["from"] for j in stock_jobs} == {"2024-06-20"}
     stock_timespans = {(j["payload"]["multiplier"], j["payload"]["timespan"]) for j in stock_jobs}
     assert stock_timespans == {(1, "minute"), (5, "minute"), (1, "hour")}
+
+
+def test_minute_bars_cover_the_benchmarks_not_just_the_watchlist() -> None:
+    """The benchmark-only tier is watchlist ∪ benchmarks; SPX gets option bars only."""
+    contracts = [
+        ("O:AAPL240719C00200000", "AAPL", date(2024, 7, 19), 200.0),
+        ("O:SPY240719C00540000", "SPY", date(2024, 7, 19), 540.0),
+        ("O:SPX240719C05400000", "SPX", date(2024, 7, 19), 5400.0),
+    ]
+    conn = _DailyConn(option_contracts=contracts, spots={"AAPL": 199.5, "SPY": 541.0})
+    result = enqueue_slot(
+        conn,
+        "minute-bars",
+        target_date=date(2024, 6, 20),
+        watchlist_symbols=["AAPL"],
+        scheduler_cfg={
+            "iv_radar_benchmarks": ["SPY", "SPX"],
+            "slots": {"minute-bars": {"priority": 3, "batch_size": 80}},
+        },
+    )
+    stock_syms = {j["payload"]["symbol"] for j in result["jobs"] if j["kind"] == "stock_minute"}
+    assert stock_syms == {"AAPL", "SPY"}
+    option_unds = {j["payload"]["underlying"] for j in result["jobs"] if j["kind"] == "option_minute"}
+    assert option_unds == {"AAPL", "SPY", "SPX"}
 
 
 def test_skip_non_trading_day() -> None:

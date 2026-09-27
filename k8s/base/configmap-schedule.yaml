@@ -133,7 +133,10 @@ data:
           priority: 3
           expiries: 2
           strikes_each_side: 5
-          batch_size: 80
+          # Option minute bars rotate through watchlist ∪ benchmarks (26 names since
+          # 0.54.0, was the 18-name watchlist); 120 keeps each name's turn about as
+          # frequent as 80 did over the smaller pool.
+          batch_size: 120
           # 1-hour bars (only) for every other research-universe stock: Research settles
           # each forecast session hour by hour, and the watchlist carried these for 18 of
           # the 678 names it forecasts. Each name asks from the session after its newest

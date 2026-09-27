@@ -17,7 +17,10 @@ from bifrost_market_data.scheduler import daily
 from bifrost_market_data.scheduler.daily import enqueue_slot, latest_hourly_bar_days
 
 DAY = date(2026, 9, 28)
-CFG = {"slots": {"minute-bars": {"priority": 3, "batch_size": 0, "hourly_universe": "research", "hourly_backfill_days": 100}}}
+CFG = {
+    "iv_radar_benchmarks": [],
+    "slots": {"minute-bars": {"priority": 3, "batch_size": 0, "hourly_universe": "research", "hourly_backfill_days": 100}},
+}
 
 
 def _hourly_jobs(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -46,12 +49,12 @@ def test_each_universe_stock_gets_hourly_bars_from_after_its_newest(monkeypatch:
     assert (hourly["PLTR"]["from"], hourly["PLTR"]["to"]) == ("2026-09-26", "2026-09-28")
     assert hourly["HALO"]["from"] == "2026-06-20", "no bars at all: the whole backfill window"
     minute_syms = {j["payload"]["symbol"] for j in result["jobs"] if j["payload"].get("timespan") == "minute"}
-    assert minute_syms == {"AAPL"}, "minute bars stay the watchlist's"
+    assert minute_syms == {"AAPL"}, "minute bars stay the benchmark tier's (watchlist ∪ benchmarks)"
 
 
 def test_off_by_default() -> None:
     conn = _DailyConn(research_universe=[("PLTR", "core", 24)])
-    cfg = {"slots": {"minute-bars": {"priority": 3, "batch_size": 0}}}
+    cfg = {"iv_radar_benchmarks": [], "slots": {"minute-bars": {"priority": 3, "batch_size": 0}}}
     result = enqueue_slot(conn, "minute-bars", target_date=DAY, watchlist_symbols=["AAPL"], scheduler_cfg=cfg)
     assert set(_hourly_jobs(result)) == {"AAPL"}
 
