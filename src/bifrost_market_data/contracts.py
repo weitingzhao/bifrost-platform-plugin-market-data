@@ -168,6 +168,13 @@ class DatasetContract:
     #: side; continuity only asked "any rows?", so no one prescribed a refill.
     refill_narrow: bool = False
 
+    #: SQL predicate on the dataset's own columns; when set, narrow breadth
+    #: counts only symbols with a row that satisfies it. For what a consumer
+    #: reads rather than what is present: option_daily 2026-08-17..21 held ~650
+    #: underlyings like its neighbours, but ~230 of them only through contracts
+    #: expiring that week, so ATM IV had nothing to price them from.
+    narrow_filter: str | None = None
+
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
 STOCK_WINDOW_DAYS = 5 * 365
@@ -492,6 +499,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         grain="daily",
         refill=Refill("slot", "option-bars", why="near-spot contracts for the named session, at the universe scope"),
         refill_narrow=True,
+        # The expiries Research's ATM IV solves from (iv_solver DTE_MIN..DTE_MAX).
+        narrow_filter="(expiry - bar_date) BETWEEN 5 AND 90",
     ),
     # SEC filings as text (0.37.0). Universe tier because the Owner scoped the
     # collection to Research's names (2026-09-23), though the 8-K pulls are

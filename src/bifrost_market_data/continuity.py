@@ -177,8 +177,11 @@ def per_day_breadth(
     *,
     window_days: int,
     statement_timeout: str = "60s",
+    where: str | None = None,
 ) -> list[tuple[date, int]] | None:
     """Distinct symbols per day over the window, or None when the read failed.
+
+    ``where`` narrows the rows counted (a contract's ``narrow_filter``).
 
     Symbols rather than rows, for the doctor's narrow-session refill. On
     option_daily the two disagree: 2026-08-31..09-04 held 337 underlyings like
@@ -195,7 +198,7 @@ def per_day_breadth(
                 f"""
                 SELECT {date_column}::date AS d, count(DISTINCT {symbol_column})::bigint AS n
                 FROM {table}
-                WHERE {date_column} >= current_date - %s
+                WHERE {date_column} >= current_date - %s{f" AND ({where})" if where else ""}
                 GROUP BY 1 ORDER BY 1
                 """,
                 (int(window_days),),

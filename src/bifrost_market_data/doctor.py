@@ -613,6 +613,7 @@ def _continuity_findings(
                 str(c.symbol_column),
                 window_days=int(window_days) + NARROW_BASELINE_LEAD_DAYS,
                 statement_timeout=statement_timeout,
+                where=c.narrow_filter,
             )
             on_calendar = set(calendar)
             series = [(d, n) for d, n in breadth or [] if d in on_calendar]
@@ -642,8 +643,9 @@ def _continuity_findings(
         for day in prescribed:
             if day in narrow:
                 n, baseline = narrow[day]
+                counted = f" with rows where {c.narrow_filter}" if c.narrow_filter else ""
                 detail = (
-                    f"{name} holds {n} symbols for {day} against {baseline} in the sessions before it. "
+                    f"{name} holds {n} symbols{counted} for {day} against {baseline} in the sessions before it. "
                     f"{len(narrow)} narrow and {len(absent)} missing session(s) in the last {window_days} days"
                 )
             else:

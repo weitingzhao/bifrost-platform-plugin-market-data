@@ -175,6 +175,50 @@ def test_a_narrow_session_is_prescribed_like_a_missing_one(breadth) -> None:
     assert "26 symbols" in f.detail and "340" in f.detail
 
 
+def test_option_daily_breadth_counts_only_the_expiries_atm_iv_reads(wired, monkeypatch) -> None:
+    """2026-08-17..21: ~650 underlyings, ~230 of them only through that week's expiries."""
+    sessions, _gaps = wired
+    asked: dict[str, Any] = {}
+
+    def fake_breadth(conn: Any, table: str, date_col: str, sym_col: str, **kw: Any):
+        asked[table] = kw.get("where")
+        return [(d, 420 if d == sessions[20] and kw.get("where") else 650) for d in sessions]
+
+    monkeypatch.setattr(cont, "per_day_breadth", fake_breadth)
+    out = _continuity_findings(None, today=TODAY, session=sessions[-1])
+    assert asked["raw_market.option_daily"] == "(expiry - bar_date) BETWEEN 5 AND 90"
+    assert asked["raw_market.stock_daily"] is None
+    [f] = [f for f in out if f.id == f"continuity:option_daily:{sessions[20]}"]
+    assert f.title == "Narrow session: option_daily"
+    assert "420 symbols with rows where (expiry - bar_date) BETWEEN 5 AND 90" in f.detail
+
+
+def test_breadth_where_is_added_to_the_count() -> None:
+    seen: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            seen.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    cont.per_day_breadth(_Conn(), "raw_market.option_daily", "bar_date", "underlying", window_days=60, where="x > 1")
+    assert "AND (x > 1)" in seen[-1]
+    cont.per_day_breadth(_Conn(), "raw_market.stock_daily", "bar_date", "symbol", window_days=60)
+    assert "AND (" not in seen[-1]
+
+
 def test_a_step_up_in_breadth_is_not_narrow(breadth) -> None:
     """The universe grew from 337 to 575 on 2026-09-08; the days before are not holes."""
     sessions, _gaps, series = breadth
