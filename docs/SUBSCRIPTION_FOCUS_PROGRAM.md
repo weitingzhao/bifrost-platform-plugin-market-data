@@ -213,6 +213,8 @@ hotfix ConfigMap 盘点（只盘点，撤不撤由 Owner 决定）：
 
 也就是说，后两个 hotfix 把镜像里更新的代码压回了旧版本。
 
+Owner 决定（2026-09-28）：两个插件孤儿已删；DEV（api-monitor、api-account）与 STG（api-monitor）撤掉挂载并删除 ConfigMap——先在 `:stg` 镜像里核对三个文件与 repo HEAD 的 sha256 一致（core 0.25.0），撤后 `/health`、`/status` 200，三个环境持仓数与字段一致。**PROD 的两个 hotfix 随 Owner 下一次 PROD 发布一起撤**（上文 `status.py` 替换同批）。
+
 ---
 
 ## 3. Owner 待决事项
