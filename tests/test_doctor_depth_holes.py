@@ -78,8 +78,15 @@ def test_names_short_of_depth_are_not_this_finding(wired) -> None:
 
 
 @pytest.mark.parametrize(
-    "plan", [None, {"short": {}, "holes": {}, "gaps": {}, "empty_read": False}]
+    ("plan", "which"),
+    [(None, "oldest-bar"), ({"short": {}, "holes": {}, "gaps": {}, "empty_read": False}, "empty-months")],
 )
-def test_an_unreadable_measure_says_nothing(wired, plan) -> None:
+def test_an_unreadable_measure_is_unprobed_not_dropped(wired, plan, which) -> None:
+    """2026-09-28: the empty-months read timed out twice in six minutes, and the
+    finding vanished from a report that read healthy. A failed read clears no
+    month and plans none, and it says so."""
     wired["plan"] = plan
-    assert _depth_hole_findings(None, cfg=CFG, today=TODAY) == []
+    [f] = _depth_hole_findings(None, cfg=CFG, today=TODAY)
+    assert (f.id, f.severity, f.actual) == ("depth_holes:option_daily", "warn", "depth unprobed")
+    assert f.fix is None and f.auto_fixable is False, "nothing is prescribed from a failed read"
+    assert which in f.detail

@@ -758,7 +758,24 @@ def _depth_hole_findings(conn: Any, *, cfg: Mapping[str, Any], today: date) -> l
         planned=planned,
     )
     if plan is None or not plan["empty_read"]:
-        return []
+        # Not guessed at: no month is cleared and none is planned. But said, not
+        # dropped, as continuity says a failed presence read. On 2026-09-28 the
+        # empty-months read hit its 60s budget twice in six minutes on a
+        # throttled primary, and each time this finding vanished from a report
+        # that read healthy.
+        which = "oldest-bar" if plan is None else "empty-months"
+        return [
+            Finding(
+                "depth_holes:option_daily",
+                "option-depth",
+                "warn",
+                "Option depth: empty months",
+                "no unplanned empty month",
+                "depth unprobed",
+                f"The {which} read of option_daily failed, so no month was cleared and "
+                "none was planned. See API log.",
+            )
+        ]
     gaps: dict[str, list[date]] = plan["gaps"]
     open_names = sorted(s for s, m in plan["holes"].items() if m)
     empty_total = sum(len(v) for v in gaps.values())
