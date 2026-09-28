@@ -1109,7 +1109,25 @@ OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
 
 
 def add_ticker_delisted_utc(cur: _Cursor) -> None:
-    """Idempotent, and on both paths: the cluster's Job runs ``--wave8-only``."""
+    """Idempotent, and on both paths: the cluster's Job runs ``--wave8-only``.
+
+    The catalog is asked first because ``ADD COLUMN IF NOT EXISTS`` takes ACCESS
+    EXCLUSIVE on raw_market.ticker before it discovers the column is already
+    there, so every deploy after the first queued behind whoever was reading the
+    table. The plugin's role runs with lock_timeout = 5s: on the 0.64.0 deploy
+    (2026-09-28 18:58 UTC) all three attempts were cancelled on this statement,
+    the Job failed, and the data repairs after the schema commit never ran.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'raw_market'
+          AND table_name = 'ticker'
+          AND column_name = 'delisted_utc'
+        """
+    )
+    if cur.fetchone() is not None:
+        return
     cur.execute("ALTER TABLE raw_market.ticker ADD COLUMN IF NOT EXISTS delisted_utc date")
 
 

@@ -522,3 +522,34 @@ def test_the_retirement_date_column_lands_on_both_ddl_paths() -> None:
         assert "ADD COLUMN IF NOT EXISTS delisted_utc date" in joined, (
             f"{apply.__name__} does not add the retirement date"
         )
+
+
+def test_a_retirement_date_already_there_takes_no_lock() -> None:
+    """ADD COLUMN IF NOT EXISTS locks the table before it finds the column.
+
+    Every deploy after the first asked for ACCESS EXCLUSIVE on raw_market.ticker
+    and waited behind its readers; under the role's 5s lock_timeout the 0.64.0
+    migration failed three times on it (2026-09-28). Asking the catalog first
+    means an existing column costs a read, not a lock.
+    """
+    from bifrost_market_data.schema.ddl import add_ticker_delisted_utc
+
+    class _Catalog(_FakeCursor):
+        def __init__(self, present: bool) -> None:
+            super().__init__()
+            self.present = present
+
+        def fetchone(self) -> Any:
+            last = self.statements[-1] if self.statements else ""
+            return (1,) if self.present and "information_schema.columns" in last else None
+
+    there = _Catalog(present=True)
+    add_ticker_delisted_utc(there)
+    assert not any("ALTER TABLE" in s for s in there.statements)
+    assert any("column_name = 'delisted_utc'" in s for s in there.statements)
+
+    missing = _Catalog(present=False)
+    add_ticker_delisted_utc(missing)
+    assert missing.statements[-1] == (
+        "ALTER TABLE raw_market.ticker ADD COLUMN IF NOT EXISTS delisted_utc date"
+    )
