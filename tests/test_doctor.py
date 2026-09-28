@@ -50,8 +50,8 @@ class _Cur:
             ]
         elif "/* doctor: chain-spot */" in q:
             # (underlying, underlying_price, underlying_price_source), one per
-            # name, exactly as DISTINCT ON hands it back. A name absent from the
-            # fixture has no snapshot row at the anchor and so no row here.
+            # name, as the per-underlying lateral hands it back. A name absent
+            # from the fixture has no snapshot row at the anchor and so no row here.
             self._rows = [
                 (u, px, src, act)
                 for u, px, src, act in d.get("chain_spot", [])
@@ -1193,6 +1193,25 @@ def test_an_unanswerable_spot_probe_is_not_a_clean_bill() -> None:
     f = _by_id(rep)["chain_spot"]
     assert f["severity"] == "warn" and "unprobed" in f["detail"]
     assert f["actual"] is None, "no count was measured, so none is claimed"
+
+
+def test_the_spot_probe_reads_one_contract_per_underlying() -> None:
+    """The whole-chain read took 69s on 2026-09-28 once ANALYZE had seen the anchor.
+
+    Its plan followed the anchor's row estimate: an unseen anchor was costed at
+    one row and read by index, a seen one at ~250,000 rows and hashed against
+    all of stock_daily twice. Naming one contract per underlying down to the
+    view's primary key leaves the planner nothing to estimate.
+    """
+    conn = _Conn(_healthy_data())
+    doc.run_doctor(conn, now=NOW, watchlist=UNIVERSE)
+    (q, params), = [(q, p) for q, p in conn.statements if "/* doctor: chain-spot */" in q]
+    assert "distinct on" not in q, "a sort over every chain row at the anchor"
+    assert q.count("cross join lateral") == 2 and q.count("limit 1") == 2
+    assert "v.option_ticker = one.option_ticker and v.snapshot_ts = %s" in q
+    syms, *anchors = params
+    assert sorted(syms) == sorted(UNIVERSE)
+    assert anchors == [doc.session_anchor(SESSION)] * 2
 
 
 def test_the_vendor_label_has_one_definition() -> None:

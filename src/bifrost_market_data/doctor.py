@@ -163,10 +163,11 @@ DEGRADED_SNAPSHOT_MIN_BASELINE_ROWS = 20
 #: the report, so it gets its own budget and answers `unprobed` when it runs out
 #: rather than a clean bill. A cancelled query is not a reading of zero.
 DEGRADED_SNAPSHOT_TIMEOUT = "25s"
-#: One exact anchor across the optionable universe, measured 2026-09-27 at 1.8s
-#: (1.0s before the ticker join). The same read over a whole session's range
-#: costs 3.3s for an identical answer, because the spot is a fact about
-#: (underlying, session) and reading more of the chain cannot sharpen it.
+#: One contract per underlying at the exact anchor, read through the view by
+#: primary key: 655 underlyings measured 2026-09-28 at 0.26s (median of 7, 1.3s
+#: cold). The read it replaced -- every chain row at the anchor -- measured 1.8s
+#: on 2026-09-27 and 69s a day later on the same rows, because its plan followed
+#: the row estimate and the estimate moved. See ``_chain_spots``.
 CHAIN_SPOT_TIMEOUT = "20s"
 
 # Above this the worker loop is wedged behind synchronous batch writes.
@@ -798,25 +799,49 @@ def _chain_spots(
     actually sees, and a second implementation of the fallback would eventually
     disagree with the first. Returns None when the probe cannot be answered --
     a cancelled query is not a reading of "no spot anywhere".
+
+    The view is read for one contract per underlying, named down to its primary
+    key. The spot is a fact about (underlying, session), so any contract of the
+    chain carries the same one, and a read that hands the planner a single row
+    can only be planned as index lookups. Reading every chain row at the anchor
+    gave the same answer under a plan chosen by the anchor's row estimate, and
+    that estimate changes under the query: an anchor ANALYZE has not yet seen
+    is costed at about one row and read by index, and once autoanalyze reaches
+    the month's partition it is costed at its ~250,000 rows and planned as two
+    hash joins over the whole of ``stock_daily``. On 2026-09-28 that plan took
+    69s against this probe's 20s, on rows unchanged since the 25th.
     """
     syms = sorted({str(u).strip().upper() for u in underlyings if str(u).strip()})
     if not syms:
         return []
+    anchor = session_anchor(session)
     try:
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL statement_timeout = '{CHAIN_SPOT_TIMEOUT}'")
+            # Both LIMIT 1s are load-bearing: they keep each lateral from being
+            # flattened into the outer join, so each is planned for one row.
             cur.execute(
                 """
                 /* doctor: chain-spot */
-                SELECT DISTINCT ON (v.underlying)
-                       v.underlying, v.underlying_price, v.underlying_price_source,
+                SELECT u.underlying, s.underlying_price, s.underlying_price_source,
                        COALESCE(t.active, false) AS ticker_active
-                FROM raw_market.v_option_snapshot_with_stock v
-                LEFT JOIN raw_market.ticker t ON t.symbol = v.underlying
-                WHERE v.underlying = ANY(%s) AND v.snapshot_ts = %s
-                ORDER BY v.underlying
+                FROM unnest(%s::text[]) AS u(underlying)
+                CROSS JOIN LATERAL (
+                    SELECT os.option_ticker
+                    FROM raw_market.option_snapshot os
+                    WHERE os.underlying = u.underlying AND os.snapshot_ts = %s
+                    LIMIT 1
+                ) one
+                CROSS JOIN LATERAL (
+                    SELECT v.underlying_price, v.underlying_price_source
+                    FROM raw_market.v_option_snapshot_with_stock v
+                    WHERE v.option_ticker = one.option_ticker AND v.snapshot_ts = %s
+                    LIMIT 1
+                ) s
+                LEFT JOIN raw_market.ticker t ON t.symbol = u.underlying
+                ORDER BY u.underlying
                 """,
-                (syms, session_anchor(session)),
+                (syms, anchor, anchor),
             )
             rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     except Exception as exc:  # noqa: BLE001 -- an unanswerable check is not a clean one
