@@ -249,7 +249,7 @@ PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并
 - 定向重算（不走 `iv_history_repair.derive`，它会整天删除全宇宙的 ATM IV）：25 个两年内拆股的宇宙名字加 ECHO / FISV / VMRK，2024-09-09 起逐日 ATM IV → 分位数 → VRP，再做 fwd_ret_20d 与 canonical PnL。ECHO 一年 ATM 天数 66 → 251、VMRK 26 → 238、BKNG 121 → 252、KLAC 70 → 226；09-25 空 IV rank 的 8 个名字全部有值。
 - 09-25 的 649 个名字：IV rank 空 36 → 28，raw 满一年而仍空 28 → 20，剩下全是 Starter 权限下的冷门名字。
 - dbt 首轮增量重算写入 1,600,705 行（286 s）；之后 5,240 个标的 60 天前的行数与收盘价之和与源一致，不一致为 0。
-- 未解决：CRWD、CVNA、MNST、KLAC 拆股前仍有**薄月**（每月只有二三十行、行权价带错位，是 0.57.0 之前按复权 spot 规划的）。`option-depth` 只认空月，看不见它们；按现在的规划代码重新规划这些月份即可补上。ASST、BMNR、APH 早期月份是期权深度本身不够，与拆股无关。
+- 薄月（Owner 选「一次性补」）：CRWD、CVNA、MNST、KLAC 拆股前有每月只有二三十行、行权价带错位的月份（0.57.0 之前按复权 spot 规划）。`option-depth` 只认空月，看不见它们。对 33 个薄月及其后 3 个到期月入队 53 个 `option_backfill_plan`（记 `option_plan:` 标记），派生 23,596 个作业、0 失败；CRWD 这些月由每月二三十行变为 5,000～9,000 行。再对四个名字定向重算：一年 ATM 天数 CRWD 91 → 223、CVNA 128 → 243、MNST 152 → 252、KLAC 226 → 229。ASST、BMNR、APH 早期月份是期权深度本身不够，与拆股无关。
 
 ## 3. Owner 待决事项
 
