@@ -1806,6 +1806,106 @@ def test_option_depth_plans_only_the_names_and_months_short_of_depth(monkeypatch
                                    [(2024, 10), (2024, 11), (2024, 12)] + [(2025, m) for m in range(1, 10)]]
 
 
+def _depth_holes(monkeypatch, *, oldest, empty, planned=frozenset()):
+    marks: list[tuple[str, str]] = []
+    monkeypatch.setattr(daily_mod, "load_oldest_option_daily", lambda conn, syms: dict(oldest))
+    monkeypatch.setattr(
+        daily_mod,
+        "load_empty_option_months",
+        lambda conn, syms, start, end: {s: [m for m in ms if start <= m <= end] for s, ms in empty.items()},
+    )
+    monkeypatch.setattr(daily_mod, "load_voids_by_prefix", lambda conn, prefix, max_age_days: set(planned))
+    monkeypatch.setattr(
+        daily_mod, "record_symbol_void", lambda conn, sym, dtype, note=None: marks.append((sym, dtype))
+    )
+    return marks
+
+
+def _plans(r) -> dict[str, list[str]]:
+    per: dict[str, list[str]] = {}
+    for j in r["jobs"]:
+        assert j["kind"] == "option_backfill_plan"
+        per.setdefault(j["payload"]["underlying"], []).append(j["payload"]["expiry_gte"])
+    return {k: sorted(v) for k, v in per.items()}
+
+
+_AT_DEPTH = {"SPY": date(2024, 9, 30), "AAPL": date(2024, 9, 30), "MSFT": date(2024, 9, 30), "HALO": date(2025, 10, 1)}
+
+
+def test_option_depth_plans_whole_months_empty_after_the_oldest_bar(monkeypatch) -> None:
+    """2026-09-28: KLAC's first bar was 2024-09 and 2025-10..2026-05 were empty.
+
+    The oldest-bar test read it at depth. An empty bar month is fed by the
+    contracts expiring in it and in the `dte` days after, so those are planned.
+    """
+    marks = _depth_holes(
+        monkeypatch, oldest=_AT_DEPTH, empty={"AAPL": [date(2025, 10, 1), date(2025, 11, 1)]}
+    )
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+
+    expected = ["2025-10-01", "2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01"]
+    assert _plans(r) == {"AAPL": expected}
+    assert sorted(marks) == [("AAPL", f"option_plan:{m[:7]}") for m in expected]
+
+
+def test_option_depth_leaves_out_months_it_already_asked_about(monkeypatch) -> None:
+    """A month the vendor has nothing for stays empty; it is re-asked monthly, not weekly."""
+    planned = {("AAPL", "option_plan:2025-10"), ("AAPL", "option_plan:2025-11")}
+    _depth_holes(monkeypatch, oldest=_AT_DEPTH, empty={"AAPL": [date(2025, 10, 1)]}, planned=planned)
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+    assert _plans(r) == {"AAPL": ["2025-12-01", "2026-01-01"]}
+
+    forced = enqueue_slot(
+        conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG, force=True
+    )
+    assert _plans(forced) == {"AAPL": ["2025-10-01", "2025-11-01", "2025-12-01", "2026-01-01"]}
+
+
+def test_option_depth_does_not_count_months_before_the_oldest_bar_as_holes(monkeypatch) -> None:
+    """Before the first bar is the short-of-depth rule's business, not a hole."""
+    oldest = dict(_AT_DEPTH, HALO=date(2025, 10, 20))
+    _depth_holes(monkeypatch, oldest=oldest, empty={"HALO": [date(2025, 9, 1), date(2025, 10, 1)]})
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+    assert _plans(r) == {}, "HALO carries a year and its first bar is inside the grace"
+
+
+def test_empty_months_are_read_one_prunable_month_at_a_time() -> None:
+    """The bounds are literals so each statement prunes to one partition."""
+    from bifrost_market_data.scheduler.daily import load_empty_option_months
+
+    seen: list[str] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            seen.append(sql)
+            self._rows = [("KLAC",)] if ">= DATE '2025-11-01'" in sql else []
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+    out = load_empty_option_months(_Conn(), ["klac", "AAPL"], date(2025, 10, 15), date(2026, 1, 1))
+    assert out == {"KLAC": [date(2025, 11, 1)]}
+    bounds = [s for s in seen if "empty-option-months" in s]
+    assert len(bounds) == 4
+    assert "DATE '2025-10-01'" in bounds[0] and "DATE '2026-02-01'" in bounds[-1]
+
+
 def test_option_depth_skips_rather_than_plans_everything_on_a_failed_read(monkeypatch) -> None:
     monkeypatch.setattr(daily_mod, "load_oldest_option_daily", lambda conn, syms: None)
     conn = _DailyConn(research_universe=_universe_rows())

@@ -167,7 +167,7 @@ SLOT_NOTES: dict[str, str] = {
     "intraday-chain": "Intraday chain snapshots (Dagster fires three NY times)",
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",
-    "option-depth": "Option history for names short of their depth target, weekly (only the missing months)",
+    "option-depth": "Option history for names short of their depth target or with empty months, weekly (only the missing months)",
     "corporate-backfill": "Full dividend / split history per symbol (Owner-run)",
     "filings-backfill": "Two years of SEC 8-Ks and 10-K sections per universe name (Owner-run)",
     "option-contract-expired": "Expired option catalogue, a quarter at a time (Owner-run)",

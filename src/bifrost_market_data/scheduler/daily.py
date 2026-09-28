@@ -40,7 +40,11 @@ from bifrost_market_data.scheduler.enqueue import (
 )
 from bifrost_market_data.research_pins import load_pinned_contracts, load_pinned_underlyings
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
-from bifrost_market_data.symbol_void import load_voided_symbols
+from bifrost_market_data.symbol_void import (
+    load_voided_symbols,
+    load_voids_by_prefix,
+    record_symbol_void,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1319,6 +1323,139 @@ def load_oldest_option_daily(conn: Any, underlyings: Sequence[str]) -> dict[str,
     return out
 
 
+#: ``ops_jobs.symbol_source_void`` data_type for an expiry month option-depth has
+#: already asked the vendor about (``option_plan:2025-10``, keyed by the storage
+#: underlying). A month that stays empty after its plan ran is re-planned once
+#: the note is older than ``OPTION_PLAN_RETRY_DAYS``, not on every run.
+OPTION_PLAN_VOID_PREFIX = "option_plan:"
+OPTION_PLAN_RETRY_DAYS = 30
+
+
+def option_plan_void_type(month_first: date) -> str:
+    return f"{OPTION_PLAN_VOID_PREFIX}{month_first:%Y-%m}"
+
+
+def load_empty_option_months(
+    conn: Any, underlyings: Sequence[str], start: date, end: date
+) -> dict[str, list[date]] | None:
+    """Months from ``start`` to ``end`` (month firsts) in which a name holds no ``option_daily`` bar.
+
+    None when the read fails. One statement per month with the bounds written
+    as literals, so each prunes to one partition at plan time and the EXISTS
+    walks its (underlying, bar_date) index: 0.1–0.2 s a month for 650 names
+    (2026-09-28). A generate_series join over the same months cannot prune and
+    took 35 s; the GROUP BY scans the table.
+    """
+    syms = sorted({str(s).strip().upper() for s in underlyings if str(s).strip()})
+    if not syms or start > end:
+        return {}
+    months: list[date] = []
+    cursor_month = date(start.year, start.month, 1)
+    while cursor_month <= end:
+        months.append(cursor_month)
+        cursor_month = _month_start(cursor_month, -1)
+    out: dict[str, list[date]] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '60s'")
+            for first in months:
+                after = _month_start(first, -1)
+                cur.execute(
+                    f"""
+                    /* empty-option-months */
+                    SELECT u.sym FROM unnest(%s::text[]) AS u(sym)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM raw_market.option_daily d
+                        WHERE d.underlying = u.sym
+                          AND d.bar_date >= DATE '{first.isoformat()}'
+                          AND d.bar_date < DATE '{after.isoformat()}'
+                    )
+                    """,
+                    (syms,),
+                )
+                for row in (cur.fetchall() if hasattr(cur, "fetchall") else []) or []:
+                    sym = row.get("sym") if isinstance(row, Mapping) else row[0]
+                    if sym:
+                        out.setdefault(str(sym).strip().upper(), []).append(first)
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- the caller skips rather than guesses
+        logger.warning("empty option months read failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    return out
+
+
+def plan_option_depth(
+    conn: Any,
+    *,
+    day: date,
+    names: Sequence[str],
+    months_of: Mapping[str, int],
+    months: int,
+    dte: int,
+    grace: timedelta,
+    planned: set[tuple[str, str]],
+) -> dict[str, Any] | None:
+    """The expiry months option-depth would plan, per storage underlying.
+
+    ``short``: names whose oldest bar is short of their tier's depth, and the
+    months whose priced window reaches before that bar. ``holes``: names with
+    whole months empty *after* their oldest bar — 2026-09-28, eleven names
+    (eight split, two renamed) held 1–11 such months each, KLAC 2025-10 to
+    2026-05, and the oldest-bar test read every one as at depth. A bar month is
+    fed by contracts expiring in it and in the ``dte`` days after, so each empty
+    month plans those expiry months. Months in ``planned`` are left out.
+    ``gaps`` keeps the empty bar months themselves. None when the oldest-bar
+    read fails: unreadable is not "no history".
+    """
+    storage_of = {sym: storage_underlying(sym) for sym in names}
+    oldest = load_oldest_option_daily(conn, list(storage_of.values()))
+    if oldest is None:
+        return None
+    longest = max([int(months_of.get(sym, months)) for sym in names] or [months])
+    empty = load_empty_option_months(
+        conn, list(storage_of.values()), _month_start(day, longest - 1), _month_start(day, 1)
+    )
+    current = _month_start(day, 0)
+    ahead = -(-int(dte) // 30)
+    short: dict[str, list[date]] = {}
+    holes: dict[str, list[date]] = {}
+    gaps: dict[str, list[date]] = {}
+    for sym in names:
+        storage = storage_of[sym]
+        need = int(months_of.get(sym, months))
+        floor = day - timedelta(days=round(need * 365 / 12))
+        first_bar = oldest.get(storage)
+        if first_bar is None or first_bar > floor + grace:
+            wanted = [
+                _month_start(day, back)
+                for back in range(need)
+                # Contracts expiring this month are priced from `dte` days before
+                # expiry; if that whole window is after the first bar we hold,
+                # the month adds nothing to depth.
+                if first_bar is None or _month_start(day, back) - timedelta(days=dte) <= first_bar
+            ]
+            short[storage] = [m for m in wanted if (storage, option_plan_void_type(m)) not in planned]
+        if first_bar is None:
+            continue
+        since = max(_month_start(day, need - 1), _month_start(first_bar, -1))
+        empty_months = [m for m in (empty or {}).get(storage, ()) if m >= since]
+        if not empty_months:
+            continue
+        gaps[storage] = empty_months
+        fed = {
+            _month_start(m, -k)
+            for m in empty_months
+            for k in range(ahead + 1)
+            if _month_start(m, -k) <= current
+        }
+        holes[storage] = sorted(m for m in fed if (storage, option_plan_void_type(m)) not in planned)
+    return {"short": short, "holes": holes, "gaps": gaps, "empty_read": empty is not None}
+
+
 def load_option_tickers_near_spot(
     conn: Any,
     underlyings: Sequence[str],
@@ -1953,6 +2090,7 @@ def enqueue_slot(
     jobs: list[dict[str, Any]] = []
     specs: list[tuple[str, dict[str, Any], int, int]] = []
     retired_skipped: list[str] = []
+    plan_marks: list[tuple[str, str]] = []
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
         # Collected here, written in one statement below.
@@ -2057,14 +2195,34 @@ def enqueue_slot(
         # option_daily bar is short of their tier's depth, and for those only the
         # expiry months whose priced window reaches before that bar. 2026-09-27:
         # the ~230 names the universe gained on 2026-09-10 had no history before
-        # 2026-09-08 because nothing ever fired the one-off for them.
+        # 2026-09-08 because nothing ever fired the one-off for them. Whole months
+        # empty after the oldest bar are planned too (plan_option_depth), and
+        # each expiry month planned is noted so neither the weekly run nor a
+        # doctor heal re-fetches it inside OPTION_PLAN_RETRY_DAYS; `force`
+        # plans regardless.
         months = int(scfg.get("months") or 24)
         strike_pct = float(scfg.get("strike_pct") or 0.30)
         dte = int(scfg.get("dte") or 90)
         grace = timedelta(days=int(scfg.get("grace_days") or 30))
         names = union_iv_radar_benchmarks(symbols, cfg)
-        oldest = load_oldest_option_daily(conn, [storage_underlying(s) for s in names])
-        if oldest is None:
+        planned = (
+            set()
+            if force
+            else load_voids_by_prefix(
+                conn, OPTION_PLAN_VOID_PREFIX, max_age_days=OPTION_PLAN_RETRY_DAYS
+            )
+        )
+        plan = plan_option_depth(
+            conn,
+            day=day,
+            names=names,
+            months_of=months_of,
+            months=months,
+            dte=dte,
+            grace=grace,
+            planned=planned,
+        )
+        if plan is None:
             # Unreadable is not "no history": planning everything on a failed
             # read is the million-job run this slot exists to avoid.
             return {
@@ -2076,22 +2234,9 @@ def enqueue_slot(
                 "deduped": 0,
                 "jobs": [],
             }
-        short: list[str] = []
-        for sym in names:
-            storage = storage_underlying(sym)
-            need = months_of.get(sym, months)
-            floor = day - timedelta(days=round(need * 365 / 12))
-            first_bar = oldest.get(storage)
-            if first_bar is not None and first_bar <= floor + grace:
-                continue
-            short.append(storage)
-            for back in range(need):
-                first = _month_start(day, back)
-                # Contracts expiring this month are priced from `dte` days before
-                # expiry; if that whole window is after the first bar we hold,
-                # the month adds nothing to depth.
-                if first_bar is not None and first - timedelta(days=dte) > first_bar:
-                    continue
+        sym_of = {storage_underlying(s): s for s in names}
+        for storage in sorted(set(plan["short"]) | set(plan["holes"])):
+            for first in sorted(set(plan["short"].get(storage, ())) | set(plan["holes"].get(storage, ()))):
                 _add(
                     "option_backfill_plan",
                     {
@@ -2101,9 +2246,16 @@ def enqueue_slot(
                         "strike_pct": strike_pct,
                         "dte": dte,
                     },
-                    pri=_tier_pri(sym),
+                    pri=_tier_pri(sym_of.get(storage, storage)),
                 )
-        logger.info("option-depth: %d of %d names short of depth", len(short), len(names))
+                plan_marks.append((storage, option_plan_void_type(first)))
+        logger.info(
+            "option-depth: %d of %d names short of depth, %d with empty months, %d months noted as planned",
+            len(plan["short"]),
+            len(names),
+            len(plan["gaps"]),
+            len(planned),
+        )
 
     elif slot_key == "corporate-backfill":
         # Per-symbol full history, no date filter. The daily `corporate` slot walks
@@ -2483,6 +2635,8 @@ def enqueue_slot(
     for job_entry, job_id in zip(jobs, ids):
         job_entry["id"] = job_id
         job_entry["deduped"] = job_id is None
+    for storage, data_type in plan_marks:
+        record_symbol_void(conn, storage, data_type, note="planned by option-depth")
     enqueued = sum(1 for j in jobs if not j["deduped"])
     deduped = len(jobs) - enqueued
 

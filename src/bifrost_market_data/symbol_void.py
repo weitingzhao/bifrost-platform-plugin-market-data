@@ -91,3 +91,36 @@ def load_voided_symbols(conn: Any, data_type: str, *, max_age_days: int = 30) ->
         if sym:
             out.add(str(sym).strip().upper())
     return out
+
+
+def load_voids_by_prefix(
+    conn: Any, prefix: str, *, max_age_days: int = 30
+) -> set[tuple[str, str]]:
+    """``(symbol, data_type)`` voids whose data_type starts with ``prefix``, checked within ``max_age_days``."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT symbol, data_type FROM ops_jobs.symbol_source_void
+                WHERE starts_with(data_type, %s)
+                  AND last_checked >= now() - make_interval(days => %s)
+                """,
+                (str(prefix), int(max_age_days)),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — no void table means no skips
+        logger.warning("void lookup failed for %s*: %s", prefix, exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return set()
+    out: set[tuple[str, str]] = set()
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            sym, dtype = row.get("symbol"), row.get("data_type")
+        else:
+            sym, dtype = (row[0], row[1]) if row else (None, None)
+        if sym and dtype:
+            out.add((str(sym).strip().upper(), str(dtype)))
+    return out

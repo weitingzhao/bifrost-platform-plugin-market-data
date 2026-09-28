@@ -28,12 +28,16 @@ from bifrost_market_data.ingest._upsert import session_anchor
 from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE, storage_underlying
 from bifrost_market_data.quality import fetch_completed_trading_days, filter_optionable_underlyings
 from bifrost_market_data.scheduler.daily import (
+    OPTION_PLAN_RETRY_DAYS,
+    OPTION_PLAN_VOID_PREFIX,
     enqueue_slot,
     load_research_universe,
     load_snapshot_windows,
     load_watchlist_symbols,
+    plan_option_depth,
     union_iv_radar_benchmarks,
 )
+from bifrost_market_data.symbol_void import load_voids_by_prefix
 from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import chain_session, is_trading_day
@@ -668,6 +672,90 @@ def _continuity_findings(
                 )
             )
     return out
+
+
+def _depth_hole_findings(conn: Any, *, cfg: Mapping[str, Any], today: date) -> list[Finding]:
+    """Whole months of ``option_daily`` empty after a name's oldest bar, not yet planned.
+
+    Depth used to be judged by the oldest bar alone — in the coverage matrix
+    and in the option-depth slot — so a name with a two-year-old first bar read
+    at depth whatever was missing in between. 2026-09-28: eleven names held 1–11
+    empty months each, KLAC eight in a row before its split. The months come
+    from the same ``plan_option_depth`` the slot runs, so what this reports is
+    exactly what its prescription would plan; months the slot has already asked
+    the vendor about are left out, so a month the vendor has nothing for (AXTI
+    2025-06: every contract outside the strike band) is not a standing warning.
+    """
+    scfg = dict((cfg.get("slots") or {}).get("option-depth") or {})
+    months = int(scfg.get("months") or 24)
+    months_of: dict[str, int] = {}
+    symbols: list[str] = []
+    if str(scfg.get("universe") or "").lower() == "research":
+        universe = load_research_universe(conn)
+        symbols = [u["symbol"] for u in universe]
+        months_of = {u["symbol"]: u["history_months"] for u in universe}
+    if not symbols:
+        symbols = load_watchlist_symbols(conn, cfg)
+    names = union_iv_radar_benchmarks(symbols, cfg)
+    planned = load_voids_by_prefix(conn, OPTION_PLAN_VOID_PREFIX, max_age_days=OPTION_PLAN_RETRY_DAYS)
+    plan = plan_option_depth(
+        conn,
+        day=today,
+        names=names,
+        months_of=months_of,
+        months=months,
+        dte=int(scfg.get("dte") or 90),
+        grace=timedelta(days=int(scfg.get("grace_days") or 30)),
+        planned=planned,
+    )
+    if plan is None or not plan["empty_read"]:
+        return []
+    gaps: dict[str, list[date]] = plan["gaps"]
+    open_names = sorted(s for s, m in plan["holes"].items() if m)
+    empty_total = sum(len(v) for v in gaps.values())
+
+    def _span(sym: str) -> str:
+        m = gaps[sym]
+        return f"{sym} {len(m)} ({m[0]:%Y-%m}..{m[-1]:%Y-%m})"
+
+    if not open_names:
+        detail = (
+            f"No month after a name's oldest bar is empty across {len(names)} names."
+            if not gaps
+            else (
+                f"{empty_total} empty month(s) on {len(gaps)} name(s), every one planned within "
+                f"{OPTION_PLAN_RETRY_DAYS} days: {', '.join(_span(s) for s in sorted(gaps)[:8])}."
+            )
+        )
+        return [
+            Finding(
+                "depth_holes:option_daily",
+                "option-depth",
+                "ok",
+                "Option depth: empty months",
+                "no unplanned empty month",
+                f"{len(gaps)} names planned" if gaps else "none",
+                detail,
+            )
+        ]
+    worst = sorted(open_names, key=lambda s: -len(gaps.get(s, ())))
+    return [
+        Finding(
+            "depth_holes:option_daily",
+            "option-depth",
+            "warn",
+            "Option depth: empty months",
+            "no unplanned empty month",
+            f"{len(open_names)} names",
+            f"{len(open_names)} name(s) hold whole months of option_daily with no bar after their "
+            f"oldest one, not yet planned: {', '.join(_span(s) for s in worst[:8])}"
+            + (f" and {len(worst) - 8} more" if len(worst) > 8 else "")
+            + ". The oldest-bar depth test reads these names as at depth.",
+            fix=_slot_fix("option-depth", None, force=False),
+            auto_fixable=True,
+            missing_sample=worst[:12],
+        )
+    ]
 
 
 @dataclass
@@ -1741,6 +1829,11 @@ def run_doctor(
         findings.extend(_continuity_findings(conn, today=now_utc.date(), session=session))
     except Exception as exc:  # noqa: BLE001
         logger.warning("continuity findings failed: %s", exc)
+        _rollback(conn)
+    try:
+        findings.extend(_depth_hole_findings(conn, cfg=cfg, today=now_utc.date()))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("depth hole findings failed: %s", exc)
         _rollback(conn)
 
     # ── Prescriptions: one per distinct fix ──
