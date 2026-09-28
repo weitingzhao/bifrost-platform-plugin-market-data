@@ -470,6 +470,52 @@ def test_the_view_is_rebuilt_on_both_ddl_paths() -> None:
     ), "the wave8 path must replace the view in place"
 
 
+class _ViewCatalog(_FakeCursor):
+    """Answers the definition comparison the way Postgres would."""
+
+    def __init__(self, same: bool) -> None:
+        super().__init__()
+        self.same = same
+
+    def fetchone(self) -> Any:
+        last = self.statements[-1] if self.statements else ""
+        return (self.same,) if "pg_get_viewdef" in last else None
+
+
+def test_an_unchanged_view_is_not_replaced() -> None:
+    """CREATE OR REPLACE locks the view even when nothing changes.
+
+    On 0.68.0 (2026-09-28) the Job's first attempt waited behind a reader of
+    the view and was cancelled by the role's 5s lock_timeout. An identical
+    definition now costs a temporary copy and a comparison, not a lock.
+    """
+    from bifrost_market_data.schema.ddl import rebuild_option_snapshot_with_stock_view
+
+    cur = _ViewCatalog(same=True)
+    rebuild_option_snapshot_with_stock_view(cur)
+    assert not any("raw_market.v_option_snapshot_with_stock AS" in s for s in cur.statements)
+    assert "CREATE OR REPLACE TEMP VIEW pg_temp.option_snapshot_view_probe AS" in cur.statements[0]
+    assert "to_regclass('raw_market.v_option_snapshot_with_stock')" in cur.statements[1], (
+        "a view that does not exist yet must compare unequal, not raise"
+    )
+    assert cur.statements[-1] == "DROP VIEW pg_temp.option_snapshot_view_probe"
+
+
+def test_a_changed_view_is_replaced_from_the_same_select() -> None:
+    from bifrost_market_data.schema.ddl import (
+        OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL,
+        OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL,
+        rebuild_option_snapshot_with_stock_view,
+    )
+
+    cur = _ViewCatalog(same=False)
+    rebuild_option_snapshot_with_stock_view(cur)
+    assert cur.statements[-1] == OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL
+    # The probe and the replacement are one SELECT, so equal means equal.
+    assert cur.statements[0].endswith(OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL)
+    assert OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL.endswith(OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL)
+
+
 def test_the_proxy_map_has_exactly_one_definition() -> None:
     """The view's VALUES is generated from the map the ingest paths read.
 

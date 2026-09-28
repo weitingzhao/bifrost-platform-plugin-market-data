@@ -1070,8 +1070,7 @@ def _index_spot_proxy_values() -> str:
 # that is about 0.12 vol points of smile; fed into a solve it would be about 1.8.
 # So the number travels with its provenance in underlying_price_source, and
 # nothing downstream can mistake a derived level for a vendor close.
-OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL: str = f"""
-        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS
+OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL: str = f"""
         SELECT
             os.option_ticker,
             os.underlying,
@@ -1107,10 +1106,19 @@ OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL: str = f"""
             ON psd.symbol = p.proxy_symbol
            AND psd.bar_date = date(os.snapshot_ts AT TIME ZONE 'America/New_York')
         """
+OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL: str = (
+    "\n        CREATE OR REPLACE VIEW raw_market.v_option_snapshot_with_stock AS"
+    + OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL
+)
+
+#: The deploy's copy of the view, built only to be compared. Temporary, so it
+#: dies with the session; and not named after the view, so nothing reading the
+#: statements can mistake dropping it for dropping the view.
+_OPTION_SNAPSHOT_VIEW_PROBE = "pg_temp.option_snapshot_view_probe"
 
 
 def rebuild_option_snapshot_with_stock_view(cur: _Cursor) -> None:
-    """Replace the view in place, without dropping it.
+    """Replace the view in place, without dropping it, and only when it differs.
 
     CREATE OR REPLACE tolerates an appended column, which is the whole reason
     underlying_price_source goes last: a DROP would take any dependent object
@@ -1120,7 +1128,34 @@ def rebuild_option_snapshot_with_stock_view(cur: _Cursor) -> None:
     ``init_schema.py --wave8-only``. A view definition that only apply_ddl
     reaches runs nowhere -- the same way the job_ingest autovacuum ALTER did
     until 0.41.1.
+
+    CREATE OR REPLACE takes ACCESS EXCLUSIVE on the view even when nothing
+    changes, so every deploy queued behind whoever was reading it: on 0.68.0
+    (2026-09-28 20:48 UTC) the Job's first attempt was cancelled on it by the
+    role's 5s lock_timeout. So the same SELECT is first built as a temporary
+    view and Postgres is asked whether the two read back the same.
+    pg_get_viewdef normalises both one way, so layout cannot make them differ,
+    and the probe takes only ACCESS SHARE on the tables beneath. Measured on the
+    cluster as bifrost: 0.36s, identical, no lock on the view; one word changed
+    in the probe reads as different. A view that does not exist yet compares
+    unequal and is created.
     """
+    cur.execute(
+        f"CREATE OR REPLACE TEMP VIEW {_OPTION_SNAPSHOT_VIEW_PROBE} AS"
+        + OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL
+    )
+    cur.execute(
+        f"""
+        SELECT pg_get_viewdef(to_regclass('raw_market.v_option_snapshot_with_stock'))
+               IS NOT DISTINCT FROM
+               pg_get_viewdef('{_OPTION_SNAPSHOT_VIEW_PROBE}'::regclass)
+        """
+    )
+    row = cur.fetchone()
+    cur.execute(f"DROP VIEW {_OPTION_SNAPSHOT_VIEW_PROBE}")
+    same = row.get(next(iter(row))) if isinstance(row, dict) else (row[0] if row else None)
+    if same is True:
+        return
     cur.execute(OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL)
 
 
