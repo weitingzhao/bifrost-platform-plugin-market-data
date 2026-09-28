@@ -30,6 +30,7 @@ from bifrost_market_data.quality import fetch_completed_trading_days, filter_opt
 from bifrost_market_data.scheduler.daily import (
     OPTION_PLAN_RETRY_DAYS,
     OPTION_PLAN_VOID_PREFIX,
+    SKIP_ON_HOLIDAY_SLOTS,
     enqueue_slot,
     load_research_universe,
     load_snapshot_windows,
@@ -40,7 +41,11 @@ from bifrost_market_data.scheduler.daily import (
 from bifrost_market_data.symbol_void import load_voids_by_prefix
 from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
-from bifrost_market_data.trading_calendar import chain_session, is_trading_day
+from bifrost_market_data.trading_calendar import (
+    chain_session,
+    expected_trading_days,
+    is_trading_day,
+)
 
 from bifrost_market_data.contracts import (
     CONTRACTS,
@@ -1163,6 +1168,20 @@ def _sessions_before(conn: Any, session: date, lag: int) -> date:
     return prior[-lag] if len(prior) >= lag else session
 
 
+def _closed_days_since(conn: Any, last: datetime, now: datetime) -> int:
+    """New York dates after ``last``'s, through today's, on which the market was shut.
+
+    A holiday-gated slot enqueues nothing when it fires on one of them, so a
+    slot that ran on schedule is that many days older than its limit allows
+    for without anything having gone wrong.
+    """
+    first = last.astimezone(_NY).date() + timedelta(days=1)
+    today = now.astimezone(_NY).date()
+    if today < first:
+        return 0
+    return (today - first).days + 1 - len(expected_trading_days(conn, start=first, end=today))
+
+
 def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[str, Any]:
     fix: dict[str, Any] = {"action": "enqueue-slot", "slot": slot, "force": force}
     if session is not None:
@@ -1608,7 +1627,21 @@ def run_doctor(
     for slot, (dim, max_age_h) in STALENESS.items():
         last = fresh.get(dim)
         age_h = (now_utc - last).total_seconds() / 3600.0 if last else None
-        stale = age_h is None or age_h > max_age_h
+        # A slot that skips closed days is not late for them. fundamentals-rotate
+        # fires every day and enqueues nothing on the fires that fall on a New
+        # York Saturday or Sunday, so its 72-hour weekend gap read stale against
+        # 48 hours from Monday 03:00 UTC to Tuesday 03:00 every week — and on
+        # 09-15 the self-heal answered with a forced rotation of 4,419 jobs, two
+        # hours before the scheduled one enqueued 4,417 more.
+        closed = 0
+        if last is not None and slot in SKIP_ON_HOLIDAY_SLOTS:
+            try:
+                closed = _closed_days_since(conn, last, now_utc)
+            except Exception as exc:  # noqa: BLE001 — fall back to the flat limit
+                logger.warning("doctor closed-day count failed for %s: %s", slot, exc)
+                _rollback(conn)
+        due_h = None if age_h is None else age_h - 24.0 * closed
+        stale = due_h is None or due_h > max_age_h
         findings.append(
             Finding(
                 f"stale:{slot}",
@@ -1616,9 +1649,15 @@ def run_doctor(
                 "warn" if stale else "ok",
                 f"{slot} freshness",
                 f"< {max_age_h:g}h",
-                None if age_h is None else round(age_h, 1),
+                None if due_h is None else round(due_h, 1),
                 (
-                    f"freshness.{dim} is {age_h:.1f}h old (limit {max_age_h:g}h)."
+                    f"freshness.{dim} is {age_h:.1f}h old"
+                    + (
+                        f", {due_h:.1f}h not counting {closed} closed day(s) the slot does not run on"
+                        if closed
+                        else ""
+                    )
+                    + f" (limit {max_age_h:g}h)."
                     if age_h is not None
                     else f"freshness.{dim} has never been written."
                 ),

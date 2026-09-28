@@ -234,6 +234,44 @@ def test_partial_chain_coverage_is_a_finding_not_a_pass() -> None:
     assert set(eod["finding_ids"]) == {f"option_snapshot:{SESSION.isoformat()}", f"option_open_interest:{SESSION.isoformat()}"}
 
 
+def _rotate_ran(last_run: datetime, now: datetime) -> dict[str, Any]:
+    """Every policed dimension fresh at ``now`` except financials, last written at ``last_run``."""
+    data = _healthy_data()
+    data["freshness"] = [
+        {"dimension": d, "last_run_at": now - timedelta(hours=1)}
+        for d in ("calendar", "ticker_sync", "option_contract", "dividends")
+    ] + [{"dimension": "financials", "last_run_at": last_run}]
+    return data
+
+
+# The Saturday 03:00 UTC rotation is Friday's in New York; the Sunday and Monday
+# 03:00 fires are Saturday's and Sunday's, and enqueue nothing.
+_SAT_ROTATION = datetime(2026, 9, 19, 3, 3, tzinfo=timezone.utc)
+
+
+def test_the_rotate_is_not_stale_over_a_weekend_it_does_not_run() -> None:
+    """Monday afternoon, 62 hours after Saturday's rotation, is on schedule."""
+    monday_afternoon = datetime(2026, 9, 21, 17, 30, tzinfo=timezone.utc)
+    rep = doc.run_doctor(
+        _Conn(_rotate_ran(_SAT_ROTATION, monday_afternoon)), now=monday_afternoon, watchlist=UNIVERSE
+    )
+    f = next(f for f in rep["findings"] if f["id"] == "stale:fundamentals-rotate")
+    assert f["severity"] == "ok"
+    assert f["actual"] == 14.5  # 62.45h less Saturday and Sunday
+    assert "2 closed day(s)" in f["detail"]
+    assert f["fix"] is None and f["auto_fixable"] is False
+
+
+def test_the_rotate_is_stale_once_two_trading_days_go_missing() -> None:
+    """Monday's and Tuesday's rotations never ran: that is late, weekend or not."""
+    wednesday = datetime(2026, 9, 23, 3, 10, tzinfo=timezone.utc)
+    rep = doc.run_doctor(_Conn(_rotate_ran(_SAT_ROTATION, wednesday)), now=wednesday, watchlist=UNIVERSE)
+    f = next(f for f in rep["findings"] if f["id"] == "stale:fundamentals-rotate")
+    assert f["severity"] == "warn"
+    assert f["actual"] == 48.1
+    assert f["fix"] == {"action": "enqueue-slot", "slot": "fundamentals-rotate", "force": True}
+
+
 def test_stale_reference_slots_get_dateless_enqueue() -> None:
     data = _healthy_data()
     data["freshness"] = [{"dimension": "calendar", "last_run_at": _fresh(80)}]  # others never written
