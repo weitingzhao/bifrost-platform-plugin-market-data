@@ -33,6 +33,9 @@ Grain = Literal["catalogue", "daily", "snapshot", "minute", "filing"]
 
 #: How often a row set is published. See DatasetContract.cadence.
 Cadence = Literal["session", "settlement", "filing"]
+
+#: How the doctor asks which sessions a dataset holds. See DatasetContract.presence.
+Presence = Literal["probe", "scan"]
 DepthKind = Literal[
     "rolling_days", "since", "sessions", "current_only", "forward_only", "catalogue"
 ]
@@ -175,6 +178,20 @@ class DatasetContract:
     #: expiring that week, so ATM IV had nothing to price them from.
     narrow_filter: str | None = None
 
+    #: How ``continuity.missing_sessions`` asks which sessions are present.
+    #:
+    #: ``probe``  one LIMIT 1 lookup per calendar day. Fast only where an index
+    #:            answers "any row on day d" at once: option_daily through
+    #:            (underlying, bar_date), short_volume through (period_date, symbol).
+    #: ``scan``   one pass over the window, collecting the distinct dates.
+    #:
+    #: A probe without such an index is a sequential scan per day that stops at
+    #: the first row. The planner prices that as cheap because it assumes the day's
+    #: rows are spread evenly through the heap, but they are clustered. Measured
+    #: 2026-09-28 on stock_daily: 42 probes filtered 687,000 rows each and read
+    #: 3.3 GB, 39.8s against a 30s budget. One scan of the same window took 1.4s.
+    presence: Presence = "probe"
+
 
 # Rolling windows the subscriptions allow (subscription.py SUBSCRIPTIONS).
 STOCK_WINDOW_DAYS = 5 * 365
@@ -218,6 +235,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         grain="daily",
         refill=Refill("slot", "universe-daily", why="the grouped whole-market pull; a blank session is blank for all 5,317"),
         refill_narrow=True,
+        # No index leads with bar_date: both lead with symbol.
+        presence="scan",
     ),
     DatasetContract(
         "raw_market.stock_snapshot",
@@ -584,6 +603,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         freshness_dimension="stock_minute",
         grain="minute",
         refill=Refill("slot", "minute-bars"),
+        # Indexes lead with symbol; probes 7.7s against a scan's 2.8s (2026-09-28).
+        presence="scan",
     ),
     DatasetContract(
         "raw_market.option_minute",
@@ -604,6 +625,9 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # working exactly as designed; whether the rotation is turning is the
         # continuity axis's question, not breadth's.
         breadth_window="ever",
+        # Indexes lead with underlying; probes 2.2s against a scan's 0.8s
+        # (2026-09-28), and every absent day costs a probe a full partition.
+        presence="scan",
     ),
 )
 

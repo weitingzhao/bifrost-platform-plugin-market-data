@@ -120,12 +120,38 @@ def test_days_before_the_dataset_existed_are_not_holes(wired) -> None:
     assert [f.severity for f in out] == ["ok"]
 
 
-def test_an_unreadable_dataset_is_skipped_not_guessed_at(wired) -> None:
+def test_an_unreadable_dataset_is_unprobed_not_guessed_at(wired) -> None:
+    """Nothing is prescribed from a failed read, but the dataset is not dropped.
+
+    2026-09-28 stock_daily's presence read timed out whenever doctor computes
+    overlapped, and its continuity finding simply vanished from the report.
+    """
     sessions, gaps = wired
     gaps["raw_market.option_daily"] = None  # a failed read, not an empty answer
     out = _continuity_findings(None, today=TODAY)
-    assert not [f for f in out if "option_daily" in f.id]
+    [f] = [f for f in out if "option_daily" in f.id]
+    assert (f.id, f.severity, f.actual) == ("continuity:option_daily", "warn", "presence unprobed")
+    assert f.fix is None and not f.auto_fixable
     assert [f for f in out if "stock_daily" in f.id], "one bad read must not sink the rest"
+
+
+def test_each_presence_read_is_asked_the_way_its_contract_says(wired, monkeypatch) -> None:
+    from bifrost_market_data.contracts import contract_for
+
+    sessions, _gaps = wired
+    asked: dict[str, str] = {}
+
+    def fake_missing(conn: Any, table: str, column: str, days: Any, **kw: Any):
+        asked[table] = kw.get("how")
+        return []
+
+    monkeypatch.setattr(cont, "missing_sessions", fake_missing)
+    _continuity_findings(None, today=TODAY)
+    assert asked, "the presence read ran"
+    for table, how in asked.items():
+        assert how == contract_for(table).presence, table
+    assert asked["raw_market.stock_daily"] == "scan"
+    assert asked["raw_market.option_daily"] == "probe"
 
 
 def test_it_stays_out_of_the_gate_that_blocks_research(wired) -> None:

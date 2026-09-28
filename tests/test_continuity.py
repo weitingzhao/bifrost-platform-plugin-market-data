@@ -331,6 +331,87 @@ def test_missing_sessions_says_none_when_the_read_fails() -> None:
     assert cont.missing_sessions(_Boom(), "t", "c", [date(2026, 9, 1)]) is None
 
 
+class _ScanCur:
+    """Answers a presence scan with the days it was told the table holds."""
+
+    def __init__(self, held: list[date]) -> None:
+        self.held = held
+        self.sql: list[str] = []
+        self.params: list[object] = []
+
+    def __enter__(self) -> "_ScanCur":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        q = " ".join(str(sql).split())
+        self.sql.append(q)
+        if not q.startswith("SET LOCAL"):
+            self.params.append(params)
+
+    def fetchall(self) -> list[tuple[date]]:
+        return [(d,) for d in self.held]
+
+
+class _ScanConn:
+    def __init__(self, cur: _ScanCur) -> None:
+        self._cur = cur
+
+    def cursor(self) -> _ScanCur:
+        return self._cur
+
+
+def test_a_presence_scan_reads_the_window_once_and_reports_the_absent_days() -> None:
+    """2026-09-28: 42 probes on stock_daily read 3.3 GB in 39.8s; one scan, 1.4s."""
+    days = [date(2026, 9, 21) + timedelta(days=i) for i in range(5)]
+    cur = _ScanCur([days[0], days[1], days[3], days[4]])
+    out = cont.missing_sessions(_ScanConn(cur), "raw_market.stock_daily", "bar_date", days, how="scan")
+    assert out == [days[2]]
+
+    [q] = [q for q in cur.sql if not q.startswith("SET LOCAL")]
+    assert "SELECT DISTINCT (bar_date)::date AS d FROM raw_market.stock_daily" in q
+    assert "bar_date >= %s AND bar_date < %s" in q
+    assert "LATERAL" not in q and "VALUES" not in q
+    # Dates from here, so the planner can prune; the end is half-open.
+    assert cur.params == [(days[0], days[-1] + timedelta(days=1))]
+
+
+def test_a_presence_scan_answers_in_calendar_order_whatever_the_rows_order() -> None:
+    days = [date(2026, 9, 21) + timedelta(days=i) for i in range(5)]
+    cur = _ScanCur([days[4], days[1]])
+    out = cont.missing_sessions(_ScanConn(cur), "t", "c", list(reversed(days)), how="scan")
+    assert out == [days[0], days[2], days[3]]
+
+
+def test_a_failed_presence_scan_is_none_not_every_day_missing() -> None:
+    class _Boom:
+        def cursor(self) -> object:
+            raise RuntimeError("statement timeout")
+
+        def rollback(self) -> None:
+            return None
+
+    assert cont.missing_sessions(_Boom(), "t", "c", [date(2026, 9, 1)], how="scan") is None
+
+
+def test_an_unknown_presence_read_is_a_bug_not_a_failed_read() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        cont.missing_sessions(None, "t", "c", [date(2026, 9, 1)], how="count")
+
+
+def test_each_dataset_is_asked_for_presence_the_way_its_indexes_allow() -> None:
+    """Probe only where an index finds a day's first row at once."""
+    for dataset in ("raw_market.stock_daily", "raw_market.stock_minute", "raw_market.option_minute"):
+        assert contract_for(dataset).presence == "scan", dataset
+    # (underlying, bar_date) and (period_date, symbol): 97 ms and 0.6 ms probed.
+    for dataset in ("raw_market.option_daily", "raw_market.short_volume"):
+        assert contract_for(dataset).presence == "probe", dataset
+
+
 class _MeasureConn:
     """A connection that answers per_day_counts with a canned series."""
 

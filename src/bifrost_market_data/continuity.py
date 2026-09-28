@@ -242,8 +242,18 @@ def missing_sessions(
     sessions: Sequence[date],
     *,
     statement_timeout: str = "30s",
+    how: str = "probe",
 ) -> list[date] | None:
     """Which of ``sessions`` the table holds no row for at all, or None on a failed read.
+
+    ``how`` is the contract's ``presence``. It is ``probe`` (below) or ``scan``,
+    one pass over the window that collects the distinct dates, for tables with
+    no index that finds a day's first row at once. Without such an index each
+    probe is a sequential scan that stops at the first row, and the day's rows
+    sit together near the end of the heap. On 2026-09-28 stock_daily read 3.3 GB
+    over 42 probes (39.8s, against the 30s budget), and one scan read 240 MB in
+    1.4s. The bounds are dates from here, not ``current_date``, so the planner
+    prunes partitions it can see.
 
     Not ``per_day_counts``: that one was written for the thin-day statistic and
     therefore has to count, and counting to answer a presence question cost the
@@ -263,25 +273,36 @@ def missing_sessions(
     Half-open bounds rather than a cast, so a timestamp column (``bar_time``) is
     compared on the index instead of through ``::date``.
     """
+    if how not in ("probe", "scan"):
+        raise ValueError(f"unknown presence read: {how!r}")
     days = list(sessions)
     if not days:
         return []
-    values = ", ".join(["(%s::date)"] + ["(%s)"] * (len(days) - 1))
-    sql = f"""
-        SELECT v.d
-        FROM (VALUES {values}) AS v(d)
-        LEFT JOIN LATERAL (
-            SELECT 1 AS hit FROM {table}
-            WHERE {column} >= v.d AND {column} < v.d + 1
-            LIMIT 1
-        ) p ON true
-        WHERE p.hit IS NULL
-        ORDER BY v.d
-    """
+    if how == "scan":
+        sql = f"""
+            SELECT DISTINCT ({column})::date AS d
+            FROM {table}
+            WHERE {column} >= %s AND {column} < %s
+        """
+        params: tuple[Any, ...] = (min(days), max(days) + timedelta(days=1))
+    else:
+        values = ", ".join(["(%s::date)"] + ["(%s)"] * (len(days) - 1))
+        sql = f"""
+            SELECT v.d
+            FROM (VALUES {values}) AS v(d)
+            LEFT JOIN LATERAL (
+                SELECT 1 AS hit FROM {table}
+                WHERE {column} >= v.d AND {column} < v.d + 1
+                LIMIT 1
+            ) p ON true
+            WHERE p.hit IS NULL
+            ORDER BY v.d
+        """
+        params = tuple(days)
     try:
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
-            cur.execute(sql, tuple(days))
+            cur.execute(sql, params)
             rows = cur.fetchall() if hasattr(cur, "fetchall") else []
     except Exception as exc:  # noqa: BLE001 — one unreadable dataset must not sink the check
         logger.warning("session presence read failed for %s: %s", table, exc)
@@ -295,6 +316,10 @@ def missing_sessions(
         v = tuple(r.values())[0] if isinstance(r, Mapping) else (r[0] if r else None)
         if v is not None:
             out.append(v)
+    if how == "scan":
+        # The scan answers which days are present; the question is which are not.
+        present = set(out)
+        return sorted(d for d in days if d not in present)
     return out
 
 

@@ -599,8 +599,26 @@ def _continuity_findings(
             str(c.date_column),
             sessions,
             statement_timeout=statement_timeout,
+            how=c.presence,
         )
         if gaps is None:
+            # Not guessed at: nothing is prescribed. But said, not dropped. The
+            # dataset used to vanish from the report when this read failed, and on
+            # 2026-09-28 stock_daily did exactly that whenever doctor computes
+            # overlapped.
+            name = c.dataset.replace("raw_market.", "")
+            out.append(
+                Finding(
+                    f"continuity:{name}",
+                    c.refill.target,
+                    "warn",
+                    f"Continuity: {name}",
+                    f"every session in {window_days}d",
+                    "presence unprobed",
+                    f"Which of the last {window_days} days' sessions {name} holds could not "
+                    "be read, so no session was cleared and none was prescribed. See API log.",
+                )
+            )
             continue
         present = [d for d in sessions if d not in set(gaps)]
         if not present:
