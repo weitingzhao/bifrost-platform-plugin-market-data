@@ -1423,10 +1423,18 @@ def load_empty_option_months(
     """Months from ``start`` to ``end`` (month firsts) in which a name holds no ``option_daily`` bar.
 
     None when the read fails. One statement per month with the bounds written
-    as literals, so each prunes to one partition at plan time and the EXISTS
-    walks its (underlying, bar_date) index: 0.1–0.2 s a month for 650 names
+    as literals, so each prunes to one partition at plan time and each name's
+    probe walks its (underlying, bar_date) index: 0.1–0.2 s a month for 650 names
     (2026-09-28). A generate_series join over the same months cannot prune and
     took 35 s; the GROUP BY scans the table.
+
+    A LATERAL with LIMIT 1, not NOT EXISTS. The anti-join's plan follows the
+    month's row estimate. On 2026-09-28 the densest month in the DEFAULT
+    partition, 2025-07 (1.7M rows), crossed over to a hash anti-join that read
+    the whole 2.6 GB partition: 95.7s against the 60s budget. That lost the read
+    for all 23 months, and with it the option-depth slot's hole planning. The
+    lateral has to probe per name and stops at the first row: the same 36 names
+    in 7.0s, and 2026-08 within noise of the anti-join (3.7s against 3.1s).
     """
     syms = sorted({str(s).strip().upper() for s in underlyings if str(s).strip()})
     if not syms or start > end:
@@ -1446,12 +1454,14 @@ def load_empty_option_months(
                     f"""
                     /* empty-option-months */
                     SELECT u.sym FROM unnest(%s::text[]) AS u(sym)
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM raw_market.option_daily d
+                    LEFT JOIN LATERAL (
+                        SELECT 1 AS hit FROM raw_market.option_daily d
                         WHERE d.underlying = u.sym
                           AND d.bar_date >= DATE '{first.isoformat()}'
                           AND d.bar_date < DATE '{after.isoformat()}'
-                    )
+                        LIMIT 1
+                    ) p ON true
+                    WHERE p.hit IS NULL
                     """,
                     (syms,),
                 )
@@ -2173,6 +2183,7 @@ def enqueue_slot(
     specs: list[tuple[str, dict[str, Any], int, int]] = []
     retired_skipped: list[str] = []
     plan_marks: list[tuple[str, str, str]] = []
+    holes_unread = False
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
         # Collected here, written in one statement below.
@@ -2316,6 +2327,12 @@ def enqueue_slot(
                 "deduped": 0,
                 "jobs": [],
             }
+        # The short-of-depth months still plan: they come from the oldest-bar
+        # read, which succeeded. The holes do not, and the run has to say so.
+        # It used to finish looking complete while planning no hole at all.
+        holes_unread = not plan["empty_read"]
+        if holes_unread:
+            logger.warning("option-depth: empty-month read failed; no hole planned this run")
         sym_of = {storage_underlying(s): s for s in names}
         for storage in sorted(set(plan["short"]) | set(plan["holes"])):
             for first in sorted(set(plan["short"].get(storage, ())) | set(plan["holes"].get(storage, ()))):
@@ -2745,6 +2762,8 @@ def enqueue_slot(
         # Named, not just counted: a skip nobody can see is how a universe stays
         # stale. These belong out of the universe, which is upstream of this slot.
         out["retired_skipped"] = sorted(retired_skipped)
+    if holes_unread:
+        out["holes_unread"] = True
     return out
 
 

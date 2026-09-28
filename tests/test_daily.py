@@ -1976,6 +1976,35 @@ def test_empty_months_are_read_one_prunable_month_at_a_time() -> None:
     bounds = [s for s in seen if "empty-option-months" in s]
     assert len(bounds) == 4
     assert "DATE '2025-10-01'" in bounds[0] and "DATE '2026-02-01'" in bounds[-1]
+    # A probe per name that stops at the first row, not an anti-join: 2026-09-28
+    # the anti-join on 2025-07 hashed the whole DEFAULT partition for 95.7s.
+    for sql in bounds:
+        q = " ".join(sql.split())
+        assert "LEFT JOIN LATERAL" in q and "LIMIT 1" in q and "WHERE p.hit IS NULL" in q
+        assert "NOT EXISTS" not in q
+
+
+def test_option_depth_says_when_it_could_not_read_the_holes(monkeypatch) -> None:
+    """2026-09-28 the empty-month read timed out and the run planned no hole, silently."""
+    monkeypatch.setattr(
+        daily_mod, "load_oldest_option_daily", lambda conn, syms: dict(_AT_DEPTH, MSFT=date(2025, 6, 15))
+    )
+    monkeypatch.setattr(daily_mod, "load_empty_option_months", lambda conn, syms, start, end: None)
+    monkeypatch.setattr(daily_mod, "load_voids_by_prefix", lambda conn, prefix, max_age_days: set())
+    monkeypatch.setattr(daily_mod, "record_symbol_void", lambda conn, sym, dtype, note=None: None)
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+    assert r["holes_unread"] is True
+    # The short-of-depth months came from the oldest-bar read, which succeeded.
+    assert set(_plans(r)) == {"MSFT"}
+    assert "skipped" not in r
+
+
+def test_option_depth_does_not_flag_holes_it_read(monkeypatch) -> None:
+    _depth_holes(monkeypatch, oldest=_AT_DEPTH, empty={})
+    conn = _DailyConn(research_universe=_universe_rows())
+    r = enqueue_slot(conn, "option-depth", target_date=date(2026, 9, 27), scheduler_cfg=_DEPTH_CFG)
+    assert "holes_unread" not in r
 
 
 def test_option_depth_skips_rather_than_plans_everything_on_a_failed_read(monkeypatch) -> None:
