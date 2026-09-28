@@ -1193,6 +1193,88 @@ def load_delisted_lookup_candidates(
     return out
 
 
+#: ``ops_jobs.symbol_source_void`` data_type for a symbol whose pre-split
+#: ``stock_daily`` was queued for a re-pull (``split_restate:2026-09-03``, the
+#: latest ex-date it covers). A row the vendor no longer returns stays pre-split
+#: for good; the note keeps that from re-queuing the symbol every night.
+SPLIT_RESTATE_VOID_PREFIX = "split_restate:"
+SPLIT_RESTATE_RETRY_DAYS = 7
+#: Measured 2026-09-28: 85 symbols market-wide, 42,619 rows, three of them in the
+#: Research universe (APH, MNST, SCCO). One aggregates call each.
+SPLIT_RESTATE_PER_RUN = 100
+
+
+def split_restate_void_type(ex_date: date) -> str:
+    return f"{SPLIT_RESTATE_VOID_PREFIX}{ex_date.isoformat()}"
+
+
+def load_split_restatements(
+    conn: Any,
+    *,
+    as_of: date,
+    limit: int = SPLIT_RESTATE_PER_RUN,
+) -> list[tuple[str, date, date, date]]:
+    """``(symbol, first stale bar, last stale bar, latest ex-date)`` for symbols
+    whose ``stock_daily`` still holds bars priced before a split that has since
+    gone ex.
+
+    Bars are fetched ``adjusted=true``, which means adjusted *as of the fetch*:
+    a bar written the evening before an ex-date carries the pre-split price and
+    nothing rewrites it, because every daily slot asks for one new session. So
+    the price series is torn at the split. Measured 2026-09-28, APH (2-for-1,
+    ex 2026-09-03) held 295 such bars and read 160.08 → 82.07 across the ex-date;
+    MNST and SCCO 38 each from 2026-08-11. Research's rolling features and its
+    option spot read that as a halving.
+
+    A bar counts as stale when it predates the ex-date **and** was fetched
+    before the ex-date began in New York. Re-pulling the span rewrites
+    ``fetched_at``, so a symbol drops out once its re-pull has run.
+    """
+    window = _retention_days("raw_market.stock_daily")
+    floor = as_of - timedelta(days=window) if window else date(1, 1, 1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                /* split-restate */
+                SELECT s.symbol, min(s.bar_date), max(s.bar_date), max(c.ex_date)
+                FROM raw_market.corporate_action c
+                JOIN raw_market.stock_daily s
+                  ON s.symbol = c.symbol
+                 AND s.bar_date < c.ex_date
+                 AND s.bar_date >= %s
+                 AND s.fetched_at < (c.ex_date::timestamp AT TIME ZONE 'America/New_York')
+                WHERE c.action_type = 'split'
+                  AND c.ex_date <= %s
+                  AND c.ex_date > %s
+                  AND c.ratio_from > 0 AND c.ratio_to > 0
+                  AND c.ratio_from <> c.ratio_to
+                GROUP BY s.symbol
+                ORDER BY max(c.ex_date) DESC, s.symbol
+                LIMIT %s
+                """,
+                (floor, as_of, floor, max(0, int(limit))),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 -- a repair nobody asked for is not a failure
+        logger.warning("split-restate candidate query failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+    out: list[tuple[str, date, date, date]] = []
+    for row in rows or []:
+        vals = tuple(row.values()) if isinstance(row, Mapping) else tuple(row or ())
+        if len(vals) < 4 or not vals[0]:
+            continue
+        sym, first, last, ex = vals[:4]
+        if isinstance(first, date) and isinstance(last, date) and isinstance(ex, date):
+            out.append((str(sym).strip().upper(), first, last, ex))
+    return out
+
+
 def load_retired_underlyings(
     conn: Any,
     underlyings: Sequence[str],
@@ -2090,7 +2172,7 @@ def enqueue_slot(
     jobs: list[dict[str, Any]] = []
     specs: list[tuple[str, dict[str, Any], int, int]] = []
     retired_skipped: list[str] = []
-    plan_marks: list[tuple[str, str]] = []
+    plan_marks: list[tuple[str, str, str]] = []
 
     def _add(kind: str, payload: dict[str, Any], pri: int | None = None) -> None:
         # Collected here, written in one statement below.
@@ -2248,7 +2330,7 @@ def enqueue_slot(
                     },
                     pri=_tier_pri(sym_of.get(storage, storage)),
                 )
-                plan_marks.append((storage, option_plan_void_type(first)))
+                plan_marks.append((storage, option_plan_void_type(first), "planned by option-depth"))
         logger.info(
             "option-depth: %d of %d names short of depth, %d with empty months, %d months noted as planned",
             len(plan["short"]),
@@ -2324,6 +2406,17 @@ def enqueue_slot(
         }
         _add("splits_market", dict(window))
         _add("dividends_market", dict(window))
+        # Splits already ex leave the bars fetched before them unadjusted; one
+        # adjusted re-pull per symbol over the stale span mends the series.
+        noted = load_voids_by_prefix(
+            conn, SPLIT_RESTATE_VOID_PREFIX, max_age_days=SPLIT_RESTATE_RETRY_DAYS
+        )
+        for sym, first, last, ex in load_split_restatements(conn, as_of=day):
+            mark = split_restate_void_type(ex)
+            if (sym, mark) in noted:
+                continue
+            _add("stock_daily", {"symbol": sym, "from": first.isoformat(), "to": last.isoformat()})
+            plan_marks.append((sym, mark, "queued by split-restate"))
 
     elif slot_key == "option-refresh":
         batch_size = int(scfg.get("batch_size") or 12)
@@ -2635,8 +2728,8 @@ def enqueue_slot(
     for job_entry, job_id in zip(jobs, ids):
         job_entry["id"] = job_id
         job_entry["deduped"] = job_id is None
-    for storage, data_type in plan_marks:
-        record_symbol_void(conn, storage, data_type, note="planned by option-depth")
+    for storage, data_type, note in plan_marks:
+        record_symbol_void(conn, storage, data_type, note=note)
     enqueued = sum(1 for j in jobs if not j["deduped"])
     deduped = len(jobs) - enqueued
 

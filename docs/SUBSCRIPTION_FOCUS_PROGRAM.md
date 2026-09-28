@@ -233,6 +233,15 @@ PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并
 - **预防（Research 0.148.0）**：`engines/volatility/iv_coverage_heal.py`，挂在周日 `vol_weekly_backfill` 之后。逐日比较「有 ATM IV 的标的数」与「raw 有 5～90 天到期合约的标的数」，低于 0.85 且 raw 在特征之后写过的交易日，重算 ATM IV + PCR；再从最早一天起逐日重算 IV 分位数与 VRP（两者都按前几天已存的值排名）。重算后仍低的交易日不再重复处理。
 - **一次性全量重算**：队列排空后以 `research-iv-history-repair` Job 跑 `--derive-only --apply`（ATM IV → 分位数 → VRP → fwd_ret_20d → canonical PnL，逐日从最老到最新）。
 
+### 2026-09-28 拆股与改代码撕开的价格序列（Plugin 0.60.0 · Research 0.150.0，Owner 选「两侧都修」）
+
+全量重算后 09-25 的 649 个标的里 IV rank 为空的由 112 降到 36；raw 有一年以上而仍为空的 28 个里，6 个是拆股（BKNG、KLAC、CRWD、MNST、CVNA、ASST）、2 个是改代码（ECHO、VMRK），其余是单边或稀疏的冷门名字（Starter 没有 quotes，日线只有成交过的合约，接受）。
+
+- **拆股（插件）**：`stock_daily` 以 `adjusted=true` 拉取，复权基准是**拉取那一刻**，而每个日槽只要一个新交易日，拆股之后没人重拉。实测 APH（2:1，除权 09-03）295 行仍是拆股前价格，160.08 → 82.07；MNST、SCCO（08-11）各 38 行。全市场 85 个标的、42,619 行。`corporate` 槽在拉完拆股 / 分红后找出「bar 早于除权日、且拉取时间早于除权日纽约零点」的标的，对那段区间入队 `stock_daily` 重拉（每轮至多 100 个，最近的除权优先）；`ops_jobs.symbol_source_void` 记 `split_restate:<ex_date>`，7 天内不重复入队。重拉会改写 `fetched_at`，完成的标的自然不再入选。
+- **拆股（Research）**：期权行权价是成交当时的价格，而 spot 取自复权后的 `stock_daily`，拆股前的 ATM 带落在错误的行权价上 —— 各拆股名字 ATM IV 的第一天正好是除权日。`iv_solver.as_traded_close` 用 `raw_market.corporate_action` 把收盘价还原为成交价：乘上 `bar_date < ex_date ≤ fetched_at 的纽约日期` 的各次拆股比例（拉取之后才发生的拆股，行里本来就没复权）。IV 求解、ATM IV 的行权价带、财报 straddle 定价共用。
+- **改代码（插件）**：`rename_label_repair` 每次部署在搬期权行之前，先把退市代码的 `stock_daily` **复制**给继任代码（不搬走：配对发现要读退市代码的最后一根 bar）。只复制继任代码「交接前最后一根 bar」之后到退市代码最后一根 bar 之间的行，`ON CONFLICT DO NOTHING`：ECHO 2021 年那段属于 Echo Global Logistics，不动。配对的代码表路线不再要求 CIK 相同，只看 composite FIGI：EQR → VMRK 的 FIGI 不变、CIK 在并入 AvalonBay 时换了，期权行搬完之后目录路线也看不到它，于是继任代码的价格序列停在交接日。实测去掉 CIK 条件只多出这一对；AVB 仍因 FIGI 不同被拒。全市场 22 对，约 2.1 万行。
+- **dbt（Research）**：`int_stock_daily_enriched`（0.150.0）是增量模型、回看 60 天，已保留的历史从不重读，所以上游的重拉和复制进不了 `dw_stock`。增量分支逐标的比较 60 天之前的行数与收盘价之和，不一致的标的整段重算。
+
 ## 3. Owner 待决事项
 
 1. ~~期权回填范围~~ — 已定（2026-09-08，回填 A，见 P4）。

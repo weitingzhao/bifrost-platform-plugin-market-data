@@ -74,9 +74,15 @@ _TICKER_PREFIX = 2
 #: warrant. The guard is honest as an invariant and idle as a filter.
 _RENAME_MAX_GAP_DAYS = 5
 
-#: Renames the reference table can prove: one registrant (CIK), one instrument
-#: (composite FIGI), the old symbol inactive and the new one active, and the two
-#: listings abutting in time. ``HAVING count(*) = 1`` drops a dead symbol that
+#: Renames the reference table can prove: one instrument (composite FIGI), the
+#: old symbol inactive and the new one active, and the two listings abutting in
+#: time. The registrant is deliberately not required to match: Equity Residential
+#: became Vivmark with its composite FIGI intact and its CIK changed (0000931182
+#: to 0000906107) when it absorbed AvalonBay, and once its option rows had moved
+#: the catalogue route below had nothing left to see, so EQR -> VMRK went
+#: unrecognised and VMRK's price history stopped at the handover. Measured
+#: 2026-09-28, dropping the CIK test adds exactly that pair to the 21 it already
+#: found; AVB still fails, on its own FIGI. ``HAVING count(*) = 1`` drops a dead symbol that
 #: still matches two live ones — ambiguity is a reason to do nothing, not to pick.
 #: The adjacency test runs before that count, so evidence narrows the ambiguity
 #: instead of the count refusing a pair that evidence could have settled.
@@ -90,8 +96,7 @@ _PAIRS_FROM_TICKER = f"""
 SELECT dead.symbol, min(alive.symbol)
 FROM raw_market.ticker dead
 JOIN raw_market.ticker alive
-  ON alive.cik = dead.cik
- AND alive.composite_figi = dead.composite_figi
+  ON alive.composite_figi = dead.composite_figi
  AND alive.symbol <> dead.symbol
 CROSS JOIN LATERAL (
   SELECT max(bar_date) AS last_bar
@@ -103,7 +108,6 @@ CROSS JOIN LATERAL (
   WHERE symbol = alive.symbol AND bar_date > dl.last_bar
 ) an
 WHERE NOT dead.active AND alive.active
-  AND dead.cik IS NOT NULL AND dead.cik <> ''
   AND dead.composite_figi IS NOT NULL AND dead.composite_figi <> ''
   AND dl.last_bar IS NOT NULL
   AND an.next_bar IS NOT NULL
@@ -215,6 +219,36 @@ WHERE underlying = %s
   )
 """
 
+#: The price series needs the same handover, and it is the one that gates the
+#: rest: Research's option spot joins ``stock_daily`` on ``(symbol, bar_date)``,
+#: so the pre-rename option rows moved above price nothing without it. Measured
+#: 2026-09-28: ECHO held 64 sessions of ATM IV and VMRK 26, against 1,201 SATS
+#: and 1,239 EQR bars still under the old symbols.
+#:
+#: **Copied, not moved.** Pair discovery reads the dead symbol's last bar, so
+#: moving its bars would stop this repair recognising the pair it just mended.
+#: The copy starts after the successor's last bar *before* the handover, which
+#: keeps a symbol's earlier life out of it: ECHO's 2021 bars are Echo Global
+#: Logistics, and SATS's 2021 sessions stay SATS's. A bar the successor already
+#: holds wins, so a second run copies nothing.
+_COPY_STOCK_HISTORY = """
+INSERT INTO raw_market.stock_daily
+    (symbol, bar_date, open, high, low, close, volume, vwap, trade_count, fetched_at)
+SELECT %(alive)s, d.bar_date, d.open, d.high, d.low, d.close, d.volume, d.vwap, d.trade_count, d.fetched_at
+FROM raw_market.stock_daily d
+CROSS JOIN (
+    SELECT max(bar_date) AS last_bar FROM raw_market.stock_daily WHERE symbol = %(dead)s
+) dl
+WHERE d.symbol = %(dead)s
+  AND d.bar_date <= dl.last_bar
+  AND d.bar_date > coalesce(
+    (SELECT max(a.bar_date) FROM raw_market.stock_daily a
+     WHERE a.symbol = %(alive)s AND a.bar_date <= dl.last_bar),
+    DATE '0001-01-01'
+  )
+ON CONFLICT (symbol, bar_date) DO NOTHING
+"""
+
 #: How long one deploy may spend on this. The whole backlog measured 24,238
 #: rows, so the budget is a guard against a surprise rather than a schedule.
 DEFAULT_BUDGET_SEC = 30.0
@@ -258,9 +292,10 @@ def repair_renamed_labels(
 ) -> dict[str, int]:
     """Move every option row whose label is a symbol its root was renamed from.
 
-    Commits per (table, pair) so a budget that runs out keeps what it moved and
-    the next deploy continues. Returns rows moved per table, empty when there
-    was nothing to do.
+    Copies each pair's pre-rename ``stock_daily`` first, then commits per
+    (table, pair) so a budget that runs out keeps what it moved and the next
+    deploy continues. Returns rows moved (copied, for ``stock_daily``) per table,
+    empty when there was nothing to do.
     """
     started = time.monotonic()
     with conn.cursor() as cur:
@@ -269,6 +304,17 @@ def repair_renamed_labels(
     if not pairs:
         return {}
     moved: dict[str, int] = {}
+    for dead, alive in pairs:
+        if time.monotonic() - started > budget_sec:
+            logger.info("rename label repair out of budget before copying %s's stock_daily", dead)
+            return moved
+        with conn.cursor() as cur:
+            cur.execute(_COPY_STOCK_HISTORY, {"dead": dead, "alive": alive})
+            c = int(getattr(cur, "rowcount", 0) or 0)
+        conn.commit()
+        if c > 0:
+            moved["stock_daily"] = moved.get("stock_daily", 0) + c
+            logger.info("copied %s pre-rename stock_daily bars from %s to %s", c, dead, alive)
     for table in tables:
         for dead, alive in pairs:
             if time.monotonic() - started > budget_sec:

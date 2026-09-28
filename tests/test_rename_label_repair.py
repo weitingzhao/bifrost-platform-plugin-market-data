@@ -32,6 +32,9 @@ class _Cur:
         if "FROM raw_market.option_contract" in q and q.startswith("WITH r AS"):
             self._rows = list(self.parent.catalogue_pairs)
             return
+        if q.startswith("INSERT INTO raw_market.stock_daily"):
+            self.rowcount = self.parent.copy_hits.get(params["dead"], 0)
+            return
         if q.startswith("UPDATE raw_market."):
             table = q.split("UPDATE raw_market.")[1].split(" ")[0]
             if len(params) == 4:
@@ -69,6 +72,7 @@ class _Conn:
         catalogue_pairs: Sequence[tuple[str, str]] = (),
         hits: dict[tuple[str, str], int] | None = None,
         history_hits: dict[tuple[str, str], int] | None = None,
+        copy_hits: dict[str, int] | None = None,
     ) -> None:
         self.ticker_pairs = list(ticker_pairs)
         self.catalogue_pairs = list(catalogue_pairs)
@@ -76,6 +80,8 @@ class _Conn:
         #: Rows under the dead label that are rooted the dead way — the company's
         #: own history from before the rename, which `_MOVE` correctly leaves.
         self.history_hits = history_hits or {}
+        #: Pre-rename stock bars the successor lacks, keyed by the retired symbol.
+        self.copy_hits = copy_hits or {}
         self.statements: list[tuple[str, Any]] = []
         self.commits = 0
 
@@ -308,6 +314,72 @@ def test_a_table_with_no_date_gets_no_history_move() -> None:
         if q.startswith("UPDATE raw_market.option_contract")
     ]
     assert all(len(p or ()) == 3 for p in contract), "no unbounded rewrite of the catalogue"
+
+
+def test_the_reference_route_matches_on_the_instrument_not_the_registrant() -> None:
+    """EQR -> VMRK kept its composite FIGI and changed its CIK.
+
+    With both required the pair was invisible to the reference route, and once
+    its option rows had moved the catalogue route had nothing left to see either.
+    Measured 2026-09-28, the FIGI alone adds exactly that pair.
+    """
+    from bifrost_market_data.schema.rename_label_repair import _PAIRS_FROM_TICKER
+
+    flat = " ".join(_PAIRS_FROM_TICKER.split())
+    assert "ON alive.composite_figi = dead.composite_figi" in flat
+    assert "cik" not in flat
+
+
+# ── the price series ──────────────────────────────────────────────────────
+
+
+def _copies(conn: _Conn) -> list[tuple[str, Any]]:
+    return [(q, p) for q, p in conn.statements if q.startswith("INSERT INTO raw_market.stock_daily")]
+
+
+def test_the_price_series_before_the_rename_is_copied_to_the_successor() -> None:
+    """Measured 2026-09-28: ECHO had 64 sessions of ATM IV and VMRK 26, because
+    Research prices options on the successor's stock_daily and it began at the
+    handover."""
+    conn = _Conn(
+        ticker_pairs=[("EQR", "VMRK")],
+        catalogue_pairs=[("SATS", "ECHO")],
+        copy_hits={"SATS": 1148, "EQR": 1239},
+    )
+    moved = repair_renamed_labels(conn)
+    assert moved == {"stock_daily": 1148 + 1239}
+    assert [p for _q, p in _copies(conn)] == [
+        {"dead": "EQR", "alive": "VMRK"},
+        {"dead": "SATS", "alive": "ECHO"},
+    ]
+
+
+def test_the_copy_keeps_the_retired_rows_and_never_overwrites() -> None:
+    """Pair discovery reads the retired symbol's last bar, so its bars stay; and a
+    bar the successor already holds is the successor's."""
+    conn = _Conn(catalogue_pairs=[("SATS", "ECHO")])
+    repair_renamed_labels(conn)
+    [(q, _p)] = _copies(conn)
+    assert "ON CONFLICT (symbol, bar_date) DO NOTHING" in q
+    assert not [s for s, _ in conn.statements if s.startswith("DELETE")]
+    assert not [s for s, _ in conn.statements if s.startswith("UPDATE raw_market.stock_daily")]
+
+
+def test_the_copy_starts_after_the_successors_last_bar_before_the_handover() -> None:
+    """ECHO's 2021 bars are Echo Global Logistics. Starting after the successor's
+    last bar *before* the handover leaves them alone and leaves SATS's matching
+    2021 sessions under SATS, instead of filling the gaps around them."""
+    conn = _Conn(catalogue_pairs=[("SATS", "ECHO")])
+    repair_renamed_labels(conn)
+    [(q, _p)] = _copies(conn)
+    assert "d.bar_date <= dl.last_bar" in q, "nothing after the handover is old history"
+    assert "a.symbol = %(alive)s AND a.bar_date <= dl.last_bar" in q
+
+
+def test_a_spent_budget_copies_nothing() -> None:
+    conn = _Conn(catalogue_pairs=[("SATS", "ECHO")], copy_hits={"SATS": 1148})
+    assert repair_renamed_labels(conn, budget_sec=-1.0) == {}
+    assert not _copies(conn)
 
 
 def test_the_two_moves_commit_separately() -> None:

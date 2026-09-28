@@ -585,6 +585,78 @@ def test_enqueue_corporate() -> None:
     assert result["jobs"][0]["payload"] == {"from": "2024-06-13", "to": "2024-08-19"}
 
 
+def _split_restate(monkeypatch, rows, *, noted=frozenset()):
+    marks: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(daily_mod, "load_split_restatements", lambda conn, *, as_of: list(rows))
+    monkeypatch.setattr(daily_mod, "load_voids_by_prefix", lambda conn, prefix, max_age_days: set(noted))
+    monkeypatch.setattr(
+        daily_mod, "record_symbol_void", lambda conn, sym, dtype, note=None: marks.append((sym, dtype, note))
+    )
+    return marks
+
+
+def test_corporate_re_pulls_the_bars_a_split_left_unadjusted(monkeypatch) -> None:
+    """2026-09-28: APH split 2:1 ex 2026-09-03 and its 295 earlier bars still
+    carried the pre-split price, because stock_daily is adjusted as of the pull
+    and nothing pulled again. The series halved overnight."""
+    marks = _split_restate(
+        monkeypatch, [("APH", date(2021, 9, 9), date(2026, 9, 2), date(2026, 9, 3))]
+    )
+    conn = _DailyConn(["MSFT"])
+    r = enqueue_slot(conn, "corporate", target_date=date(2026, 9, 28), watchlist_symbols=["MSFT"])
+    stock = [j for j in r["jobs"] if j["kind"] == "stock_daily"]
+    assert [j["payload"] for j in stock] == [{"symbol": "APH", "from": "2021-09-09", "to": "2026-09-02"}]
+    assert marks == [("APH", "split_restate:2026-09-03", "queued by split-restate")]
+
+
+def test_a_queued_restatement_waits_for_its_mark_to_age(monkeypatch) -> None:
+    """A re-pull the vendor answers unadjusted again must not queue every night."""
+    marks = _split_restate(
+        monkeypatch,
+        [("APH", date(2021, 9, 9), date(2026, 9, 2), date(2026, 9, 3))],
+        noted={("APH", "split_restate:2026-09-03")},
+    )
+    conn = _DailyConn(["MSFT"])
+    r = enqueue_slot(conn, "corporate", target_date=date(2026, 9, 28), watchlist_symbols=["MSFT"])
+    assert not [j for j in r["jobs"] if j["kind"] == "stock_daily"]
+    assert marks == []
+
+
+def test_the_restatement_query_judges_bars_by_when_they_were_pulled() -> None:
+    """A bar pulled after the ex-date is already adjusted; only earlier pulls are torn."""
+    from bifrost_market_data.scheduler.daily import load_split_restatements
+
+    seen: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen.append((" ".join(sql.split()), params))
+
+        def fetchall(self):
+            return [("MNST", date(2021, 9, 9), date(2026, 8, 8), date(2026, 8, 11))]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            return None
+
+    rows = load_split_restatements(_Conn(), as_of=date(2026, 9, 28))
+    assert rows == [("MNST", date(2021, 9, 9), date(2026, 8, 8), date(2026, 8, 11))]
+    q, params = seen[0]
+    assert "s.bar_date < c.ex_date" in q
+    assert "s.fetched_at < (c.ex_date::timestamp AT TIME ZONE 'America/New_York')" in q
+    assert "c.action_type = 'split'" in q
+    assert params[1] == date(2026, 9, 28)
+
+
 def test_enqueue_option_refresh_batch() -> None:
     conn = _DailyConn()
     symbols = ["AAPL", "MSFT", "TSLA", "NVDA"]
