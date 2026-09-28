@@ -225,6 +225,14 @@ PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并
 - 新发现：`option-depth` 只看每个标的**最早**一根 bar 够不够深，中间整月为空看不见（coverage `at_target` 同样按跨度）。实测 11 个标的有中段空月：BKNG 11、FISV 9、KLAC 8（2025-10～2026-05）、NOW 6、FAST / MNST / NFLX 各 4、B 3、CVNA / IBKR 各 2、AXTI 1。前 8 个是拆股（空月都在拆股前，规划早于 0.57.0 的行权价还原修复，之后没有重新规划）；B、FISV 是改代码。已对空月及其后 3 个到期月入队 100 个 `option_backfill_plan`，派生约 6.3 万个作业；AXTI 那个月 24 个合约全在 ±30% 带外，属实际无数据。
 - 预防（Plugin 0.58.0，Owner 选「两处都修」）：`plan_option_depth` 由 `option-depth` 槽与 doctor 共用。槽除了原来的「最早 bar 不够深」，也规划最早 bar 之后的整月空洞（每个空月规划它和其后 `dte` 天内的到期月）；每个规划过的到期月在 `ops_jobs.symbol_source_void` 记一行 `option_plan:YYYY-MM`，30 天内每周例行与自愈都不重复拉取，`force` 例外。doctor 新增 `depth_holes:option_daily`：有未规划空月即 warn，处方是 `option-depth` 槽；已规划仍空的月份（如 AXTI）只写进 ok 的说明，不成为常驻告警。空月读法是逐月常量边界语句（分区在计划期裁剪，650 名 24 个月约 0.2 s；`generate_series` 连接写法不能裁剪，实测 35 s）。上线后首轮：doctor 找出 14 个标的（多于上面手工统计的 11 个），执行一次 `option-depth` 规划 52 个标的共 682 个到期月（含近年上市、深度不足的名字），复查 `depth_holes` 为 ok：60 个空月全部已规划。
 
+### 2026-09-28 浅日与 IV 历史（Plugin 0.59.0 · Research 0.148.0，Owner 选「重算并预防」）
+
+- **浅日**：08-17～08-21 每天有约 650 个标的，和前后一样，所以按「不同标的数」判的窄日看不见；但其中约 230 个只有当周到期的合约，Research 的 ATM IV（到期 5～90 天）没法给它们定价，这五天 ATM IV 只有约 390 个标的。已对五天执行 `enqueue-slot option-bars force`（约 44.9 万个作业）。
+- **预防（插件 0.59.0）**：`DatasetContract.narrow_filter`；`option_daily` 的窄日广度只数有 `(expiry - bar_date) BETWEEN 5 AND 90` 的行（与 `iv_solver.DTE_MIN..DTE_MAX` 一致）。主库实测 81 天 3.7 s；上线后 doctor 判出 10 个窄日（08-17～21、08-31～09-04），09-14～18（比值约 0.9）不判。自愈的 force 处方与已排队作业按 payload 去重。
+- **IV 历史滞后**：波动率槽每天只重算 3 个交易日、周日回填 90 天，插件晚于这个窗口补进来的 raw 不会进 ATM IV / 分位数 / VRP。实测 2025-03-12：raw 588 个标的、ATM IV 487 个，重算后 546 个；两年 500 个交易日里 439 个低于 raw 的 0.85。另外 09-27 22:00 的周日回填 run 被 00:07 的 Research 0.147.0 发布打断成孤儿（写了 max pain，没写 ATM IV），已终止。
+- **预防（Research 0.148.0）**：`engines/volatility/iv_coverage_heal.py`，挂在周日 `vol_weekly_backfill` 之后。逐日比较「有 ATM IV 的标的数」与「raw 有 5～90 天到期合约的标的数」，低于 0.85 且 raw 在特征之后写过的交易日，重算 ATM IV + PCR；再从最早一天起逐日重算 IV 分位数与 VRP（两者都按前几天已存的值排名）。重算后仍低的交易日不再重复处理。
+- **一次性全量重算**：队列排空后以 `research-iv-history-repair` Job 跑 `--derive-only --apply`（ATM IV → 分位数 → VRP → fwd_ret_20d → canonical PnL，逐日从最老到最新）。
+
 ## 3. Owner 待决事项
 
 1. ~~期权回填范围~~ — 已定（2026-09-08，回填 A，见 P4）。
