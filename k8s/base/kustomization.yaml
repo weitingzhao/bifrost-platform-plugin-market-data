@@ -31,4 +31,4 @@ labels:
 images:
   - name: bifrost-market-data
     newName: 192.168.10.73:30500/bifrost-market-data
-    newTag: "0.66.0"
+    newTag: "0.67.0"
