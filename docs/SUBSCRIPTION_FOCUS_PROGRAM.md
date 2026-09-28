@@ -223,6 +223,7 @@ PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并
 
 - `option_daily` 08-24～08-26 已补满（约 655 个标的）。08-27～09-04 七个窄日（约 425 个）原计划等自愈，但自愈 cron 是周二至周六，周一 00:45 不跑，每轮又只开 3 个处方，要到周三才补完；已直接对七天执行 `enqueue-slot option-bars force`，约 62.6 万个作业。
 - 新发现：`option-depth` 只看每个标的**最早**一根 bar 够不够深，中间整月为空看不见（coverage `at_target` 同样按跨度）。实测 11 个标的有中段空月：BKNG 11、FISV 9、KLAC 8（2025-10～2026-05）、NOW 6、FAST / MNST / NFLX 各 4、B 3、CVNA / IBKR 各 2、AXTI 1。前 8 个是拆股（空月都在拆股前，规划早于 0.57.0 的行权价还原修复，之后没有重新规划）；B、FISV 是改代码。已对空月及其后 3 个到期月入队 100 个 `option_backfill_plan`，派生约 6.3 万个作业；AXTI 那个月 24 个合约全在 ±30% 带外，属实际无数据。
+- 预防（Plugin 0.58.0，Owner 选「两处都修」）：`plan_option_depth` 由 `option-depth` 槽与 doctor 共用。槽除了原来的「最早 bar 不够深」，也规划最早 bar 之后的整月空洞（每个空月规划它和其后 `dte` 天内的到期月）；每个规划过的到期月在 `ops_jobs.symbol_source_void` 记一行 `option_plan:YYYY-MM`，30 天内每周例行与自愈都不重复拉取，`force` 例外。doctor 新增 `depth_holes:option_daily`：有未规划空月即 warn，处方是 `option-depth` 槽；已规划仍空的月份（如 AXTI）只写进 ok 的说明，不成为常驻告警。空月读法是逐月常量边界语句（分区在计划期裁剪，650 名 24 个月约 0.2 s；`generate_series` 连接写法不能裁剪，实测 35 s）。上线后首轮：doctor 找出 14 个标的（多于上面手工统计的 11 个），执行一次 `option-depth` 规划 52 个标的共 682 个到期月（含近年上市、深度不足的名字），复查 `depth_holes` 为 ok：60 个空月全部已规划。
 
 ## 3. Owner 待决事项
 
