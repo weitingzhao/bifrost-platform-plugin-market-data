@@ -215,7 +215,14 @@ hotfix ConfigMap 盘点（只盘点，撤不撤由 Owner 决定）：
 
 Owner 决定（2026-09-28）：两个插件孤儿已删；DEV（api-monitor、api-account）与 STG（api-monitor）撤掉挂载并删除 ConfigMap——先在 `:stg` 镜像里核对三个文件与 repo HEAD 的 sha256 一致（core 0.25.0），撤后 `/health`、`/status` 200，三个环境持仓数与字段一致。**PROD 的两个 hotfix 随 Owner 下一次 PROD 发布一起撤**（上文 `status.py` 替换同批）。
 
----
+PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并删 ConfigMap（撤后 `/health` 200、`/status` 持仓数不变），删掉因旧路径失败的 `db-init-prod` Job，再跑 `bifrost-deliver-prod`（17 task）与 `bifrost-deliver-platform-prod`（10 task），全部成功。核对：Argo `bifrost-prod` / `bifrost-platform-prod` Synced Healthy；core 0.25.0；`/status` 无 `polygon_ws` / `redis_massive`；`db-init-prod` 成功；daemon 副本数与 observe-safe 不变；PROD 新 role token 各得其角色，旧占位值与 dev 默认值均未认证。集群里已无任何 hotfix ConfigMap。随后执行了上面的运行时删除清单（先确认 0 引用），DEV / STG / PROD `api-market` 与插件 API 均 200。
+
+### 2026-09-28 数据状态复核
+
+面板显示 Draining 的含义：`husbandry` 在 `schedule=on_plan`（无 missed / due 槽）且队列有活跃作业时就是 draining，本身不是故障。
+
+- `option_daily` 08-24～08-26 已补满（约 655 个标的）。08-27～09-04 七个窄日（约 425 个）原计划等自愈，但自愈 cron 是周二至周六，周一 00:45 不跑，每轮又只开 3 个处方，要到周三才补完；已直接对七天执行 `enqueue-slot option-bars force`，约 62.6 万个作业。
+- 新发现：`option-depth` 只看每个标的**最早**一根 bar 够不够深，中间整月为空看不见（coverage `at_target` 同样按跨度）。实测 11 个标的有中段空月：BKNG 11、FISV 9、KLAC 8（2025-10～2026-05）、NOW 6、FAST / MNST / NFLX 各 4、B 3、CVNA / IBKR 各 2、AXTI 1。前 8 个是拆股（空月都在拆股前，规划早于 0.57.0 的行权价还原修复，之后没有重新规划）；B、FISV 是改代码。已对空月及其后 3 个到期月入队 100 个 `option_backfill_plan`，派生约 6.3 万个作业；AXTI 那个月 24 个合约全在 ±30% 带外，属实际无数据。
 
 ## 3. Owner 待决事项
 
