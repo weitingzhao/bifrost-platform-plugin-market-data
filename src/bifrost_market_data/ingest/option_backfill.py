@@ -68,11 +68,6 @@ def _closes(conn: Any, underlying: str, start: date, end: date) -> tuple[list[da
     return dates, values
 
 
-def _close_on_or_before(dates: list[date], values: list[float], when: date) -> float | None:
-    idx = bisect.bisect_right(dates, when)
-    return values[idx - 1] if idx else None
-
-
 def _splits_after(conn: Any, underlying: str, since: date) -> list[tuple[date, float]]:
     """``(ex_date, shares after per share before)`` for splits on or after ``since``."""
     out: list[tuple[date, float]] = []
@@ -102,20 +97,40 @@ def _splits_after(conn: Any, underlying: str, since: date) -> list[tuple[date, f
     return out
 
 
-def _unadjust_factor(splits: list[tuple[date, float]], expiry: date) -> float:
-    """What turns an adjusted close into the price a contract expiring then was struck in.
+def _unadjust_factor(splits: list[tuple[date, float]], when: date) -> float:
+    """What turns an adjusted close on ``when`` into the price that traded that day.
 
-    ``stock_daily`` is split-adjusted all the way back; a contract's strike is
-    not, unless it was still open on the ex-date and the exchange adjusted it.
+    ``stock_daily`` is split-adjusted all the way back; strikes are as traded.
     KLAC split ten for one on 2026-06-12, so its October 2024 closes read ~$70
     against strikes near $700, and every one of the 124–198 contracts a month
     fell outside the ±30% band: two years planned, nothing enqueued.
     """
     factor = 1.0
     for ex, ratio in splits:
-        if expiry < ex:
+        if when < ex:
             factor *= ratio
     return factor
+
+
+def _spots_over(
+    dates: list[date], values: list[float], splits: list[tuple[date, float]], start: date, end: date
+) -> list[float]:
+    """As-traded closes over a contract's priced window; the last one before it if none.
+
+    A contract is kept when its strike is near the money on **any** day it is
+    priced, not only the first. Measured 2026-09-28 on CRWD: banded on the
+    window's first close, June 2026 expiries kept strikes up to 572.5 while the
+    stock rallied from ~424 to ~780, so 762 of the month's 1,208 contracts —
+    the at-the-money ones by June — were never pulled. And a window that spans a
+    split holds both scales: the vendor lists a contract open on the ex-date
+    under its old ticker too (O:CRWD260717C00800000, 22 pre-split bars) as well
+    as the adjusted one, and judging it on the post-split close alone dropped
+    every pre-split bar of July–September expiries.
+    """
+    lo = bisect.bisect_left(dates, start)
+    hi = bisect.bisect_right(dates, end)
+    idx = range(lo, hi) if hi > lo else range(lo - 1, lo) if lo else range(0)
+    return [values[i] * _unadjust_factor(splits, dates[i]) for i in idx]
 
 
 async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Mapping[str, Any]:
@@ -156,7 +171,7 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
             dates, raw = _closes(conn, symbol, window_start, expiry_lte)
             values = [v * multiplier for v in raw]
             spot_source = f"{symbol}x{multiplier:g}"
-    splits = _splits_after(conn, storage, expiry_gte)
+    splits = _splits_after(conn, storage, window_start)
 
     today = date.today()
     specs: list[tuple[str, dict[str, Any], int, int]] = []
@@ -174,12 +189,10 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         win_to = min(expiry, today)
         if win_to < win_from:
             continue
-        spot = _close_on_or_before(dates, values, win_from)
-        if spot is not None:
-            spot *= _unadjust_factor(splits, expiry)
-        if spot is None:
+        spots = [s for s in _spots_over(dates, values, splits, win_from, win_to) if s > 0]
+        if not spots:
             no_spot += 1
-        elif strike is not None and spot > 0 and abs(strike - spot) / spot > strike_pct:
+        elif strike is not None and all(abs(strike - s) / s > strike_pct for s in spots):
             out_of_band += 1
             continue
         specs.append(

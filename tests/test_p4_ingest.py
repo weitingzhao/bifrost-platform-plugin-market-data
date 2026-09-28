@@ -147,7 +147,8 @@ async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_pri
 
     Its October 2024 closes read ~$70 against strikes near $700, and all 124
     contracts that month fell outside the band. A contract still open on the
-    ex-date was adjusted by the exchange and is judged on the adjusted close.
+    ex-date was adjusted by the exchange: after it, the adjusted close is the
+    price it trades against.
     """
     expired = date(2024, 10, 18)
     after_split = date(2026, 7, 17)
@@ -163,7 +164,7 @@ async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_pri
         }
     )
     conn = _CloseConn(
-        [(expired - timedelta(days=90), 70.0), (after_split - timedelta(days=90), 175.0)],
+        [(expired - timedelta(days=90), 70.0), (date(2026, 6, 15), 175.0)],
         splits=[(date(2026, 6, 12), 1, 10)],
     )
     result = await handle_option_backfill_plan(
@@ -179,6 +180,68 @@ async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_pri
     assert "O:KLAC241018C00070000" not in queued
     assert "O:KLAC260717C00180000" in queued
     assert result["contracts_kept"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_strike_near_the_money_on_any_priced_day_is_kept() -> None:
+    """CRWD 2026-06 expiries: ~424 when the window opened, ~780 when it closed.
+
+    Banded on the first close, the band ended at 551 and the June at-the-money
+    strikes were never pulled. A strike far from every close is still dropped.
+    """
+    expiry = date(2026, 6, 18)
+    start = expiry - timedelta(days=90)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [
+                _contract("O:CRWD260618C00450000", expiry.isoformat(), 450.0),
+                _contract("O:CRWD260618C00760000", expiry.isoformat(), 760.0),
+                _contract("O:CRWD260618C01200000", expiry.isoformat(), 1200.0),
+            ],
+            "pages": 1,
+        }
+    )
+    closes = [(start, 106.0), (start + timedelta(days=45), 135.0), (expiry - timedelta(days=5), 195.0)]
+    conn = _CloseConn(closes, splits=[(date(2026, 7, 2), 1, 4)])
+    result = await handle_option_backfill_plan(
+        make_job("option_backfill_plan", {"underlying": "CRWD", "expiry_gte": "2026-06-01", "expiry_lte": "2026-06-30"}),
+        client,
+        conn,
+    )
+    queued = str(next(st for st in conn.statements if "job_ingest" in st[0])[1])
+    assert "O:CRWD260618C00450000" in queued
+    assert "O:CRWD260618C00760000" in queued, "at the money when June came"
+    assert "O:CRWD260618C01200000" not in queued
+    assert result["out_of_strike_band"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_window_across_a_split_keeps_both_scales() -> None:
+    """The vendor lists a contract open on the ex-date under its old ticker as
+    well: O:CRWD260717C00800000 carries 22 pre-split bars. Judged on the
+    post-split close alone, every July–September pre-split bar was dropped."""
+    expiry = date(2026, 7, 17)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [
+                _contract("O:CRWD260717C00800000", expiry.isoformat(), 800.0),
+                _contract("O:CRWD260717C00200000", expiry.isoformat(), 200.0),
+                _contract("O:CRWD260717C00450000", expiry.isoformat(), 450.0),
+            ],
+            "pages": 1,
+        }
+    )
+    closes = [(date(2026, 4, 20), 190.0), (date(2026, 6, 30), 190.0), (date(2026, 7, 6), 199.0)]
+    conn = _CloseConn(closes, splits=[(date(2026, 7, 2), 1, 4)])
+    await handle_option_backfill_plan(
+        make_job("option_backfill_plan", {"underlying": "CRWD", "expiry_gte": "2026-07-01", "expiry_lte": "2026-07-31"}),
+        client,
+        conn,
+    )
+    queued = str(next(st for st in conn.statements if "job_ingest" in st[0])[1])
+    assert "O:CRWD260717C00800000" in queued, "priced before the split, against ~760"
+    assert "O:CRWD260717C00200000" in queued, "priced after it, against ~199"
+    assert "O:CRWD260717C00450000" not in queued, "near neither"
 
 
 @pytest.mark.asyncio
