@@ -62,6 +62,9 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         # can be created on this path rather than waiting for a superuser run.
         create_coverage_sample(cur)
         tune_job_ingest_autovacuum(cur)
+        # After migrate_stock_financials_split, which creates the table on an
+        # empty database.
+        tune_short_volume_autovacuum(cur)
         # raw_market.ticker is owned by the plugin's role (pg_tables.tableowner =
         # bifrost), unlike the tables add_financials_filing_date has to skip, so
         # this ALTER runs on the path the cluster actually uses.
@@ -134,6 +137,7 @@ def apply_ddl(conn: _Connection) -> None:
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
         add_financials_filing_date(cur)
+        tune_short_volume_autovacuum(cur)
         retire_data_ops_compat_schema(cur)
         migrate_option_snapshot_observed_time(cur)
         migrate_corporate_action_identity(cur)
@@ -734,6 +738,52 @@ def tune_job_ingest_autovacuum(cur: _Cursor) -> None:
             autovacuum_vacuum_threshold = 2000,
             autovacuum_analyze_scale_factor = 0.02,
             autovacuum_vacuum_cost_delay = 0
+        )
+        """
+    )
+
+
+#: As ``pg_class.reloptions`` stores it once the ALTER below has run.
+SHORT_VOLUME_AUTOVACUUM_OPTION = "autovacuum_vacuum_insert_scale_factor=0.01"
+
+
+def tune_short_volume_autovacuum(cur: _Cursor) -> None:
+    """Vacuum short_volume on its daily inserts, not on a fifth of its history.
+
+    Idempotent, on both paths, for the reason ``tune_job_ingest_autovacuum``
+    gives. The plugin's role owns the table (``pg_class.relowner`` = bifrost).
+
+    The table only grows: about 15,000 rows a session onto 7M. An insert-driven
+    autovacuum wakes at 0.2 of the table, about 1.4M rows, so it last ran on
+    2026-09-09 and the visibility map went stale behind every session after
+    that. Index-only reads of recent days then fetch the heap row by row:
+    measured 2026-09-28, the doctor's breadth read over 81 days made 442,146
+    heap fetches through ``(period_date, symbol)`` and took 26s, against a 30s
+    budget, on a CPU-throttled primary. At 0.01 the trigger is about 70,000
+    inserted rows, every four or five sessions.
+
+    Owner decision 2026-09-28: the insert scale factor only.
+
+    The catalog is asked first, as ``add_ticker_delisted_utc`` does. SET takes
+    SHARE UPDATE EXCLUSIVE, which queues behind any vacuum or analyze of the
+    table, and the more often autovacuum runs here the likelier a deploy meets
+    one. The role's lock_timeout of 5s then fails the Job. So only the deploy
+    that changes the option takes the lock.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM pg_class
+        WHERE oid = 'raw_market.short_volume'::regclass
+          AND %s = ANY(coalesce(reloptions, '{}'::text[]))
+        """,
+        (SHORT_VOLUME_AUTOVACUUM_OPTION,),
+    )
+    if cur.fetchone() is not None:
+        return
+    cur.execute(
+        """
+        ALTER TABLE raw_market.short_volume SET (
+            autovacuum_vacuum_insert_scale_factor = 0.01
         )
         """
     )
