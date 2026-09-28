@@ -192,11 +192,11 @@ def test_option_daily_breadth_counts_only_the_expiries_atm_iv_reads(wired, monke
 
     monkeypatch.setattr(cont, "per_day_breadth", fake_breadth)
     out = _continuity_findings(None, today=TODAY, session=sessions[-1])
-    assert asked["raw_market.option_daily"] == "expiry BETWEEN bar_date + 5 AND bar_date + 90"
+    assert asked["raw_market.option_daily"] == "(expiry - bar_date) BETWEEN 5 AND 90"
     assert asked["raw_market.stock_daily"] is None
     [f] = [f for f in out if f.id == f"continuity:option_daily:{sessions[20]}"]
     assert f.title == "Narrow session: option_daily"
-    assert "420 symbols with rows where expiry BETWEEN bar_date + 5 AND bar_date + 90" in f.detail
+    assert "420 symbols with rows where (expiry - bar_date) BETWEEN 5 AND 90" in f.detail
 
 
 def test_breadth_where_is_added_to_the_count() -> None:
@@ -256,9 +256,10 @@ def test_breadth_bounds_are_dates_the_planner_can_prune_on() -> None:
     assert "current_date" not in sql
     assert "bar_date >= %s AND bar_date < %s" in sql
     assert params == (date(2026, 7, 9), date(2026, 9, 29))
-    # Pairs first, then a count: count(DISTINCT) sorts every row it reads.
-    assert "count(DISTINCT" not in sql
-    assert "SELECT DISTINCT bar_date::date AS d, underlying" in sql
+    # count(DISTINCT), not distinct pairs hashed then counted: on stock_daily
+    # every row is its own pair and the misestimated hash ran past 400s.
+    assert "count(DISTINCT underlying)" in sql
+    assert "SELECT DISTINCT" not in sql
 
 
 def test_an_unread_breadth_is_unprobed_not_a_clean_bill(breadth) -> None:

@@ -202,9 +202,13 @@ def per_day_breadth(
     ``jit_inline_above_cost``: 10-16s of JIT compilation for a 57-row answer,
     32.5s in all against the 30s budget on a CPU-bound primary.
 
-    Distinct pairs first, then a count. ``count(DISTINCT)`` sorts every row,
-    2.66M on option_daily, and sorts each day's group again in the leader; the
-    pairs are ~36,000, which each worker can hash.
+    Keep ``count(DISTINCT)``, although it sorts every row it reads. Rewritten as
+    distinct (day, symbol) pairs and then a count, option_daily hashed its
+    36,000 pairs out of 2.66M rows, but stock_daily's key is (symbol, bar_date),
+    so every row is its own pair. The planner estimated 69,000 groups, met
+    699,000, and the spilling hash ran past 400s. The old sort takes 5-13s on
+    the same rows. A sort costs the same whatever the estimate says, and the
+    estimate is what these tables cannot be trusted for.
     """
     until = today or date.today()
     since = until - timedelta(days=int(window_days))
@@ -213,12 +217,9 @@ def per_day_breadth(
             cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
             cur.execute(
                 f"""
-                SELECT d, count({symbol_column})::bigint AS n
-                FROM (
-                    SELECT DISTINCT {date_column}::date AS d, {symbol_column}
-                    FROM {table}
-                    WHERE {date_column} >= %s AND {date_column} < %s{f" AND ({where})" if where else ""}
-                ) pairs
+                SELECT {date_column}::date AS d, count(DISTINCT {symbol_column})::bigint AS n
+                FROM {table}
+                WHERE {date_column} >= %s AND {date_column} < %s{f" AND ({where})" if where else ""}
                 GROUP BY 1 ORDER BY 1
                 """,
                 (since, until + timedelta(days=1)),

@@ -500,12 +500,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         refill=Refill("slot", "option-bars", why="near-spot contracts for the named session, at the universe scope"),
         refill_narrow=True,
         # The expiries Research's ATM IV solves from (iv_solver DTE_MIN..DTE_MAX).
-        # Spelled as two comparisons on expiry, not as a range on the difference:
-        # the planner has no statistics for an expression and gave
-        # (expiry - bar_date) BETWEEN 5 AND 90 its default 0.5% selectivity --
-        # 18,800 rows estimated against 2.66M read on 2026-09-28 -- so the count
-        # sorted millions of rows it could have hashed. The same rows either way.
-        narrow_filter="expiry BETWEEN bar_date + 5 AND bar_date + 90",
+        narrow_filter="(expiry - bar_date) BETWEEN 5 AND 90",
     ),
     # SEC filings as text (0.37.0). Universe tier because the Owner scoped the
     # collection to Research's names (2026-09-23), though the 8-K pulls are
