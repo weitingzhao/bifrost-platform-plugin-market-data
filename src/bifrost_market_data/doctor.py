@@ -611,6 +611,7 @@ def _continuity_findings(
         first, last = present[0], present[-1]
         absent = [d for d in gaps if first <= d <= last]
         narrow: dict[date, tuple[int, int]] = {}
+        breadth_unread = False
         if c.refill_narrow and c.symbol_column:
             breadth = per_day_breadth(
                 conn,
@@ -618,9 +619,11 @@ def _continuity_findings(
                 str(c.date_column),
                 str(c.symbol_column),
                 window_days=int(window_days) + NARROW_BASELINE_LEAD_DAYS,
+                today=today,
                 statement_timeout=statement_timeout,
                 where=c.narrow_filter,
             )
+            breadth_unread = breadth is None
             on_calendar = set(calendar)
             series = [(d, n) for d, n in breadth or [] if d in on_calendar]
             cutoff = session or today
@@ -628,7 +631,27 @@ def _continuity_findings(
                 if start <= day < cutoff:
                     narrow[day] = (n, baseline)
         name = c.dataset.replace("raw_market.", "")
+        # A cancelled breadth read is not a window with no narrow sessions. It
+        # used to fall through to the clean bill below and say "none narrow":
+        # on 2026-09-28 option_daily and short_volume timed out on a CPU-bound
+        # primary and both read ok.
+        if breadth_unread:
+            out.append(
+                Finding(
+                    f"continuity:{name}",
+                    c.refill.target,
+                    "warn",
+                    f"Continuity: {name}",
+                    f"every session in {window_days}d, none narrow",
+                    f"{len(present)} sessions, {len(absent)} missing; narrow unprobed",
+                    f"The per-session symbol count for {name} could not be read, so no "
+                    "session was cleared of being narrow and none was prescribed as one. "
+                    "Missing sessions are judged separately. See API log.",
+                )
+            )
         if not absent and not narrow:
+            if breadth_unread:
+                continue
             out.append(
                 Finding(
                     f"continuity:{name}",

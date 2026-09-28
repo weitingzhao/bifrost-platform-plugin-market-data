@@ -47,8 +47,14 @@ def wired(monkeypatch: pytest.MonkeyPatch):
             return gaps[table]
         return []
 
+    # A steady breadth, so a test about presence is not also a test about a
+    # failed breadth read -- which is a finding of its own now.
+    def flat_breadth(conn: Any, table: str, date_col: str, sym_col: str, **kw: Any):
+        return [(d, 340) for d in sessions if d not in (gaps.get(table) or [])]
+
     monkeypatch.setattr(cal, "expected_trading_days", fake_days)
     monkeypatch.setattr(cont, "missing_sessions", fake_missing)
+    monkeypatch.setattr(cont, "per_day_breadth", flat_breadth)
     return sessions, gaps
 
 
@@ -186,11 +192,11 @@ def test_option_daily_breadth_counts_only_the_expiries_atm_iv_reads(wired, monke
 
     monkeypatch.setattr(cont, "per_day_breadth", fake_breadth)
     out = _continuity_findings(None, today=TODAY, session=sessions[-1])
-    assert asked["raw_market.option_daily"] == "(expiry - bar_date) BETWEEN 5 AND 90"
+    assert asked["raw_market.option_daily"] == "expiry BETWEEN bar_date + 5 AND bar_date + 90"
     assert asked["raw_market.stock_daily"] is None
     [f] = [f for f in out if f.id == f"continuity:option_daily:{sessions[20]}"]
     assert f.title == "Narrow session: option_daily"
-    assert "420 symbols with rows where (expiry - bar_date) BETWEEN 5 AND 90" in f.detail
+    assert "420 symbols with rows where expiry BETWEEN bar_date + 5 AND bar_date + 90" in f.detail
 
 
 def test_breadth_where_is_added_to_the_count() -> None:
@@ -217,6 +223,62 @@ def test_breadth_where_is_added_to_the_count() -> None:
     assert "AND (x > 1)" in seen[-1]
     cont.per_day_breadth(_Conn(), "raw_market.stock_daily", "bar_date", "symbol", window_days=60)
     assert "AND (" not in seen[-1]
+
+
+def test_breadth_bounds_are_dates_the_planner_can_prune_on() -> None:
+    """2026-09-28: ``current_date - n`` with no upper bound kept all eighteen
+    option_daily partitions in the plan -- the DEFAULT one's index was read for
+    nothing and the cost crossed the JIT inlining threshold, 32.5s in all."""
+    seen: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            seen.append((sql, params))
+
+        def fetchall(self):
+            return [(date(2026, 9, 25), 650)]
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    out = cont.per_day_breadth(
+        _Conn(), "raw_market.option_daily", "bar_date", "underlying", window_days=81, today=date(2026, 9, 28)
+    )
+    assert out == [(date(2026, 9, 25), 650)]
+    sql, params = seen[-1]
+    assert "current_date" not in sql
+    assert "bar_date >= %s AND bar_date < %s" in sql
+    assert params == (date(2026, 7, 9), date(2026, 9, 29))
+    # Pairs first, then a count: count(DISTINCT) sorts every row it reads.
+    assert "count(DISTINCT" not in sql
+    assert "SELECT DISTINCT bar_date::date AS d, underlying" in sql
+
+
+def test_an_unread_breadth_is_unprobed_not_a_clean_bill(breadth) -> None:
+    """2026-09-28 the breadth reads timed out and the finding still said "none narrow"."""
+    sessions, _gaps, series = breadth
+    series["raw_market.short_volume"] = None
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1]) if "short_volume" in f.id]
+    assert [(f.id, f.severity) for f in out] == [("continuity:short_volume", "warn")]
+    assert "narrow unprobed" in out[0].actual
+    assert "none narrow" not in out[0].actual
+    assert out[0].fix is None
+
+
+def test_an_unread_breadth_is_named_beside_the_missing_sessions(breadth) -> None:
+    sessions, gaps, series = breadth
+    gaps["raw_market.option_daily"] = [sessions[20]]
+    series["raw_market.option_daily"] = None
+    out = [f for f in _continuity_findings(None, today=TODAY, session=sessions[-1]) if "option_daily" in f.id]
+    assert [f.id for f in out] == ["continuity:option_daily", f"continuity:option_daily:{sessions[20]}"]
+    assert out[0].severity == "warn" and "1 missing; narrow unprobed" in out[0].actual
 
 
 def test_a_step_up_in_breadth_is_not_narrow(breadth) -> None:

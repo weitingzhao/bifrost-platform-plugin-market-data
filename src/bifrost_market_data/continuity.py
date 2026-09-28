@@ -176,6 +176,7 @@ def per_day_breadth(
     symbol_column: str,
     *,
     window_days: int,
+    today: date | None = None,
     statement_timeout: str = "60s",
     where: str | None = None,
 ) -> list[tuple[date, int]] | None:
@@ -190,18 +191,37 @@ def per_day_breadth(
     are holes no refill can close, prescribed every night until they age out.
     Measured 2026-09-27 over sixty days: 2.7s on option_daily, under 5s on the
     others.
+
+    Both bounds are dates computed here, not ``current_date`` on the server.
+    The planner can only prune partitions it can see the bounds of: with
+    ``current_date - n`` and no upper bound it kept all eighteen option_daily
+    partitions in the plan, pruned at run time, and costed them all. On
+    2026-09-28 that meant a pass over the DEFAULT partition's index (167 MB, the
+    2024-09..2025-07 year, holding nothing in the window but unprunable because
+    an open range reaches past the last named partition), and a plan cost over
+    ``jit_inline_above_cost``: 10-16s of JIT compilation for a 57-row answer,
+    32.5s in all against the 30s budget on a CPU-bound primary.
+
+    Distinct pairs first, then a count. ``count(DISTINCT)`` sorts every row,
+    2.66M on option_daily, and sorts each day's group again in the leader; the
+    pairs are ~36,000, which each worker can hash.
     """
+    until = today or date.today()
+    since = until - timedelta(days=int(window_days))
     try:
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL statement_timeout = '{statement_timeout}'")
             cur.execute(
                 f"""
-                SELECT {date_column}::date AS d, count(DISTINCT {symbol_column})::bigint AS n
-                FROM {table}
-                WHERE {date_column} >= current_date - %s{f" AND ({where})" if where else ""}
+                SELECT d, count({symbol_column})::bigint AS n
+                FROM (
+                    SELECT DISTINCT {date_column}::date AS d, {symbol_column}
+                    FROM {table}
+                    WHERE {date_column} >= %s AND {date_column} < %s{f" AND ({where})" if where else ""}
+                ) pairs
                 GROUP BY 1 ORDER BY 1
                 """,
-                (int(window_days),),
+                (since, until + timedelta(days=1)),
             )
             rows = _rows(cur)
         return [(r[0], int(r[1] or 0)) for r in rows if r and r[0] is not None]
