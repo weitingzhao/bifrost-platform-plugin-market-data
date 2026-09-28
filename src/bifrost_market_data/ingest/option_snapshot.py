@@ -246,6 +246,15 @@ async def handle_option_snapshot(job: JobRow, client: Any, conn: Any) -> Mapping
                 "underlying": storage,
             }
 
+    # Nothing has been written yet, so end whatever the guard's read opened
+    # (each job gets a fresh connection, so that read is the only thing in it).
+    # The download below pages through the whole chain, and a transaction left
+    # open across it trips the role's idle_in_transaction_session_timeout (15s).
+    # On 2026-09-28, SPX, SPY and MU lost their connection at the first write
+    # after the download and failed all three attempts, even on an idle
+    # primary. QQQ's shorter chain got through.
+    conn.rollback()
+
     # The near-the-money window rides in the payload and survives cursor
     # continuations, which copy every key but the cursor itself.
     data = await client.fetch_options_snapshot(

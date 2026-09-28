@@ -390,3 +390,34 @@ async def test_an_unrenamed_symbol_keeps_the_label_it_was_asked_under(chain_on) 
     )
     assert out["underlying"] == "BRK.B"
 
+
+
+@pytest.mark.asyncio
+async def test_no_transaction_is_held_open_across_the_chain_download(monkeypatch) -> None:
+    """2026-09-28: SPX, SPY and MU paged past the role's 15s idle-in-transaction
+    limit with the guard's read still open, and lost the connection at the write."""
+    events: list[str] = []
+
+    def guard(conn, now=None):
+        events.append("guard")
+        return date(2026, 9, 25)
+
+    monkeypatch.setattr(mod, "chain_session", guard)
+
+    class _Conn(FakeConn):
+        def rollback(self) -> None:
+            events.append("end-transaction")
+            super().rollback()
+
+    async def fetch(*args, **kwargs):
+        events.append("fetch")
+        return {"results": [], "pages": 1, "truncated": False}
+
+    client = mock_client()
+    client.fetch_options_snapshot = fetch
+    await handle_option_snapshot(
+        make_job("option_snapshot", {"underlying": "SPX", "trade_date": "2026-09-25"}),
+        client,
+        _Conn(),
+    )
+    assert events[:3] == ["guard", "end-transaction", "fetch"]
