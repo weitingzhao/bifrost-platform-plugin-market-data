@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from bifrost_market_data.ingest.option_backfill import handle_option_backfill_plan
+from bifrost_market_data.ingest import option_backfill
+from bifrost_market_data.ingest.option_backfill import handle_option_backfill_plan, history_floor
 from bifrost_market_data.ingest.treasury import handle_treasury_yields
 from ingest_testutil import FakeConn, make_job, mock_client
 
@@ -142,7 +143,9 @@ async def test_backfill_plan_keeps_only_strikes_near_spot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_prices() -> None:
+async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """KLAC split ten for one on 2026-06-12; stock_daily is adjusted all the way back.
 
     Its October 2024 closes read ~$70 against strikes near $700, and all 124
@@ -150,6 +153,8 @@ async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_pri
     ex-date was adjusted by the exchange: after it, the adjusted close is the
     price it trades against.
     """
+    # October 2024 is inside the vendor's two years only until mid-October 2026.
+    monkeypatch.setattr(option_backfill, "_today", lambda: date(2026, 9, 28))
     expired = date(2024, 10, 18)
     after_split = date(2026, 7, 17)
     client = mock_client(
@@ -180,6 +185,46 @@ async def test_contracts_that_expired_before_a_split_are_banded_in_their_own_pri
     assert "O:KLAC241018C00070000" not in queued
     assert "O:KLAC260717C00180000" in queued
     assert result["contracts_kept"] == 2
+
+
+@pytest.mark.asyncio
+async def test_contracts_priced_only_past_the_vendors_two_years_are_not_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replan of pre-split months on 2026-09-28 queued 902 September 2024
+    contracts, and the vendor refused every one: their ranges ended 738 days
+    back. A contract that straddles the edge is served, so it stays whole."""
+    today = date(2026, 9, 28)
+    monkeypatch.setattr(option_backfill, "_today", lambda: today)
+    floor = history_floor(today)
+    assert floor == date(2024, 9, 28)
+    past = floor - timedelta(days=1)
+    edge = floor
+    straddles = date(2024, 10, 18)
+    client = mock_client(
+        fetch_options_contracts={
+            "results": [
+                _contract("O:ZZZ240927C00100000", past.isoformat(), 100.0),
+                _contract("O:ZZZ240928C00100000", edge.isoformat(), 100.0),
+                _contract("O:ZZZ241018C00100000", straddles.isoformat(), 100.0),
+            ],
+            "pages": 1,
+        }
+    )
+    conn = _CloseConn([(date(2024, 6, 3), 100.0), (date(2024, 10, 1), 100.0)])
+    result = await handle_option_backfill_plan(
+        make_job("option_backfill_plan", {"underlying": "ZZZ", "expiry_gte": "2024-09-01", "expiry_lte": "2024-10-31"}),
+        client,
+        conn,
+    )
+    queued = str(next(st for st in conn.statements if "job_ingest" in st[0])[1])
+    assert "O:ZZZ240927C00100000" not in queued, "every bar it has is past the edge"
+    assert "O:ZZZ240928C00100000" in queued, "its last day is the edge itself"
+    assert "O:ZZZ241018C00100000" in queued
+    assert (straddles - timedelta(days=90)).isoformat() in queued, "a straddler keeps its full range"
+    assert result["outside_history_window"] == 1
+    assert result["contracts_kept"] == 2
+    assert result["history_floor"] == "2024-09-28"
 
 
 @pytest.mark.asyncio

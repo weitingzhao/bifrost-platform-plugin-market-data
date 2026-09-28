@@ -16,6 +16,7 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Mapping
 
+from bifrost_market_data.contracts import OPTION_WINDOW_DAYS
 from bifrost_market_data.ingest._upsert import as_float, parse_date
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
@@ -37,6 +38,24 @@ INSERT_CHUNK = 500
 # priority down: 486,000 backfill jobs sat above the EOD chain, which would
 # have starved the evening's snapshot behind a night of history.
 BACKFILL_MAX_PRIORITY = 2
+
+
+def _today() -> date:
+    return date.today()
+
+
+def history_floor(today: date) -> date:
+    """The oldest day the vendor still prices, on ``today``.
+
+    Options Starter serves aggregates for a rolling two years. A contract whose
+    last priced day is older than that is refused outright -- HTTP 403, "Your
+    plan doesn't include this data timeframe" -- while one that straddles the
+    edge is served. Measured on the queue 2026-09-28: 902 jobs whose range ended
+    738 days back were all refused (CTAS and DECK, September 2024 expiries, from
+    a replan of pre-split months), and 1,823,171 others succeeded with ranges
+    ending up to 724 days back and starting up to 814.
+    """
+    return today - timedelta(days=OPTION_WINDOW_DAYS)
 
 
 def _closes(conn: Any, underlying: str, start: date, end: date) -> tuple[list[date], list[float]]:
@@ -173,10 +192,12 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
             spot_source = f"{symbol}x{multiplier:g}"
     splits = _splits_after(conn, storage, window_start)
 
-    today = date.today()
+    today = _today()
+    floor = history_floor(today)
     specs: list[tuple[str, dict[str, Any], int, int]] = []
     no_spot = 0
     out_of_band = 0
+    outside_window = 0
     for item in results:
         if not isinstance(item, dict):
             continue
@@ -189,7 +210,12 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         win_to = min(expiry, today)
         if win_to < win_from:
             continue
-        spots = [s for s in _spots_over(dates, values, splits, win_from, win_to) if s > 0]
+        if win_to < floor:
+            # Every bar it could have is past the vendor's edge: queueing it
+            # buys a 403 and a failed job, never a row.
+            outside_window += 1
+            continue
+        spots =[s for s in _spots_over(dates, values, splits, win_from, win_to) if s > 0]
         if not spots:
             no_spot += 1
         elif strike is not None and all(abs(strike - s) / s > strike_pct for s in spots):
@@ -233,6 +259,8 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         "contracts_seen": len(results),
         "contracts_kept": len(specs),
         "out_of_strike_band": out_of_band,
+        "outside_history_window": outside_window,
+        "history_floor": floor.isoformat(),
         "no_spot_reference": no_spot,
         "spot_source": spot_source,
         "enqueued": enqueued,
