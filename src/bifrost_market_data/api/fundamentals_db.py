@@ -1,6 +1,9 @@
 """DB-read stock financials routes under ``/market/stocks/fundamentals/db/*`` (W0-P3).
 
-Reads from ``market.stock_financials`` — the persisted Polygon financial data.
+Reads from ``raw_market.stock_financials`` — the compat view over the persisted
+Polygon financial tables. The guards name that schema too: ``market`` is only an
+alias that ``resolve_market_schema`` falls back from, and the schema a guard
+checks should be the one its SQL reads.
 Separate from ``fundamentals.py`` which is Polygon REST pass-through.
 """
 
@@ -21,9 +24,17 @@ from bifrost_market_data.api.deps import (
 
 router = APIRouter(prefix="/stocks/fundamentals/db", tags=["fundamentals-db"])
 
-# The view's report_type literals (wave8_migrations.create_stock_financials_compat_view).
+# The view's report_type literals (wave8_migrations.create_stock_financials_compat_view),
+# all of them: a literal missing here is a slice of the view the route answers 400 for.
 _VALID_REPORT_TYPES = frozenset(
-    {"income_statement", "balance_sheet", "cash_flow_statement", "short_interest", "short_volume"}
+    {
+        "income_statement",
+        "balance_sheet",
+        "cash_flow_statement",
+        "ratios",
+        "short_interest",
+        "short_volume",
+    }
 )
 # ``cash_flow`` is the entity table's name, but the view labels those rows
 # ``cash_flow_statement``: filtering on it verbatim matched nothing. Still
@@ -53,11 +64,11 @@ def _parse_symbols(raw: str) -> list[str]:
 def query_short_interest(
     conn: Any, *, symbols: list[str], settlements: int
 ) -> dict[str, list[dict[str, Any]]]:
-    """Recent short interest from market.stock_financials grouped by symbol.
+    """Recent short interest from raw_market.stock_financials grouped by symbol.
 
     Field names match ``market_pg.get_short_interest_recent`` consumer contract.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
     with conn.cursor() as cur:
@@ -120,7 +131,7 @@ def _short_interest_row(row: Any) -> dict[str, Any]:
 def query_short_volume(
     conn: Any, *, symbols: list[str], trade_days: int
 ) -> dict[str, list[dict[str, Any]]]:
-    """Recent short volume from market.stock_financials grouped by symbol.
+    """Recent short volume from raw_market.stock_financials grouped by symbol.
 
     Field names match ``market_pg.get_short_volume_recent`` consumer contract.
 
@@ -133,7 +144,7 @@ def query_short_volume(
     ratio is computed from the unrounded volumes and falls back to the percent
     over 100 — the same rule as Research's ``stg_short_volume``.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
     with conn.cursor() as cur:
@@ -198,8 +209,8 @@ def query_financials(
     timeframe: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Generic financials rows from market.stock_financials for a single symbol."""
-    if not table_exists(conn, "market", "stock_financials"):
+    """Generic financials rows from raw_market.stock_financials for a single symbol."""
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return []
     symbol = normalize_symbol(symbol)
 
@@ -269,7 +280,7 @@ def fundamentals_db_short_interest(
     symbols: str = Query(..., description="Comma-separated stock symbols"),
     settlements: int = Query(6, ge=1, le=200, description="Number of settlement periods per symbol"),
 ) -> dict[str, Any]:
-    """Batch short interest from local DB (market.stock_financials)."""
+    """Batch short interest from local DB (raw_market.stock_financials)."""
     parsed = _parse_symbols(symbols)
     if not parsed:
         raise HTTPException(status_code=400, detail="No valid symbols provided")
@@ -287,7 +298,7 @@ def fundamentals_db_short_volume(
     symbols: str = Query(..., description="Comma-separated stock symbols"),
     trade_days: int = Query(60, ge=1, le=500, description="Number of trade days per symbol"),
 ) -> dict[str, Any]:
-    """Batch short volume from local DB (market.stock_financials)."""
+    """Batch short volume from local DB (raw_market.stock_financials)."""
     parsed = _parse_symbols(symbols)
     if not parsed:
         raise HTTPException(status_code=400, detail="No valid symbols provided")
@@ -307,7 +318,7 @@ def fundamentals_db_financials(
     timeframe: str | None = Query(None, description="Filter by timeframe (quarterly/annual)"),
     limit: int = Query(20, ge=1, le=500, description="Max rows to return"),
 ) -> dict[str, Any]:
-    """Generic financials rows from local DB (market.stock_financials)."""
+    """Generic financials rows from local DB (raw_market.stock_financials)."""
     sym = normalize_symbol(symbol)
     if not sym:
         raise HTTPException(status_code=400, detail="No valid symbol provided")

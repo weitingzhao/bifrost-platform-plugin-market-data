@@ -70,7 +70,7 @@ def query_financials_batch(
     limit_per_symbol: int = 20,
 ) -> dict[str, list[dict[str, Any]]]:
     """Batch-read financials rows grouped by symbol, returning raw jsonb data."""
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
 
@@ -151,7 +151,7 @@ def query_income_rows_for_sepa(
     Mirrors ``fetch_income_rows_for_sepa_from_pg`` — returns both
     ``quarterly`` and ``annual`` lists with fiscal metadata + raw data.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {"quarterly": [], "annual": []}
     symbol = normalize_symbol(symbol)
 
@@ -216,7 +216,7 @@ def query_financials_ext_batch(
     Covers income-ext, balance-sheet-ext, cash-flow-ext patterns.
     Returns symbol -> list of dicts (ascending period_end) with raw data.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
 
@@ -284,7 +284,7 @@ def query_ratios_latest_batch(
     symbols: list[str],
 ) -> dict[str, dict[str, Any]]:
     """Latest ratios row per symbol (DISTINCT ON)."""
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
 
@@ -322,7 +322,7 @@ def query_short_interest_latest_batch(
     max_rows: int = 2,
 ) -> dict[str, list[dict[str, Any]]]:
     """Latest N short-interest rows per symbol."""
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
 
@@ -375,7 +375,7 @@ def query_short_volume_recent_batch(
     max_days: int = 10,
 ) -> dict[str, list[dict[str, Any]]]:
     """Latest N short-volume rows per symbol."""
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {}
     symbols = normalize_symbols(symbols)
 
@@ -432,7 +432,7 @@ def query_gaps(
     Checks which universe symbols are missing or have insufficient data.
     Returns ``{"count": N, "symbols": [...]}``.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {"count": 0, "symbols": []}
     # ``table_exists`` carries the ``market`` → ``raw_market`` alias, which the
     # local ``to_regclass`` gate this replaced did not: it asked for

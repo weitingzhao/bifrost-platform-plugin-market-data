@@ -67,6 +67,94 @@ def test_no_executed_sql_names_the_market_schema() -> None:
     )
 
 
+#: Tables whose guards must name the schema their SQL reads rather than ask for
+#: the ``market`` alias. Every other table's guards still ask for the alias and
+#: resolve through ``resolve_market_schema``; adding a table here is the ratchet.
+_GUARD_NAMES_ITS_SQL_SCHEMA = ("stock_financials",)
+
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                ids.add(id(first.value))
+    return ids
+
+
+def _guard_schema_check(source: str, table: str) -> tuple[int, list[str]]:
+    """Count ``table_exists(…, schema, table)`` guards; list those whose schema
+    is not the one the module's SQL qualifies ``table`` with.
+
+    Module-wide rather than per function: ``fundamentals_sepa.query_gaps``
+    guards in the function and keeps its statements in the module-level
+    ``_GAP_SQLS``. Docstrings are prose, not SQL, and are skipped.
+    """
+    tree = ast.parse(source)
+    skip = _docstring_node_ids(tree)
+    qualified = re.compile(rf"(?<![\w.])(\w+)\.{re.escape(table)}\b")
+    sql_schemas: set[str] = set()
+    guards: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in skip:
+                sql_schemas.update(qualified.findall(node.value))
+        elif isinstance(node, ast.Call) and len(node.args) == 3:
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+            schema_arg, table_arg = node.args[1], node.args[2]
+            if name == "table_exists" and isinstance(table_arg, ast.Constant) and table_arg.value == table:
+                schema = schema_arg.value if isinstance(schema_arg, ast.Constant) else "<expr>"
+                guards.append((node.lineno, str(schema)))
+    problems = [
+        f"line {lineno}: guard checks {schema}.{table}, SQL reads "
+        f"{', '.join(f'{s}.{table}' for s in sorted(sql_schemas)) or 'no literal schema'}"
+        for lineno, schema in guards
+        if sql_schemas != {schema}
+    ]
+    return len(guards), problems
+
+
+def test_a_guard_checks_the_schema_its_sql_reads() -> None:
+    """``table_exists(conn, "market", "stock_financials")`` guarded thirteen reads
+    of ``raw_market.stock_financials``. It answered right only because the alias
+    falls back; the guard and the query named two different relations."""
+    guards = 0
+    offenders: list[str] = []
+    for path in sorted((SRC / "api").glob("*.py")):
+        source = path.read_text()
+        for table in _GUARD_NAMES_ITS_SQL_SCHEMA:
+            n, problems = _guard_schema_check(source, table)
+            guards += n
+            offenders += [f"{path.relative_to(SRC)} {p}" for p in problems]
+    assert guards, "no guards found; the detector is not looking where they are"
+    assert not offenders, "\n  ".join(["guard and SQL name different schemas:", *offenders])
+
+
+def test_the_guard_detector_catches_an_alias_guard() -> None:
+    src = '''
+"""Reads market.stock_financials — prose, not SQL."""
+def bad(conn, cur):
+    if not table_exists(conn, "market", "stock_financials"):
+        return []
+    cur.execute("SELECT * FROM raw_market.stock_financials")
+
+def good(conn, cur):
+    if not table_exists(conn, "raw_market", "stock_financials"):
+        return []
+'''
+    guards, problems = _guard_schema_check(src, "stock_financials")
+    assert guards == 2
+    # Only the alias guard on line 4. The module docstring's "market." is not
+    # counted as SQL, or both guards would be flagged.
+    assert len(problems) == 1 and problems[0].startswith("line 4:"), problems
+
+
 def test_the_resolver_is_what_call_sites_get() -> None:
     """A guard that resolves is only half of it — the query has to use the answer."""
     from bifrost_market_data.api import deps

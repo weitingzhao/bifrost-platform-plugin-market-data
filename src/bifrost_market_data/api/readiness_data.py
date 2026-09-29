@@ -190,12 +190,12 @@ def query_latest_bar_full_history(
 
 
 def query_financials_coverage_symbols(conn: Any) -> dict[str, Any]:
-    """Which symbols exist per report_type in market.stock_financials.
+    """Which symbols exist per report_type in raw_market.stock_financials.
 
     Returns sets of symbols for income_statement (with quarterly/annual counts),
     balance_sheet, cash_flow_statement, ratios, short_interest, short_volume.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {
             "ok": True,
             "income_statement": {},
@@ -251,7 +251,7 @@ def query_financials_fill_rate(
 
     Used by readiness_snapshot.compute_data_inventory_stats.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {"ok": True, "tables": {}}
 
     tables_spec: dict[str, tuple[str, list[str]]] = {
@@ -445,7 +445,7 @@ def query_financials_by_instrument_type(
 
     Used by readiness_snapshot._fetch_fundamentals_symbol_counts_by_instrument_type.
     """
-    if not table_exists(conn, "market", "stock_financials"):
+    if not table_exists(conn, "raw_market", "stock_financials"):
         return {"ok": True, "by_type": []}
 
     specs = [

@@ -252,7 +252,9 @@ class TestFinancialsEndpoint:
         assert "cash_flow_statement" in params
         assert "cash_flow" not in params
 
-    def test_every_accepted_report_type_is_a_view_literal(self) -> None:
+    @staticmethod
+    def _view_literals() -> set[str]:
+        """The report_type literals the compat view's definition emits."""
         executed: list[str] = []
 
         class RecordingCursor:
@@ -260,11 +262,29 @@ class TestFinancialsEndpoint:
                 executed.append(sql)
 
         create_stock_financials_compat_view(RecordingCursor())
-        view_literals = set(re.findall(r"'(\w+)'::text", "\n".join(executed)))
-        assert view_literals, "view definition not parsed"
+        literals = set(re.findall(r"'(\w+)'::text", "\n".join(executed)))
+        assert literals, "view definition not parsed"
+        return literals
+
+    def test_every_accepted_report_type_is_a_view_literal(self) -> None:
+        view_literals = self._view_literals()
         for accepted in fdb_mod._ACCEPTED_REPORT_TYPES:
             queried = fdb_mod._REPORT_TYPE_ALIASES.get(accepted, accepted)
             assert queried in view_literals, accepted
+
+    def test_every_view_literal_is_an_accepted_report_type(self) -> None:
+        # The reverse direction: the view emitted 'ratios' and the route
+        # rejected it, so that slice of the view was unreachable by filter.
+        rejected = self._view_literals() - fdb_mod._ACCEPTED_REPORT_TYPES
+        assert not rejected, sorted(rejected)
+
+    def test_every_view_literal_passes_the_route(self, monkeypatch) -> None:
+        # Through the route, not just the constant: each literal the view
+        # emits gets a 200 and reaches the SQL verbatim.
+        for literal in sorted(self._view_literals()):
+            status, params = self._query_through_route(monkeypatch, literal)
+            assert status == 200, literal
+            assert literal in params, literal
 
     def test_invalid_timeframe_returns_400(self, monkeypatch) -> None:
         _patch_db(monkeypatch)
