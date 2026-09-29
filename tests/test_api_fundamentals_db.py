@@ -209,7 +209,9 @@ class TestFinancialsEndpoint:
         )
         assert resp.status_code == 400
 
-    def _query_through_route(self, monkeypatch, report_type: str) -> tuple[int, list[Any]]:
+    def _query_through_route(
+        self, monkeypatch, report_type: str | None, timeframe: str | None = None
+    ) -> tuple[int, list[Any]]:
         """Hit the route with the real query_financials; return (status, SQL params)."""
         executed: list[Any] = []
 
@@ -235,7 +237,11 @@ class TestFinancialsEndpoint:
         client = TestClient(create_app())
         resp = client.get(
             "/market/stocks/fundamentals/db/financials",
-            params={"symbol": "ZZTEST", "report_type": report_type},
+            params={
+                "symbol": "ZZTEST",
+                **({"report_type": report_type} if report_type else {}),
+                **({"timeframe": timeframe} if timeframe else {}),
+            },
         )
         return resp.status_code, executed
 
@@ -285,6 +291,38 @@ class TestFinancialsEndpoint:
             status, params = self._query_through_route(monkeypatch, literal)
             assert status == 200, literal
             assert literal in params, literal
+
+    def test_every_written_period_type_filters(self, monkeypatch) -> None:
+        # ttm (financials), daily (ratios, short_volume) and biweekly
+        # (short_interest) used to answer 400: those slices could not be
+        # filtered by timeframe at all.
+        for period_type in ("quarterly", "annual", "ttm", "daily", "biweekly"):
+            status, params = self._query_through_route(monkeypatch, None, period_type)
+            assert status == 200, period_type
+            assert period_type in params, period_type
+
+    def test_the_vendor_spelling_of_ttm_queries_ttm(self, monkeypatch) -> None:
+        status, params = self._query_through_route(monkeypatch, None, "trailing_twelve_months")
+        assert status == 200
+        assert "ttm" in params
+        assert "trailing_twelve_months" not in params
+
+    def test_every_period_type_the_writers_use_is_accepted(self) -> None:
+        # A writer that starts using a new period_type must land here too, or
+        # its rows become a slice the route answers 400 for.
+        import re
+        from pathlib import Path
+
+        from bifrost_market_data.ingest import financials as fin_ingest
+
+        written = set(fin_ingest._PERIOD_TYPES.values())
+        ingest_dir = Path(fin_ingest.__file__).parent
+        for name in ("financials_market.py", "financials_ext.py"):
+            text = (ingest_dir / name).read_text()
+            written |= set(re.findall(r'period_type="(\w+)"', text))
+            written |= set(re.findall(r'``period_type`` = \'(\w+)\'', text))
+        assert {"quarterly", "annual", "ttm", "daily", "biweekly"} <= written
+        assert written <= fdb_mod._VALID_TIMEFRAMES
 
     def test_invalid_timeframe_returns_400(self, monkeypatch) -> None:
         _patch_db(monkeypatch)

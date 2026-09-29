@@ -41,7 +41,15 @@ _VALID_REPORT_TYPES = frozenset(
 # accepted so a caller using the old spelling keeps working.
 _REPORT_TYPE_ALIASES = {"cash_flow": "cash_flow_statement"}
 _ACCEPTED_REPORT_TYPES = _VALID_REPORT_TYPES | frozenset(_REPORT_TYPE_ALIASES)
-_VALID_TIMEFRAMES = frozenset({"quarterly", "annual"})
+# The period_type values the tables behind the view are written with:
+# financials quarterly / annual / ttm (ingest/financials.py), ratios and
+# short_volume daily, short_interest biweekly (ingest/financials_market.py,
+# ingest/financials_ext.py). Only the first two used to be accepted, so
+# ratios, short interest and short volume could not be filtered at all.
+_VALID_TIMEFRAMES = frozenset({"quarterly", "annual", "ttm", "daily", "biweekly"})
+# The vendor's v1 statements spell ttm out; the tables store ttm.
+_TIMEFRAME_ALIASES = {"trailing_twelve_months": "ttm"}
+_ACCEPTED_TIMEFRAMES = _VALID_TIMEFRAMES | frozenset(_TIMEFRAME_ALIASES)
 
 
 def _parse_symbols(raw: str) -> list[str]:
@@ -222,7 +230,7 @@ def query_financials(
         params.append(_REPORT_TYPE_ALIASES.get(report_type, report_type))
     if timeframe:
         clauses.append("period_type = %s")
-        params.append(timeframe)
+        params.append(_TIMEFRAME_ALIASES.get(timeframe, timeframe))
 
     params.append(limit)
 
@@ -315,7 +323,9 @@ def fundamentals_db_short_volume(
 def fundamentals_db_financials(
     symbol: str = Query(..., description="Single stock symbol"),
     report_type: str | None = Query(None, description="Filter by report_type"),
-    timeframe: str | None = Query(None, description="Filter by timeframe (quarterly/annual)"),
+    timeframe: str | None = Query(
+        None, description="Filter by period_type (quarterly/annual/ttm/daily/biweekly)"
+    ),
     limit: int = Query(20, ge=1, le=500, description="Max rows to return"),
 ) -> dict[str, Any]:
     """Generic financials rows from local DB (raw_market.stock_financials)."""
@@ -327,10 +337,10 @@ def fundamentals_db_financials(
             status_code=400,
             detail=f"Invalid report_type: {report_type}. Valid: {sorted(_ACCEPTED_REPORT_TYPES)}",
         )
-    if timeframe and timeframe not in _VALID_TIMEFRAMES:
+    if timeframe and timeframe not in _ACCEPTED_TIMEFRAMES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid timeframe: {timeframe}. Valid: {sorted(_VALID_TIMEFRAMES)}",
+            detail=f"Invalid timeframe: {timeframe}. Valid: {sorted(_ACCEPTED_TIMEFRAMES)}",
         )
     conn = require_db()
     try:
