@@ -21,9 +21,15 @@ from bifrost_market_data.api.deps import (
 
 router = APIRouter(prefix="/stocks/fundamentals/db", tags=["fundamentals-db"])
 
+# The view's report_type literals (wave8_migrations.create_stock_financials_compat_view).
 _VALID_REPORT_TYPES = frozenset(
-    {"income_statement", "balance_sheet", "cash_flow", "short_interest", "short_volume"}
+    {"income_statement", "balance_sheet", "cash_flow_statement", "short_interest", "short_volume"}
 )
+# ``cash_flow`` is the entity table's name, but the view labels those rows
+# ``cash_flow_statement``: filtering on it verbatim matched nothing. Still
+# accepted so a caller using the old spelling keeps working.
+_REPORT_TYPE_ALIASES = {"cash_flow": "cash_flow_statement"}
+_ACCEPTED_REPORT_TYPES = _VALID_REPORT_TYPES | frozenset(_REPORT_TYPE_ALIASES)
 _VALID_TIMEFRAMES = frozenset({"quarterly", "annual"})
 
 
@@ -202,7 +208,7 @@ def query_financials(
 
     if report_type:
         clauses.append("report_type = %s")
-        params.append(report_type)
+        params.append(_REPORT_TYPE_ALIASES.get(report_type, report_type))
     if timeframe:
         clauses.append("period_type = %s")
         params.append(timeframe)
@@ -305,10 +311,10 @@ def fundamentals_db_financials(
     sym = normalize_symbol(symbol)
     if not sym:
         raise HTTPException(status_code=400, detail="No valid symbol provided")
-    if report_type and report_type not in _VALID_REPORT_TYPES:
+    if report_type and report_type not in _ACCEPTED_REPORT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid report_type: {report_type}. Valid: {sorted(_VALID_REPORT_TYPES)}",
+            detail=f"Invalid report_type: {report_type}. Valid: {sorted(_ACCEPTED_REPORT_TYPES)}",
         )
     if timeframe and timeframe not in _VALID_TIMEFRAMES:
         raise HTTPException(

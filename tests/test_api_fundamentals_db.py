@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from bifrost_market_data.api.app import create_app
 from bifrost_market_data.api import fundamentals_db as fdb_mod
+from bifrost_market_data.schema.wave8_migrations import create_stock_financials_compat_view
 
 
 class _DummyConn:
@@ -206,6 +208,63 @@ class TestFinancialsEndpoint:
             params={"symbol": "NVDA", "report_type": "invalid_type"},
         )
         assert resp.status_code == 400
+
+    def _query_through_route(self, monkeypatch, report_type: str) -> tuple[int, list[Any]]:
+        """Hit the route with the real query_financials; return (status, SQL params)."""
+        executed: list[Any] = []
+
+        class CapturingCursor:
+            def execute(self, _sql, params=None):
+                executed.extend(params or [])
+
+            def fetchall(self):
+                return []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        class CapturingConn(_DummyConn):
+            def cursor(self):
+                return CapturingCursor()
+
+        monkeypatch.setattr(fdb_mod, "require_db", lambda: CapturingConn())
+        monkeypatch.setattr(fdb_mod, "table_exists", lambda *_a, **_k: True)
+        client = TestClient(create_app())
+        resp = client.get(
+            "/market/stocks/fundamentals/db/financials",
+            params={"symbol": "ZZTEST", "report_type": report_type},
+        )
+        return resp.status_code, executed
+
+    def test_cash_flow_statement_is_accepted(self, monkeypatch) -> None:
+        # The view labels cash-flow rows 'cash_flow_statement'; this spelling was rejected.
+        status, params = self._query_through_route(monkeypatch, "cash_flow_statement")
+        assert status == 200
+        assert "cash_flow_statement" in params
+
+    def test_cash_flow_alias_queries_view_literal(self, monkeypatch) -> None:
+        # 'cash_flow' used to reach the SQL verbatim and match zero rows.
+        status, params = self._query_through_route(monkeypatch, "cash_flow")
+        assert status == 200
+        assert "cash_flow_statement" in params
+        assert "cash_flow" not in params
+
+    def test_every_accepted_report_type_is_a_view_literal(self) -> None:
+        executed: list[str] = []
+
+        class RecordingCursor:
+            def execute(self, sql, params=None):
+                executed.append(sql)
+
+        create_stock_financials_compat_view(RecordingCursor())
+        view_literals = set(re.findall(r"'(\w+)'::text", "\n".join(executed)))
+        assert view_literals, "view definition not parsed"
+        for accepted in fdb_mod._ACCEPTED_REPORT_TYPES:
+            queried = fdb_mod._REPORT_TYPE_ALIASES.get(accepted, accepted)
+            assert queried in view_literals, accepted
 
     def test_invalid_timeframe_returns_400(self, monkeypatch) -> None:
         _patch_db(monkeypatch)
