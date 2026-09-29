@@ -419,18 +419,6 @@ class PolygonClient:
             raise PolygonAPIError("unexpected ticker details payload", body=data, url=path)
         return data
 
-    async def fetch_financials(
-        self,
-        ticker: str,
-        *,
-        timeframe: str | None = None,
-        limit: int = 100,
-        max_pages: int = 5,
-    ) -> dict[str, Any]:
-        path = ep.financials_path()
-        params = ep.financials_params(ticker=ticker, limit=limit, timeframe=timeframe)
-        return await self._paginate(path, params, max_pages=max_pages)
-
     async def fetch_splits(self, ticker: str | None = None, *, max_pages: int = 5) -> dict[str, Any]:
         path = ep.splits_path()
         params = ep.splits_params(ticker=ticker)
@@ -630,6 +618,23 @@ class PolygonClient:
         if not isinstance(data, dict):
             raise PolygonAPIError("unexpected financial statement payload", body=data, url=path)
         return data
+
+    async def fetch_financial_statements(
+        self,
+        kind: str,
+        ticker: str,
+        *,
+        timeframe: str | None = None,
+        max_pages: int = 5,
+    ) -> dict[str, Any]:
+        """Every period of one statement for one ticker, following ``next_url``.
+
+        About 150 rows per statement for a name filing since 2009, so one
+        page of 1000 is the norm.
+        """
+        path = ep.financial_statement_path(kind)
+        params = ep.financial_statement_params(ticker=ticker, timeframe=timeframe, limit=1000)
+        return await self._paginate(path, params, max_pages=max_pages)
 
     async def fetch_ratios(self, **params: Any) -> dict[str, Any]:
         path = ep.ratios_path()

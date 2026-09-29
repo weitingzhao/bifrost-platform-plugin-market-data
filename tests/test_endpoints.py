@@ -47,7 +47,6 @@ def test_reference_tickers_and_details() -> None:
 
 
 def test_financials_splits_dividends_calendar() -> None:
-    assert ep.financials_path() == "/vX/reference/financials"
     assert ep.splits_path() == "/stocks/v1/splits"
     assert ep.dividends_path() == "/stocks/v1/dividends"
     assert ep.market_status_upcoming_path() == "/v1/marketstatus/upcoming"

@@ -49,8 +49,53 @@ def upsert_financials_rows(conn: Any, rows: list[tuple[Any, ...]]) -> int:
     return total
 
 
-def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> int:
-    sql = f"""
+def replace_symbol_statement(
+    conn: Any, symbol: str, report_type: str, rows: list[tuple[Any, ...]]
+) -> tuple[int, int]:
+    """Make one statement's rows for ``symbol`` exactly ``rows``, in one transaction.
+
+    For a source that answers with the symbol's whole history: periods it no
+    longer reports are deleted, so a series never holds rows from two sources
+    or two companies side by side. Only the period types ``rows`` covers are
+    touched: no answer is not a reason to drop history, so a symbol the source
+    has annual rows for and no quarters (a BDC, 2026-09-29) keeps its
+    quarterly rows. Returns (upserted, deleted).
+    """
+    table = _REPORT_TYPE_TO_TABLE[report_type]
+    if not rows or not split_financials_writes_enabled():
+        return 0, 0
+    prepared = _prepare(rows)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                DELETE FROM raw_market.{table} AS t
+                WHERE t.symbol = %s
+                  AND t.period_type = ANY(%s::text[])
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM unnest(%s::date[], %s::text[]) AS k(period_date, period_type)
+                      WHERE k.period_date = t.period_date AND k.period_type = t.period_type
+                  )
+                """,
+                (
+                    symbol,
+                    sorted({r[2] for r in prepared}),
+                    [r[1] for r in prepared],
+                    [r[2] for r in prepared],
+                ),
+            )
+            deleted = cur.rowcount
+            cur.executemany(_upsert_sql(table), prepared)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(prepared), deleted
+
+
+def _upsert_sql(table: str) -> str:
+    return f"""
         INSERT INTO raw_market.{table}
             (symbol, period_date, period_type, fiscal_year, fiscal_quarter, data, filing_date)
         VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
@@ -63,6 +108,9 @@ def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> 
             filing_date = COALESCE(EXCLUDED.filing_date, raw_market.{table}.filing_date),
             fetched_at = now()
     """
+
+
+def _prepare(rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
     prepared: list[tuple[Any, ...]] = []
     for r in rows:
         data_val = r[6]
@@ -70,9 +118,14 @@ def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> 
             data_val = json.dumps(data_val)
         filing_date = r[7] if len(r) > 7 else None
         prepared.append((r[0], r[2], r[3], r[4], r[5], data_val, filing_date))
+    return prepared
+
+
+def _upsert_entity_table(conn: Any, table: str, rows: list[tuple[Any, ...]]) -> int:
+    prepared = _prepare(rows)
     try:
         with conn.cursor() as cur:
-            cur.executemany(sql, prepared)
+            cur.executemany(_upsert_sql(table), prepared)
         conn.commit()
     except Exception:
         conn.rollback()

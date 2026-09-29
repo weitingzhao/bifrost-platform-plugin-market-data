@@ -158,28 +158,6 @@ def ticker_details_path(ticker: str) -> str:
     return f"/v3/reference/tickers/{enc}"
 
 
-def financials_path() -> str:
-    """Legacy Polygon financials endpoint (still used by ingest handlers)."""
-    return "/vX/reference/financials"
-
-
-def financials_params(
-    *,
-    ticker: str,
-    limit: int = 100,
-    timeframe: str | None = None,
-    include_sources: bool = False,
-) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "ticker": str(ticker).strip().upper(),
-        "limit": min(int(limit), 100),
-        "include_sources": "true" if include_sources else "false",
-    }
-    if timeframe:
-        params["timeframe"] = timeframe
-    return params
-
-
 def splits_path() -> str:
     """Current Stocks REST splits (replaces deprecated ``/v3/reference/splits``)."""
     return "/stocks/v1/splits"
@@ -465,8 +443,11 @@ def financial_statement_params(
     limit: int = 10,
     sort: str | None = None,
 ) -> dict[str, Any]:
+    # The statements filter on ``tickers``. A ``ticker`` parameter is ignored
+    # without an error and the answer is the first page of every company
+    # (NVDA, WMT, ADSK for a GOOGL request, 2026-09-29).
     params: dict[str, Any] = {
-        "ticker": str(ticker).strip().upper(),
+        "tickers": str(ticker).strip().upper(),
         "limit": min(int(limit), 1000),
     }
     if timeframe:

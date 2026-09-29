@@ -9,6 +9,8 @@ from bifrost_market_data.worker.claim import JobRow
 
 
 class FakeCursor:
+    rowcount = 0
+
     def __init__(self, parent: FakeConn) -> None:
         self.parent = parent
 
