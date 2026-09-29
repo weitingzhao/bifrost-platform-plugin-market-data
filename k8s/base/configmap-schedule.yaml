@@ -279,13 +279,14 @@ data:
           filings_days: 730
           filings_catch_up: 25
         ratios-market:
-          # Ratios alone, whole market, every three hours every day. The endpoint
-          # ignores ?date and answers with the vendor's latest, which at the 04:30
-          # fundamentals-market run is the session before last; a Friday's ratios were
-          # up by Sunday afternoon (2026-09-27) while that slot next ran on Tuesday.
-          # Six pages a pull. Off the 21:05-23:15 collection window and the 04:30 slot.
+          # Ratios alone, whole market, every day. The endpoint ignores ?date and
+          # answers with the vendor's latest. Measured on 2026-09-28 (one session): the
+          # 04:30 Tue fundamentals-market run still got 09-25, the 05:10 run got 09-28
+          # (4,680 rows), stable at 4,790 by 14:10. So hourly 05:10-08:10, then 11:10,
+          # 14:10 and a 20:10 safety net. Six pages a pull. Off the 21:05-23:15
+          # collection window and the 04:30 slot.
           # Dagster fires it (bifrost-research market_ratios_market_schedule).
-          cron: "10 2-20/3 * * *"
+          cron: "10 5-8,11,14,20 * * *"
           priority: 2
         # Wave 2.1: max-pain / atm-iv-pcr / iv-percentile moved to Research NS
         # (bifrost_research.scheduler.volatility). Plugin CronJobs deleted.
