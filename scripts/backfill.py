@@ -61,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.symbols:
             parser.error(f"--symbols required for {kind}")
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    elif kind == "stock_daily_grouped":
+    elif kind in ("stock_daily_grouped", "stock_daily_unadjusted"):
         if not args.from_date or not args.to_date:
-            parser.error("--from and --to required for stock_daily_grouped")
+            parser.error(f"--from and --to required for {kind}")
     elif kind == "ticker_sync":
         pass
     else:

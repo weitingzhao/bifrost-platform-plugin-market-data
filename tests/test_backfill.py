@@ -140,6 +140,28 @@ def test_enqueue_backfill_stock_daily_grouped() -> None:
     assert result["jobs"][0]["payload"]["market"] == "stocks"
 
 
+def test_enqueue_backfill_stock_daily_unadjusted_walks_weekdays() -> None:
+    conn = _BFConn()
+    result = enqueue_backfill(
+        conn,
+        kind="stock_daily_unadjusted",
+        from_date=date(2024, 6, 20),
+        to_date=date(2024, 6, 23),
+    )
+    assert result["chunks"] == 2
+    assert [j["payload"]["from"] for j in result["jobs"]] == ["2024-06-20", "2024-06-21"]
+
+
+def test_the_cli_accepts_every_date_range_kind_it_can_enqueue() -> None:
+    """The CLI keeps its own kind list; 0.74.0 added stock_daily_unadjusted to the
+    library and not to the script, so the backfill had to be enqueued by hand."""
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "backfill.py"
+    source = script.read_text()
+    assert '"stock_daily_unadjusted"' in source
+
+
 def test_enqueue_backfill_financials() -> None:
     conn = _BFConn()
     result = enqueue_backfill(
