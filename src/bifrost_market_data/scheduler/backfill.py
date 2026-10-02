@@ -16,6 +16,7 @@ _DATE_RANGE_KINDS = frozenset(
         "option_daily",
         "option_trades",
         "stock_daily_grouped",
+        "stock_daily_unadjusted",
         "stock_minute",
         "option_minute",
     }
@@ -146,7 +147,7 @@ def enqueue_backfill(
     if from_date is None or to_date is None:
         raise ValueError(f"from_date and to_date required for kind={kind_s!r}")
 
-    if kind_s == "stock_daily_grouped":
+    if kind_s in ("stock_daily_grouped", "stock_daily_unadjusted"):
         # One job per weekday (grouped daily is single-day API; skip weekends).
         chunks = date_chunks(from_date, to_date, 1)
         weekday_chunks: list[tuple[date, date]] = []

@@ -435,7 +435,11 @@ def test_an_index_root_gets_a_spot_and_the_column_says_where_it_came_from() -> N
     """
     from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL as sql
 
-    assert "COALESCE(sd.close, psd.close * p.multiplier) AS underlying_price" in sql
+    flat = " ".join(sql.split())
+    assert (
+        "COALESCE( sd.close_unadjusted, sd.close, COALESCE(psd.close_unadjusted, psd.close) * p.multiplier )"
+        " AS underlying_price"
+    ) in flat
     assert "underlying_price_source" in sql
     # A real close is never displaced: the CASE reads sd.close first.
     assert sql.index("WHEN sd.close IS NOT NULL THEN 'vendor'") < sql.index("THEN p.label")
@@ -598,4 +602,54 @@ def test_a_retirement_date_already_there_takes_no_lock() -> None:
     add_ticker_delisted_utc(missing)
     assert missing.statements[-1] == (
         "ALTER TABLE raw_market.ticker ADD COLUMN IF NOT EXISTS delisted_utc date"
+    )
+
+
+def test_the_spot_is_the_close_the_session_printed() -> None:
+    """A snapshot's strikes were listed against the price as traded.
+
+    The adjusted close is restated by every later split and spin-off: HON on
+    2025-10-29 is 200.65 adjusted and 212.89 as traded, and that day's chain
+    puts it at 212.10 by put-call parity (measured 2026-10-02). The as-traded
+    close leads; the adjusted one only fills a session that lacks it.
+    """
+    from bifrost_market_data.schema.ddl import OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL as sql
+
+    flat = " ".join(sql.split())
+    assert flat.index("sd.close_unadjusted") < flat.index("sd.close,")
+    assert flat.index("psd.close_unadjusted") < flat.index("psd.close)")
+
+
+def test_the_as_traded_close_is_added_before_the_view_on_both_paths() -> None:
+    from bifrost_market_data.schema.ddl import apply_wave8_migrations
+
+    for apply in (apply_ddl, apply_wave8_migrations):
+        conn = _FakeConn()
+        apply(conn)
+        joined = "\n".join(conn.cur.statements)
+        assert "column_name = 'close_unadjusted'" in joined, apply.__name__
+        added = joined.index("column_name = 'close_unadjusted'")
+        assert added < joined.index("VIEW raw_market.v_option_snapshot_with_stock AS"), apply.__name__
+
+
+def test_an_as_traded_close_already_there_takes_no_lock() -> None:
+    from bifrost_market_data.schema.ddl import add_stock_daily_close_unadjusted
+
+    class _Catalog(_FakeCursor):
+        def __init__(self, present: bool) -> None:
+            super().__init__()
+            self.present = present
+
+        def fetchone(self) -> Any:
+            last = self.statements[-1] if self.statements else ""
+            return (1,) if self.present and "information_schema.columns" in last else None
+
+    there = _Catalog(present=True)
+    add_stock_daily_close_unadjusted(there)
+    assert not any("ALTER TABLE" in s for s in there.statements)
+
+    missing = _Catalog(present=False)
+    add_stock_daily_close_unadjusted(missing)
+    assert missing.statements[-1] == (
+        "ALTER TABLE raw_market.stock_daily ADD COLUMN IF NOT EXISTS close_unadjusted double precision"
     )

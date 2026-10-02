@@ -34,6 +34,7 @@ POOL_KINDS: dict[str, tuple[str, ...]] = {
     "stocks": (
         "stock_daily",
         "stock_daily_grouped",
+        "stock_daily_unadjusted",
         "treasury_yields",
         "stock_minute",
         "stock_snapshot",

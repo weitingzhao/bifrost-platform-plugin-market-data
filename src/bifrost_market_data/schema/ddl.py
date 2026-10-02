@@ -69,6 +69,9 @@ def apply_wave8_migrations(conn: _Connection) -> None:
         # bifrost), unlike the tables add_financials_filing_date has to skip, so
         # this ALTER runs on the path the cluster actually uses.
         add_ticker_delisted_utc(cur)
+        # Before the view, which reads it. stock_daily and its partitions are
+        # owned by the plugin's role as well (pg_tables.tableowner = bifrost).
+        add_stock_daily_close_unadjusted(cur)
         # Owned by the plugin's role (pg_views.viewowner = bifrost), so this
         # path may replace it even though it cannot own raw_market tables.
         rebuild_option_snapshot_with_stock_view(cur)
@@ -142,6 +145,7 @@ def apply_ddl(conn: _Connection) -> None:
         migrate_option_snapshot_observed_time(cur)
         migrate_corporate_action_identity(cur)
         add_ticker_delisted_utc(cur)
+        add_stock_daily_close_unadjusted(cur)
         _create_views(cur)
         _ensure_partitions(cur)
     conn.commit()
@@ -167,6 +171,7 @@ def _create_market_tables(cur: _Cursor) -> None:
             vwap         double precision,
             trade_count  bigint,
             fetched_at   timestamptz NOT NULL DEFAULT now(),
+            close_unadjusted double precision,
             PRIMARY KEY (symbol, bar_date)
         ) PARTITION BY RANGE (bar_date)
         """
@@ -1070,6 +1075,12 @@ def _index_spot_proxy_values() -> str:
 # that is about 0.12 vol points of smile; fed into a solve it would be about 1.8.
 # So the number travels with its provenance in underlying_price_source, and
 # nothing downstream can mistake a derived level for a vendor close.
+#
+# The level is the close the session printed (close_unadjusted) wherever it is
+# stored, and the adjusted close only where it is not. A snapshot is matched to
+# strikes listed that day; the adjusted close is restated by every later split
+# and spin-off (HON before its 2025-10-30 spin-off sits 5.5% low against its
+# own chain's parity), and the vendor reports no spin-offs to undo it with.
 OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL: str = f"""
         SELECT
             os.option_ticker,
@@ -1090,7 +1101,10 @@ OPTION_SNAPSHOT_WITH_STOCK_SELECT_SQL: str = f"""
             os.day_volume,
             os.day_vwap,
             os.fetched_at,
-            COALESCE(sd.close, psd.close * p.multiplier) AS underlying_price,
+            COALESCE(
+                sd.close_unadjusted, sd.close,
+                COALESCE(psd.close_unadjusted, psd.close) * p.multiplier
+            ) AS underlying_price,
             COALESCE(sd.bar_date, psd.bar_date) AS underlying_bar_date,
             (CASE
                 WHEN sd.close IS NOT NULL THEN '{VENDOR_SPOT_SOURCE}'
@@ -1191,6 +1205,30 @@ OPTION_SNAPSHOT_VIEW_SQL: tuple[str, ...] = (
         """,
     OPTION_SNAPSHOT_WITH_STOCK_VIEW_SQL,
 )
+
+
+def add_stock_daily_close_unadjusted(cur: _Cursor) -> None:
+    """The close each session printed, beside the vendor's adjusted ``close``.
+
+    Options are struck against the price as traded; the adjusted series is
+    restated for every split and spin-off after the bar, and the vendor reports
+    no spin-offs, so a reader cannot undo it (HON 2025-10-29: 200.65 adjusted,
+    212.89 as traded). Nullable and without a default, so adding it rewrites
+    nothing. Catalog first, as ``add_ticker_delisted_utc`` does: the ALTER takes
+    ACCESS EXCLUSIVE on the parent and every partition before it learns the
+    column is already there, and the role's lock_timeout is 5s.
+    """
+    cur.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'raw_market'
+          AND table_name = 'stock_daily'
+          AND column_name = 'close_unadjusted'
+        """
+    )
+    if cur.fetchone() is not None:
+        return
+    cur.execute("ALTER TABLE raw_market.stock_daily ADD COLUMN IF NOT EXISTS close_unadjusted double precision")
 
 
 def add_ticker_delisted_utc(cur: _Cursor) -> None:
