@@ -12,8 +12,15 @@ metadata:
     bifrost.dev/session-group: market-data
 spec:
   replicas: 1
+  # Rolled, not recreated: Recreate left /api/plugin/market-data with no pod on every
+  # release, and each Trade gateway answered 503. The API is stateless and its queue
+  # sampler upserts on (sample_ts, kind), so two pods side by side for a few seconds
+  # write the same row. The workers carry the singleton work, not this Deployment.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: market-data-api
