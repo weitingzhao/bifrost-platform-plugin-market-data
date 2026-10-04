@@ -1596,35 +1596,66 @@ MARKET_VIEWS: tuple[str, ...] = (
 )
 
 
-#: The schemas the plugin owns (spine D13). features.* belongs to
+#: The schemas the plugin's objects live in (spine D13). features.* belongs to
 #: bifrost-research and dw_stock.* to its dbt models; ownership never reaches
 #: them.
 PLUGIN_SCHEMAS: tuple[str, ...] = ("raw_market", "ops_jobs")
 
+#: The schema the plugin owns outright: the schema itself and every relation in it.
+PLUGIN_OWNED_SCHEMA = "raw_market"
+
+#: ops_jobs is shared with the Flex Query plugin (D6 F5, Owner 2026-10-04): the
+#: schema and its partition helpers belong to ``postgres``, each plugin owns its
+#: own tables. These are the market-data ones; job_flex_ingest, flex_* are
+#: flex_writer's and are never reassigned from here.
+PLUGIN_OPS_TABLES: tuple[str, ...] = DATA_OPS_TABLES
+
 #: The role the plugin connects as, and therefore the role that must own the
-#: plugin's objects. Postgres checks ownership, not grants, for DDL.
-PLUGIN_ROLE = "bifrost"
+#: plugin's objects. Postgres checks ownership, not grants, for DDL. Until
+#: 0.75.0 the plugin signed in as ``bifrost``; D6 (2026-10-04) moved it to its
+#: own role, which the Secret key ``postgres-user`` names.
+PLUGIN_ROLE = "data_writer"
+
+#: Who reads what the plugin creates later (new partitions, a new ops table).
+#: Today's readers of raw_market: Research, its read role, market_reader and the
+#: Trade databases' FDW user.
+RAW_MARKET_READERS: tuple[str, ...] = (
+    "analytics_writer",
+    "analytics_reader",
+    "market_reader",
+    "brokerage_reader",
+)
+OPS_TABLE_READERS: tuple[str, ...] = ("analytics_reader", "market_reader")
 
 
 def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
-    """SQL making ``role`` the owner of everything in the plugin's schemas.
+    """SQL making ``role`` the owner of the plugin's objects.
 
     Ownership is part of the schema, not an operational afterthought: an object
     the plugin does not own is one it cannot drop, re-create, or partition. The
-    162 relations in ``raw_market`` are owned by ``postgres`` only because the
+    162 relations in ``raw_market`` were owned by ``postgres`` only because the
     first migration happened to run as that role, and the consequence is dated —
     ``ensure_month_partitions`` builds three months ahead, so from 2026-10 it
     fails, and inserts for 2027-01 have nowhere to land.
 
+    Scope (D6, Owner 2026-10-04): the schema ``raw_market`` and every relation in
+    it, plus the plugin's own tables in ``ops_jobs`` (``PLUGIN_OPS_TABLES``).
+    Not the ``ops_jobs`` schema, not its partition helpers (shared, owned by
+    ``postgres``; they are SECURITY INVOKER, so EXECUTE is all a caller needs)
+    and not the Flex Query plugin's tables.
+
     Returned rather than executed because applying it needs a role that owns the
     objects, which the plugin's own role by definition does not. Same shape as
-    ``--wave9-sql``: the tool generates it, a privileged session runs it.
+    ``--wave9-sql``: the tool generates it, a privileged session runs it. The
+    cluster's own migration is the infra db-step 2026-10-04-d6-plugins-off-bifrost.
 
     Idempotent — an object already owned by ``role`` is skipped.
     """
     if not role.isidentifier():
         raise ValueError(f"role must be a bare identifier, got {role!r}")
-    schemas = ", ".join(f"'{s}'" for s in PLUGIN_SCHEMAS)
+    ops_tables = ", ".join(f"'{t}'" for t in PLUGIN_OPS_TABLES)
+    raw_readers = ", ".join(RAW_MARKET_READERS)
+    ops_readers = ", ".join(OPS_TABLE_READERS)
     return (
         f"""
         DO $ownership$
@@ -1642,16 +1673,27 @@ def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
             SELECT n.nspname AS schema_name, c.relname AS object_name, c.relkind,
                    pg_get_userbyid(c.relowner) AS current_owner
             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname IN ({schemas}) AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
-            ORDER BY n.nspname, c.relname
+            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S')
+              AND (n.nspname = '{PLUGIN_OWNED_SCHEMA}'
+                   OR (n.nspname = 'ops_jobs' AND c.relname IN ({ops_tables})))
+            -- Sequences last: one linked to a column follows its table.
+            ORDER BY c.relkind = 'S', c.relispartition, n.nspname, c.relname
           LOOP
             IF obj.current_owner = target_role THEN
               skipped := skipped + 1;
               CONTINUE;
             END IF;
             -- ALTER TABLE covers ordinary tables, partitions and partitioned
-            -- tables; sequences and views need their own verbs.
+            -- tables; sequences and views need their own verbs. A sequence
+            -- linked to a column has already followed its table.
             IF obj.relkind = 'S' THEN
+              IF pg_get_userbyid((SELECT c.relowner FROM pg_class c JOIN pg_namespace n
+                                    ON n.oid = c.relnamespace
+                                   WHERE n.nspname = obj.schema_name
+                                     AND c.relname = obj.object_name)) = target_role THEN
+                skipped := skipped + 1;
+                CONTINUE;
+              END IF;
               EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I',
                              obj.schema_name, obj.object_name, target_role);
             ELSIF obj.relkind = 'v' THEN
@@ -1669,34 +1711,11 @@ def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
           RAISE NOTICE 'relations: % reassigned, % already owned by %',
                        changed, skipped, target_role;
 
-          changed := 0;
-          skipped := 0;
-          FOR obj IN
-            SELECT p.oid::regprocedure AS signature,
-                   pg_get_userbyid(p.proowner) AS current_owner
-            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname IN ({schemas})
-            ORDER BY 1
-          LOOP
-            IF obj.current_owner = target_role THEN
-              skipped := skipped + 1;
-              CONTINUE;
-            END IF;
-            EXECUTE format('ALTER FUNCTION %s OWNER TO %I', obj.signature, target_role);
-            changed := changed + 1;
-          END LOOP;
-          RAISE NOTICE 'functions: % reassigned, % already owned by %',
-                       changed, skipped, target_role;
-
-          FOR obj IN
-            SELECT n.nspname AS schema_name, pg_get_userbyid(n.nspowner) AS current_owner
-            FROM pg_namespace n WHERE n.nspname IN ({schemas})
-          LOOP
-            IF obj.current_owner <> target_role THEN
-              EXECUTE format('ALTER SCHEMA %I OWNER TO %I', obj.schema_name, target_role);
-              RAISE NOTICE 'schema % reassigned to %', obj.schema_name, target_role;
-            END IF;
-          END LOOP;
+          IF (SELECT pg_get_userbyid(nspowner) FROM pg_namespace
+               WHERE nspname = '{PLUGIN_OWNED_SCHEMA}') <> target_role THEN
+            EXECUTE format('ALTER SCHEMA %I OWNER TO %I', '{PLUGIN_OWNED_SCHEMA}', target_role);
+            RAISE NOTICE 'schema {PLUGIN_OWNED_SCHEMA} reassigned to %', target_role;
+          END IF;
         END
         $ownership$
         """.strip(),
@@ -1704,11 +1723,9 @@ def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
         # consumers. Ownership does not change existing grants; this covers the
         # ones made after it.
         f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA raw_market "
-        "GRANT SELECT ON TABLES TO market_reader",
-        f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA raw_market "
-        "GRANT ALL ON TABLES TO data_writer",
+        f"GRANT SELECT ON TABLES TO {raw_readers}",
         f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA ops_jobs "
-        "GRANT ALL ON TABLES TO data_writer",
+        f"GRANT SELECT ON TABLES TO {ops_readers}",
     )
 
 

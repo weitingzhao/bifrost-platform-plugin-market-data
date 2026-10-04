@@ -504,8 +504,13 @@ Each partitioned parent also gets a `*_default` partition for out-of-range value
 
 | Role | Access |
 |------|--------|
-| `data_writer` | USAGE/CREATE + ALL on `raw_market` and `ops_jobs` |
+| `data_writer` | The plugin's login (D6, 2026-10-04; it was `bifrost` until 0.75.0). **Owner** of schema `raw_market` and every relation in it, and of the seven market tables of `ops_jobs` (`DATA_OPS_TABLES`); USAGE/CREATE on `ops_jobs`; EXECUTE on the partition helpers; SELECT on what Research publishes (`research.option_universe`, `research.option_pinned_contract`, `features.option_metric_*`, `dw_stock.*`). Nothing on `raw_broker`, the Flex tables of `ops_jobs`, Trade databases. Role settings `statement_timeout=2s`, `lock_timeout=5s`, `idle_in_transaction_session_timeout=15s` |
 | `market_reader` | SELECT on `raw_market.*`; SELECT on selected `ops_jobs` status tables |
+
+`ops_jobs` is shared with the Flex Query plugin: the schema and its partition helpers belong to `postgres`,
+each plugin owns its own tables (`flex_writer` owns `job_flex_ingest`, `flex_*`). The cluster's migration
+and its rollback are the infra db-step `2026-10-04-d6-plugins-off-bifrost`; the login comes from the Secret
+key `postgres-user` (optional; without it the ConfigMap's `postgres.user` applies).
 
 Passwords in the SQL file are placeholders (`CHANGE_ME_*`).  
 Apply DDL (`make db-init`) before `scripts/create_roles.sql` so schemas exist.

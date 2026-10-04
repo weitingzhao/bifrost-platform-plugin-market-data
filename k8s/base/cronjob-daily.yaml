@@ -57,6 +57,14 @@ spec:
                       name: market-data-secrets
                       key: postgres-host
                       optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
+                      optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
@@ -143,6 +151,14 @@ spec:
                     secretKeyRef:
                       name: market-data-secrets
                       key: postgres-host
+                      optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
                       optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
@@ -231,6 +247,14 @@ spec:
                       name: market-data-secrets
                       key: postgres-host
                       optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
+                      optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
@@ -317,6 +341,14 @@ spec:
                     secretKeyRef:
                       name: market-data-secrets
                       key: postgres-host
+                      optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
                       optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
@@ -405,6 +437,14 @@ spec:
                       name: market-data-secrets
                       key: postgres-host
                       optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
+                      optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
@@ -492,6 +532,14 @@ spec:
                       name: market-data-secrets
                       key: postgres-host
                       optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
+                      optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:
                     secretKeyRef:
@@ -578,6 +626,14 @@ spec:
                     secretKeyRef:
                       name: market-data-secrets
                       key: postgres-host
+                      optional: true
+                # D6 (2026-10-04): the login, next to its password, so a switch or a
+                # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: market-data-secrets
+                      key: postgres-user
                       optional: true
                 - name: POSTGRES_PASSWORD
                   valueFrom:

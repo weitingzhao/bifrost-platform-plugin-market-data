@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         "--ownership-sql",
         action="store_true",
         help=(
-            "Print the SQL that makes the plugin's role own raw_market / ops_jobs "
+            "Print the SQL that makes the plugin's role own raw_market and its ops_jobs tables "
             "(run it as a role that owns them; the plugin's own role cannot)"
         ),
     )
@@ -120,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = load_config(args.config)
-    # DDL is inherently slow and the ``bifrost`` role carries statement_timeout=2s.
+    # DDL is inherently slow and the plugin's role (data_writer since D6, bifrost
+    # before it) carries statement_timeout=2s.
     # Building (underlying, updated_at DESC) on a 734k-row option_contract was
     # cancelled at 2s on 2026-09-10 — the same one-line cause that had already
     # bitten the scheduler CLI, at a second entry point that never got the fix.
@@ -178,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.roles_only:
         print("Roles apply finished.")
     elif args.ownership_only:
-        print(f"Ownership of raw_market + ops_jobs is now {PLUGIN_ROLE}'s.")
+        print(f"Ownership of raw_market + the market tables of ops_jobs is now {PLUGIN_ROLE}'s.")
     elif args.wave8_only:
         print("Wave 8 migrations applied (idempotent).")
     else:

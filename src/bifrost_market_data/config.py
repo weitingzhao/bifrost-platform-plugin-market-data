@@ -69,7 +69,8 @@ def postgres_connect_kwargs(
 ) -> dict[str, Any]:
     """Build psycopg connect kwargs from config / env.
 
-    The ``bifrost`` role carries ``statement_timeout=2s`` — writer safety for
+    The plugin's role carries ``statement_timeout=2s`` (``data_writer`` since D6,
+    2026-10-04, with the settings ``bifrost`` had before it) — writer safety for
     ad-hoc sessions, and far too tight for anything that reads a table which
     grows with the universe. Pass ``statement_timeout`` to raise the session
     limit; it goes through libpq ``options`` because Postgres rejects bind

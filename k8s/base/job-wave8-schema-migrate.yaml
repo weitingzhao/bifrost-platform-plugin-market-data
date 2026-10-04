@@ -1,4 +1,5 @@
-# One-shot Wave 8 verify (--wave8-only; no full apply_ddl — bifrost role lacks raw_market owner).
+# Wave 8+ migrations (--wave8-only), run on every release as the plugin's role (data_writer since D6,
+# 2026-10-04), which owns raw_market and the market tables of ops_jobs.
 # Fresh Golden Source bootstrap: kubectl exec postgres pod + full init_schema or superuser apply_ddl.
 # Re-run: kubectl delete job job-wave8-schema-migrate -n plugin-market-data --ignore-not-found
 #         kubectl apply -f k8s/base/job-wave8-schema-migrate.yaml
@@ -64,6 +65,14 @@ spec:
                 secretKeyRef:
                   name: market-data-secrets
                   key: postgres-host
+                  optional: true
+            # D6 (2026-10-04): the login, next to its password, so a switch or a
+            # rollback is one Secret patch. Absent key -> the ConfigMap's postgres.user.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: market-data-secrets
+                  key: postgres-user
                   optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
