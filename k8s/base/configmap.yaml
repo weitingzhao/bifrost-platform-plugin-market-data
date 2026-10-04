@@ -21,7 +21,7 @@ data:
       host: bifrost-postgres-rw.data.svc.cluster.local
       port: 5432
       dbname: bifrost_golden_source
-      user: bifrost
+      user: data_writer
       password: ""
     redis:
       url: redis://redis-dev.data.svc.cluster.local:6379/0
