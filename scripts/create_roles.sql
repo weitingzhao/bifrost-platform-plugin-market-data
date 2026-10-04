@@ -42,23 +42,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA features
   GRANT SELECT ON TABLES TO market_reader;
 
 -- P9 lockdown: data_writer must not write Trade / public business tables.
--- Revoke blanket public privileges, then re-grant SELECT-only on watchlist
--- (scheduler loads symbols from Trade public.watchlist).
+-- Revoke blanket public privileges. The scheduler reads the watchlist from the
+-- Platform union (2026-10-03), never from a table, so nothing is re-granted.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM data_writer;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM data_writer;
 REVOKE CREATE ON SCHEMA public FROM data_writer;
 
-DO $$ BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = 'watchlist'
-  ) THEN
-    EXECUTE 'GRANT SELECT ON public.watchlist TO data_writer';
-    RAISE NOTICE 'Granted SELECT on public.watchlist to data_writer (P9 lockdown)';
-  ELSE
-    RAISE NOTICE 'public.watchlist not found — skipping GRANT (apply Trade DDL first)';
-  END IF;
-END $$;
 
 -- Optional: allow readers to see job status (not write)
 GRANT USAGE ON SCHEMA ops_jobs TO market_reader;

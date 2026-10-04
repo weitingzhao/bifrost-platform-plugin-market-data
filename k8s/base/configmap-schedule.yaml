@@ -11,12 +11,7 @@ data:
   # between them is a slot behaving differently in the cluster than it reads.
   schedule.yaml: |
     scheduler:
-      watchlist_source: platform-api
       platform_api_url: http://platform-api.bifrost-platform-prod.svc.cluster.local:8780
-      watchlist_query: >-
-        SELECT DISTINCT symbol FROM public.watchlist
-        WHERE sec_type = 'STK' AND optionable = true
-          AND symbol IS NOT NULL AND trim(symbol) <> ''
       # IV Radar / SEPA benchmark universe: ETFs + SPX + M7 mega-caps.
       # eod-pipeline / option_snapshot / option_open_interest / atm-iv-pcr /
       # iv-percentile all union this with the watchlist.

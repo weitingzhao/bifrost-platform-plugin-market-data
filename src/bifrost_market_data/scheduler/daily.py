@@ -145,12 +145,6 @@ SKIP_ON_HOLIDAY_SLOTS = frozenset(
     }
 )
 
-DEFAULT_WATCHLIST_QUERY = """
-SELECT DISTINCT symbol FROM public.watchlist
-WHERE sec_type = 'STK' AND optionable = true
-  AND symbol IS NOT NULL AND trim(symbol) <> ''
-""".strip()
-
 # Same filter as Research dim_universe / Stock Screener Technical.
 CS_UNIVERSE_QUERY = """
 SELECT symbol
@@ -370,9 +364,9 @@ def is_trading_day(conn: Any, d: date) -> bool:
 def resolve_scheduler_cfg() -> dict[str, Any]:
     """The scheduler block as the slots see it: schedule.yaml, then config overrides.
 
-    Callers that pass ``{}`` instead get the DB fallback path, which on Golden
-    Source means ``public.watchlist`` — a table that does not exist — so the
-    watchlist half of any scope they build comes back silently empty.
+    Callers that pass ``{}`` instead have no ``platform_api_url`` (unless
+    ``PLATFORM_API_URL`` is set), so the watchlist comes from the cache alone or
+    is empty.
     """
     schedule = load_schedule() or {}
     cfg = dict(schedule.get("scheduler") or {})
@@ -386,67 +380,44 @@ def load_watchlist_symbols(
     conn: Any,
     scheduler_cfg: Mapping[str, Any],
 ) -> list[str]:
-    """Return watchlist symbols from config override, platform-api, or DB query.
+    """Return the watchlist: the config override, else the Platform union, else its cache.
 
     Resolution order:
     1. ``watchlist_symbols`` hard override (always wins)
-    2. ``watchlist_source: platform-api`` → fetch from Platform API union endpoint
-       (falls back to DB on failure)
-    3. Default: DB query via ``watchlist_query``
+    2. Platform API ``/api/v1/watchlist/union`` (``platform_api_url`` or
+       ``PLATFORM_API_URL``); every answer is stored in ``ops_jobs.watchlist_cache``
+    3. That cache, when the Platform cannot be reached
+
+    There is no database query: the plugin does not read Trade tables. The old
+    ``watchlist_query`` ran on Golden Source, which has no ``public.watchlist``, so it
+    could only fail (removed 2026-10-03). With neither source the answer is empty and
+    logged as an error.
     """
     override = scheduler_cfg.get("watchlist_symbols")
     if override:
         return sorted({str(s).strip().upper() for s in override if str(s).strip()})
 
-    source = str(scheduler_cfg.get("watchlist_source") or "db").strip().lower()
-    if source == "platform-api":
-        platform_url = str(scheduler_cfg.get("platform_api_url") or "").strip()
-        if not platform_url:
-            platform_url = os.environ.get("PLATFORM_API_URL", "").strip()
-        if platform_url:
-            symbols = load_watchlist_from_platform(platform_url)
-            if symbols is not None:
-                _store_watchlist_cache(conn, symbols, source="platform-api")
-                return symbols
-            cached = _read_watchlist_cache(conn)
-            if cached:
-                logger.warning(
-                    "platform-api watchlist union unreachable; using the cached union (%d symbols)",
-                    len(cached),
-                )
-                return cached
-            logger.warning("platform-api fallback to DB watchlist query")
-        else:
-            logger.warning(
-                "watchlist_source=platform-api but no platform_api_url configured; "
-                "falling back to DB"
-            )
-
-    query = str(scheduler_cfg.get("watchlist_query") or DEFAULT_WATCHLIST_QUERY).strip()
-    symbols: list[str] = []
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
-            if rows is None:
-                rows = []
-            for row in rows:
-                if isinstance(row, Mapping):
-                    sym = row.get("symbol") or next(iter(row.values()), None)
-                else:
-                    sym = row[0] if row else None
-                if sym:
-                    symbols.append(str(sym).strip().upper())
-    except Exception as exc:
-        # Golden Source no longer hosts public.watchlist (Trade-owned). A missing
-        # table must not fail the CronJob after platform-api union is unreachable.
-        logger.warning("watchlist DB fallback failed: %s; returning empty list", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return []
-    return sorted(set(symbols))
+    platform_url = str(scheduler_cfg.get("platform_api_url") or "").strip()
+    if not platform_url:
+        platform_url = os.environ.get("PLATFORM_API_URL", "").strip()
+    if platform_url:
+        symbols = load_watchlist_from_platform(platform_url)
+        if symbols is not None:
+            _store_watchlist_cache(conn, symbols, source="platform-api")
+            return symbols
+    cached = _read_watchlist_cache(conn)
+    if cached:
+        logger.warning(
+            "platform-api watchlist union %s; using the cached union (%d symbols)",
+            "unreachable" if platform_url else "not configured",
+            len(cached),
+        )
+        return cached
+    logger.error(
+        "no watchlist: platform-api union %s and ops_jobs.watchlist_cache is empty",
+        "unreachable" if platform_url else "not configured (platform_api_url / PLATFORM_API_URL)",
+    )
+    return []
 
 
 #: Research publishes the option universe as a rule (research.option_universe:
@@ -716,9 +687,8 @@ def resolve_watchlist_with_source(
     """Resolve coverage/quality watchlist the same way CronJobs do.
 
     Order:
-    1. ``schedule.yaml`` scheduler block (``watchlist_source: platform-api`` union)
-    2. DB ``public.watchlist`` (usually absent on Golden Source)
-    3. ``market.option_contract`` underlyings (inventory-compatible fallback)
+    1. ``load_watchlist_symbols``: config override, Platform union, its cache
+    2. ``market.option_contract`` underlyings (inventory-compatible fallback)
 
     Returns ``(symbols, source)`` where source is ``watchlist``,
     ``option_contract_underlyings``, or ``empty``.

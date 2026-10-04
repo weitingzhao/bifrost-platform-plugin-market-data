@@ -2,15 +2,10 @@
 # Cron strings are informational; K8s CronJob YAML is the runtime schedule source.
 
 scheduler:
-  # Watchlist source: "db" (default) queries local PG, "platform-api" fetches
-  # the union of all Trade environments' watchlists from Platform API.
-  watchlist_source: platform-api
+  # Watchlist: the union of all Trade environments' watchlists from Platform API
+  # (cached in ops_jobs.watchlist_cache). The plugin never reads Trade tables.
   platform_api_url: http://platform-api.bifrost-platform-prod.svc.cluster.local:8780
-  watchlist_query: >-
-    SELECT DISTINCT symbol FROM public.watchlist
-    WHERE sec_type = 'STK' AND optionable = true
-      AND symbol IS NOT NULL AND trim(symbol) <> ''
-  # Optional hard-coded override (skips DB query when set):
+  # Optional hard-coded override (skips the Platform union when set):
   # watchlist_symbols: [AAPL, MSFT, TSLA]
   # Wave A IV Radar: unioned into eod-pipeline and option-refresh
   # (always included in the refresh batch). Analytics upserts moved to Research.

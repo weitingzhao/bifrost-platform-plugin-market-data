@@ -446,7 +446,10 @@ def test_enqueue_stock_eod() -> None:
         conn,
         "stock-eod",
         target_date=date(2024, 6, 20),
-        scheduler_cfg={"slots": {"stock-eod": {"priority": 5}}},
+        scheduler_cfg={
+            "slots": {"stock-eod": {"priority": 5}},
+            "watchlist_symbols": ["AAPL", "MSFT", "TSLA"],
+        },
     )
     assert result["enqueued"] == 3
     assert result["deduped"] == 0
@@ -1423,12 +1426,14 @@ def test_readiness_refresh_commits() -> None:
     assert conn.committed == 0  # retired slot — no SQL executed
 
 
-def test_watchlist_db_fallback_missing_table_returns_empty() -> None:
+def test_watchlist_without_platform_or_cache_is_empty_and_queries_no_trade_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from bifrost_market_data.scheduler.daily import load_watchlist_symbols
 
+    monkeypatch.delenv("PLATFORM_API_URL", raising=False)
     conn = _DailyConn(raise_on_watchlist=True)
-    symbols = load_watchlist_symbols(conn, {"watchlist_source": "db"})
-    assert symbols == []
+    assert load_watchlist_symbols(conn, {}) == []
 
 
 def test_resolve_watchlist_option_contract_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1678,7 +1683,7 @@ def test_fundamentals_rotate_skips_vendor_voids() -> None:
 def test_watchlist_falls_back_to_cache_not_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     from bifrost_market_data.scheduler import daily as mod
 
-    cfg = {"watchlist_source": "platform-api", "platform_api_url": "http://platform.test"}
+    cfg = {"platform_api_url": "http://platform.test"}
     # Reachable: the union is returned and cached.
     monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: ["NVDA", "TSLA"])
     conn = _DailyConn(watchlist=["AAPL"])
@@ -1686,13 +1691,14 @@ def test_watchlist_falls_back_to_cache_not_to_empty(monkeypatch: pytest.MonkeyPa
     assert any(
         "watchlist_cache" in st[0].lower() and "insert" in st[0].lower() for st in conn.statements
     )
-    # Unreachable: the cached union wins over the (Trade-owned, usually absent) DB query.
+    # Unreachable: the cached union is used.
     monkeypatch.setattr(mod, "load_watchlist_from_platform", lambda url, **kw: None)
     conn = _DailyConn(watchlist=["AAPL"], watchlist_cache=["NVDA", "TSLA"])
     assert mod.load_watchlist_symbols(conn, cfg) == ["NVDA", "TSLA"]
-    # Unreachable and no cache: the old DB fallback still applies.
+    # Unreachable and no cache: empty -- never a query on a Trade table.
     conn = _DailyConn(watchlist=["AAPL"])
-    assert mod.load_watchlist_symbols(conn, cfg) == ["AAPL"]
+    assert mod.load_watchlist_symbols(conn, cfg) == []
+    assert not any("watchlist" in st[0].lower() and "watchlist_cache" not in st[0].lower() for st in conn.statements)
 
 
 def test_trim_counts_snapshot_retention_in_sessions() -> None:

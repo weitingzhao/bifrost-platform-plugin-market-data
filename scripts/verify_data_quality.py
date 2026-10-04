@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--symbols",
         default=None,
-        help="Comma-separated watchlist override (skips public.watchlist query)",
+        help="Comma-separated watchlist override (skips the Platform watchlist union)",
     )
     args = parser.parse_args(argv)
 

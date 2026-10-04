@@ -100,9 +100,9 @@ def benchmark_scope(
 
     The minute slots target that union, so dividing by the eleven benchmarks
     alone reported 164% coverage. The watchlist half needs the real scheduler
-    block: with an empty one the loader takes the DB path to ``public.watchlist``,
-    which Golden Source does not have, and the union quietly shrinks back to the
-    benchmarks — measured 3/11 = 27% for stock_minute where the honest reading
+    block: with an empty one the loader has no Platform URL (unless
+    ``PLATFORM_API_URL`` is set) and falls to the cache alone, and the union can
+    shrink back to the benchmarks — measured 3/11 = 27% for stock_minute where the honest reading
     against the 29-name union is lower.
     """
     from bifrost_market_data.scheduler.daily import load_watchlist_symbols, resolve_scheduler_cfg
