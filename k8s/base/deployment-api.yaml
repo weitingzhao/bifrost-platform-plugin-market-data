@@ -89,6 +89,12 @@ spec:
               mountPath: /config/schedule.yaml
               subPath: schedule.yaml
               readOnly: true
+            # Archive before delete (phase 0 W3): the nightly trim writes rows past
+            # the window here as Parquet before it deletes them. NAS k3s-cold via
+            # the nfs-cold StorageClass. The trim refuses to delete unless this is
+            # a mount point.
+            - name: archive
+              mountPath: /archive
           resources:
             requests:
               cpu: 50m
@@ -99,7 +105,9 @@ spec:
               cpu: 500m
               # 256Mi OOMKilled the pod on 2026-09-11 02:29 during a cold cache
               # warm-up; the dimensions compute walks 19 datasets x 4 axes.
-              memory: 512Mi
+              # 768Mi from 0.77.0: the trim's archive pass imports pyarrow and
+              # holds 50,000-row batches.
+              memory: 768Mi
           livenessProbe:
             httpGet:
               path: /health
@@ -123,3 +131,6 @@ spec:
         - name: schedule
           configMap:
             name: market-data-schedule
+        - name: archive
+          persistentVolumeClaim:
+            claimName: market-data-archive

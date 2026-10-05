@@ -1816,6 +1816,17 @@ def enqueue_slot(
         # (phase 0 W3, Owner 2026-10-05). Config, so lifting a hold is a ConfigMap
         # change and not a release.
         held = _retention_held(scfg)
+        # Past a hold: the rows go to Parquet on the NAS first and only then leave
+        # (see retention_archive). A table named in both stays held.
+        from bifrost_market_data.retention_archive import resolve_archive
+
+        archive = resolve_archive(scfg)
+        archived = (archive.tables - held) if archive is not None else frozenset()
+        archive_runs: dict[str, Any] = {}
+        snapshot_direct = (
+            "raw_market.option_snapshot" not in held
+            and "raw_market.option_snapshot" not in archived
+        )
         snapshot_keep_sessions = int(scfg.get("option_snapshot_keep_sessions") or 90)
         snapshot_keep = int(scfg.get("option_snapshot_keep_days") or 90)
         try:
@@ -1842,7 +1853,7 @@ def enqueue_slot(
             # seconds across eighteen partitions to delete nothing, so under the
             # scheduler CLI's two-second default this had never once completed.
             snapshot_budget = float(scfg.get("snapshot_budget_sec") or 60.0)
-            if "raw_market.option_snapshot" not in held:
+            if snapshot_direct:
                 intraday_deleted = trim_option_snapshots(
                     conn,
                     keep_days=intraday_keep,
@@ -1903,7 +1914,7 @@ def enqueue_slot(
         # partitions are owned by `postgres` — so retention must not depend on
         # it. Deleting needs only the DML grant the role has.
         try:
-            if "raw_market.option_snapshot" not in held:
+            if snapshot_direct:
                 past_window_deleted = trim_option_snapshots(
                     conn,
                     keep_days=snapshot_keep,
@@ -1913,6 +1924,43 @@ def enqueue_slot(
             logger.warning("option_snapshot row retention failed: %s", exc)
             if hasattr(conn, "rollback"):
                 conn.rollback()
+        if archive is not None and "raw_market.option_snapshot" in archived:
+            # Same two windows as the deletes above, the same pinned contracts
+            # spared; no partition drop, because a dropped month is not archived.
+            from bifrost_market_data.retention_archive import (
+                INTRADAY_ONLY,
+                archive_past_window,
+            )
+            from bifrost_market_data.scheduler.enqueue import _SPARE_PINNED, _pin_table_exists
+
+            spare = _SPARE_PINNED if _pin_table_exists(conn) else ""
+            snapshot_budget = float(scfg.get("snapshot_budget_sec") or 60.0)
+            run = archive_past_window(
+                conn,
+                archive,
+                "raw_market.option_snapshot",
+                keep_days=int(scfg.get("option_snapshot_intraday_keep_days") or 30),
+                kind="intraday",
+                extra=f"AND {INTRADAY_ONLY} {spare}",
+                month_floor=False,
+                span_days=3,
+                budget_sec=snapshot_budget,
+            )
+            archive_runs["raw_market.option_snapshot:intraday"] = run.as_dict()
+            intraday_deleted = run.rows
+            run = archive_past_window(
+                conn,
+                archive,
+                "raw_market.option_snapshot",
+                keep_days=snapshot_keep,
+                kind="all",
+                extra=spare,
+                month_floor=False,
+                span_days=3,
+                budget_sec=snapshot_budget,
+            )
+            archive_runs["raw_market.option_snapshot:all"] = run.as_dict()
+            past_window_deleted = run.rows
 
         # ── The two largest tables, which had no ceiling at all ──
         # 9.65 GB and 4.7 GB measured 2026-09-25, and nothing expired from
@@ -1929,7 +1977,21 @@ def enqueue_slot(
         option_daily_partitions_dropped: int | None = None
         short_volume_deleted = 0
         option_daily_deleted = 0
-        if option_daily_retention and "raw_market.option_daily" not in held:
+        if option_daily_retention and "raw_market.option_daily" in archived:
+            from bifrost_market_data.retention_archive import archive_past_window
+
+            # The month drop is skipped: a dropped month is not archived. The
+            # emptied partitions stay until someone drops them deliberately.
+            run = archive_past_window(
+                conn,
+                archive,  # type: ignore[arg-type]
+                "raw_market.option_daily",
+                keep_days=option_daily_retention,
+                budget_sec=float(scfg.get("dated_budget_sec") or 60.0),
+            )
+            archive_runs["raw_market.option_daily"] = run.as_dict()
+            option_daily_deleted = run.rows
+        elif option_daily_retention and "raw_market.option_daily" not in held:
             # Dropping the month is the cheap path and it is tried first: all 18
             # partitions are owned by `bifrost`, unlike option_snapshot's, so it
             # works. The function truncates its cutoff to the start of a month,
@@ -1997,7 +2059,19 @@ def enqueue_slot(
                 logger.warning("option_daily row retention failed: %s", exc)
                 if hasattr(conn, "rollback"):
                     conn.rollback()
-        if short_volume_retention and "raw_market.short_volume" not in held:
+        if short_volume_retention and "raw_market.short_volume" in archived:
+            from bifrost_market_data.retention_archive import archive_past_window
+
+            run = archive_past_window(
+                conn,
+                archive,  # type: ignore[arg-type]
+                "raw_market.short_volume",
+                keep_days=short_volume_retention,
+                budget_sec=float(scfg.get("dated_budget_sec") or 60.0),
+            )
+            archive_runs["raw_market.short_volume"] = run.as_dict()
+            short_volume_deleted = run.rows
+        elif short_volume_retention and "raw_market.short_volume" not in held:
             # A single unpartitioned heap, so a DELETE is the only retention
             # available. It is also affordable: about 13,000 rows a day.
             try:
@@ -2034,6 +2108,7 @@ def enqueue_slot(
             "short_volume_deleted": short_volume_deleted,
             "partitions_ensured": partitions_ensured,
             "retention_held": sorted(held),
+            "retention_archive": archive_runs,
             "enqueued": 0,
             "deduped": 0,
         }

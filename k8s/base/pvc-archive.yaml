@@ -1,0 +1,21 @@
+# Archive before delete (phase 0 W3, Owner 2026-10-05): rows the nightly trim
+# expires from raw_market.option_snapshot / option_daily / short_volume are written
+# here as Parquet first. None of them can be fetched again once past the window.
+#
+# NAS /volume1/k3s-cold through the nfs-cold StorageClass (nfs-subdir provisioner,
+# reclaimPolicy Retain, archiveOnDelete): deleting this claim keeps the files.
+# The provisioner does not enforce the size; it is the planning number — Parquet
+# with zstd runs to a few GB a year at the current collection.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: market-data-archive
+  labels:
+    app.kubernetes.io/name: market-data-archive
+spec:
+  storageClassName: nfs-cold
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi

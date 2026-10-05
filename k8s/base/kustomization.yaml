@@ -12,6 +12,7 @@ resources:
   - service-api.yaml
   - configmap.yaml
   - configmap-schedule.yaml
+  - pvc-archive.yaml
   - network-policy.yaml
   - pdb.yaml
   - cronjob-daily.yaml

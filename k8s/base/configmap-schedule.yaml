@@ -193,6 +193,16 @@ data:
             - raw_market.option_snapshot
             - raw_market.option_daily
             - raw_market.short_volume
+          # Archive before delete: rows past the window go to Parquet under
+          # /archive (NAS k3s-cold, PVC market-data-archive) and are deleted only
+          # once the file is verified. A table that is also in retention_hold stays
+          # held, so this takes effect for a table when its hold line is removed.
+          retention_archive:
+            dir: /archive
+            tables:
+              - raw_market.option_snapshot
+              - raw_market.option_daily
+              - raw_market.short_volume
         stock-snapshot:
           cron: "5 21 * * *"
           priority: 4

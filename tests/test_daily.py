@@ -2813,6 +2813,41 @@ def test_a_hold_on_one_table_leaves_the_others_trimmed() -> None:
     assert out["retention_held"] == ["raw_market.short_volume"], "unknown names are ignored"
 
 
+def test_an_archived_table_is_not_deleted_from_while_the_archive_is_missing(
+    tmp_path: Any,
+) -> None:
+    """Archive mode fails closed: no NAS mount, no delete and no partition drop."""
+    tables = ["raw_market.option_snapshot", "raw_market.option_daily", "raw_market.short_volume"]
+    conn = _DailyConn([])
+    out = _trim(conn, retention_archive={"dir": str(tmp_path / "absent"), "tables": tables})
+    stmts = " ".join(st[0].lower() for st in conn.statements)
+    for table in tables:
+        assert f"delete from {table}" not in stmts, table
+        name = table.split(".")[1]
+        assert f"drop_month_partitions_older_than('raw_market', '{name}'" not in stmts, table
+    runs = out["retention_archive"]
+    assert set(runs) == {
+        "raw_market.option_snapshot:intraday",
+        "raw_market.option_snapshot:all",
+        "raw_market.option_daily",
+        "raw_market.short_volume",
+    }
+    assert all("does not exist" in (r["error"] or "") for r in runs.values())
+
+
+def test_a_hold_wins_over_archive() -> None:
+    conn = _DailyConn([])
+    out = _trim(
+        conn,
+        retention_hold=["raw_market.option_daily"],
+        retention_archive={"dir": "/nowhere", "tables": ["raw_market.option_daily"]},
+    )
+    assert out["retention_archive"] == {}
+    assert "delete from raw_market.option_daily" not in " ".join(
+        st[0].lower() for st in conn.statements
+    )
+
+
 def test_no_hold_is_the_default() -> None:
     out = _trim(_DailyConn([]))
     assert out["retention_held"] == []
