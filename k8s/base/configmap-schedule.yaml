@@ -173,24 +173,18 @@ data:
           # keeps the throughput series once they are gone.
           queue_sample_keep_days: 90
           option_trades_keep_days: 30
-          # HELD 2026-10-05 (Owner, phase 0 W3): option_snapshot cannot be re-fetched,
-          # so nothing expires until archive-before-delete ships. Was 90 sessions
-          # (keep_days unset = 90). keep_days must be held too: it is the fallback
-          # when the calendar has fewer sessions than keep_sessions. Restore by
-          # reverting these three numbers.
-          option_snapshot_keep_sessions: 36500
-          option_snapshot_keep_days: 36500
+          # One observation per session, so retention is counted in sessions.
+          option_snapshot_keep_sessions: 90
           # Intraday rows leave at about 1,550 a second (the New York time-of-day has
           # to be evaluated per row); a session writes ~345,000 of them across its
           # three fires, so one nightly run needs about four minutes to keep up.
           snapshot_budget_sec: 300
-          # HELD 2026-10-05 (W3): was 30.
-          option_snapshot_intraday_keep_days: 36500
+          option_snapshot_intraday_keep_days: 30
           # Nothing expires from these until archive-before-delete ships (W3, Owner
           # 2026-10-05): none of them can be fetched again once past the window.
-          # Lift a hold by removing its line.
+          # Lift a hold by removing its line. option_snapshot lifted 2026-10-05 (Owner):
+          # it is now archived to /archive before each delete.
           retention_hold:
-            - raw_market.option_snapshot
             - raw_market.option_daily
             - raw_market.short_volume
           # Archive before delete: rows past the window go to Parquet under
