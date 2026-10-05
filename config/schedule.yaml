@@ -186,6 +186,13 @@ scheduler:
       snapshot_budget_sec: 300
       # HELD 2026-10-05 (W3): was 30.
       option_snapshot_intraday_keep_days: 36500
+      # Nothing expires from these until archive-before-delete ships (W3, Owner
+      # 2026-10-05): none of them can be fetched again once past the window.
+      # Lift a hold by removing its line.
+      retention_hold:
+        - raw_market.option_snapshot
+        - raw_market.option_daily
+        - raw_market.short_volume
     # Wave 14G-A: readiness-refresh retired (stock_readiness_daily dropped).
     stock-snapshot:
       cron: "5 21 * * *"

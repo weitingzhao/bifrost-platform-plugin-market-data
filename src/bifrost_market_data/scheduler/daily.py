@@ -49,6 +49,32 @@ from bifrost_market_data.symbol_void import (
 logger = logging.getLogger(__name__)
 
 
+#: The tables the trim slot expires rows from. A hold names one of these.
+RETENTION_DATASETS: frozenset[str] = frozenset(
+    {"raw_market.option_snapshot", "raw_market.option_daily", "raw_market.short_volume"}
+)
+
+
+def _retention_held(scfg: Mapping[str, Any]) -> frozenset[str]:
+    """The datasets the trim slot must not expire rows from (``retention_hold``).
+
+    A name that is not a trimmed table is logged and ignored rather than raised:
+    a typo must not stop the job trim that runs in the same slot, and it must
+    not silently read as a hold either.
+    """
+    raw = scfg.get("retention_hold") or ()
+    if isinstance(raw, str):
+        raw = (raw,)
+    held = {str(x).strip() for x in raw if str(x).strip()}
+    unknown = held - RETENTION_DATASETS
+    if unknown:
+        logger.warning("retention_hold names tables the trim does not expire: %s", sorted(unknown))
+    held &= RETENTION_DATASETS
+    if held:
+        logger.info("retention held (nothing expires) for %s", sorted(held))
+    return frozenset(held)
+
+
 def _retention_days(dataset: str) -> int | None:
     """The contract's rolling window, imported where it is used.
 
@@ -1785,6 +1811,11 @@ def enqueue_slot(
         # now holds exactly one observation per session, so "keep 90 sessions"
         # is the promise Research depends on. Holidays and a long weekend used
         # to quietly shorten a 90-day window by several sessions.
+        # Datasets whose rows cannot be fetched again are held — nothing expires —
+        # until the rows past the window can be archived before they are deleted
+        # (phase 0 W3, Owner 2026-10-05). Config, so lifting a hold is a ConfigMap
+        # change and not a release.
+        held = _retention_held(scfg)
         snapshot_keep_sessions = int(scfg.get("option_snapshot_keep_sessions") or 90)
         snapshot_keep = int(scfg.get("option_snapshot_keep_days") or 90)
         try:
@@ -1811,25 +1842,26 @@ def enqueue_slot(
             # seconds across eighteen partitions to delete nothing, so under the
             # scheduler CLI's two-second default this had never once completed.
             snapshot_budget = float(scfg.get("snapshot_budget_sec") or 60.0)
-            intraday_deleted = trim_option_snapshots(
-                conn,
-                keep_days=intraday_keep,
-                intraday_only=True,
-                budget_sec=snapshot_budget,
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT ops_jobs.drop_month_partitions_older_than"
-                    "('raw_market', 'option_snapshot', %s)",
-                    (snapshot_keep,),
+            if "raw_market.option_snapshot" not in held:
+                intraday_deleted = trim_option_snapshots(
+                    conn,
+                    keep_days=intraday_keep,
+                    intraday_only=True,
+                    budget_sec=snapshot_budget,
                 )
-                row = cur.fetchone() if hasattr(cur, "fetchone") else None
-            if row is not None:
-                snapshot_partitions_dropped = int(
-                    row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
-                )
-            if hasattr(conn, "commit"):
-                conn.commit()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT ops_jobs.drop_month_partitions_older_than"
+                        "('raw_market', 'option_snapshot', %s)",
+                        (snapshot_keep,),
+                    )
+                    row = cur.fetchone() if hasattr(cur, "fetchone") else None
+                if row is not None:
+                    snapshot_partitions_dropped = int(
+                        row[0] if not isinstance(row, Mapping) else next(iter(row.values()))
+                    )
+                if hasattr(conn, "commit"):
+                    conn.commit()
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT ops_jobs.ensure_month_partitions('raw_market', 'option_snapshot', 3, 3)"
@@ -1871,11 +1903,12 @@ def enqueue_slot(
         # partitions are owned by `postgres` — so retention must not depend on
         # it. Deleting needs only the DML grant the role has.
         try:
-            past_window_deleted = trim_option_snapshots(
-                conn,
-                keep_days=snapshot_keep,
-                budget_sec=float(scfg.get("snapshot_budget_sec") or 60.0),
-            )
+            if "raw_market.option_snapshot" not in held:
+                past_window_deleted = trim_option_snapshots(
+                    conn,
+                    keep_days=snapshot_keep,
+                    budget_sec=float(scfg.get("snapshot_budget_sec") or 60.0),
+                )
         except Exception as exc:  # noqa: BLE001 — retention best-effort
             logger.warning("option_snapshot row retention failed: %s", exc)
             if hasattr(conn, "rollback"):
@@ -1896,7 +1929,7 @@ def enqueue_slot(
         option_daily_partitions_dropped: int | None = None
         short_volume_deleted = 0
         option_daily_deleted = 0
-        if option_daily_retention:
+        if option_daily_retention and "raw_market.option_daily" not in held:
             # Dropping the month is the cheap path and it is tried first: all 18
             # partitions are owned by `bifrost`, unlike option_snapshot's, so it
             # works. The function truncates its cutoff to the start of a month,
@@ -1964,7 +1997,7 @@ def enqueue_slot(
                 logger.warning("option_daily row retention failed: %s", exc)
                 if hasattr(conn, "rollback"):
                     conn.rollback()
-        if short_volume_retention:
+        if short_volume_retention and "raw_market.short_volume" not in held:
             # A single unpartitioned heap, so a DELETE is the only retention
             # available. It is also affordable: about 13,000 rows a day.
             try:
@@ -2000,6 +2033,7 @@ def enqueue_slot(
             "short_volume_keep_days": short_volume_retention,
             "short_volume_deleted": short_volume_deleted,
             "partitions_ensured": partitions_ensured,
+            "retention_held": sorted(held),
             "enqueued": 0,
             "deduped": 0,
         }

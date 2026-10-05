@@ -2781,6 +2781,43 @@ def test_short_volume_is_deleted_because_it_cannot_be_dropped() -> None:
     )
 
 
+def test_a_held_dataset_expires_nothing() -> None:
+    """Rows that cannot be fetched again are held until they can be archived first.
+
+    Phase 0 W3 (Owner 2026-10-05): option_snapshot is the vendor's IV / Greeks /
+    OI as observed, and option_daily / short_volume fall out of the vendor's own
+    two-year window on the same night they fall out of ours. A held table gets
+    no delete and no partition drop; the job trim and partition provisioning in
+    the same slot still run.
+    """
+    held = ["raw_market.option_snapshot", "raw_market.option_daily", "raw_market.short_volume"]
+    conn = _DailyConn([])
+    out = _trim(conn, retention_hold=held)
+    stmts = " ".join(st[0].lower() for st in conn.statements)
+    for table in held:
+        assert f"delete from {table}" not in stmts, table
+        name = table.split(".")[1]
+        assert f"drop_month_partitions_older_than('raw_market', '{name}'" not in stmts, table
+    assert out["retention_held"] == sorted(held)
+    assert out["option_daily_default_rows_deleted"] == 0
+    assert out["short_volume_deleted"] == 0
+    assert "ensure_month_partitions('raw_market', 'option_snapshot'" in stmts
+
+
+def test_a_hold_on_one_table_leaves_the_others_trimmed() -> None:
+    conn = _DailyConn([])
+    out = _trim(conn, retention_hold=["raw_market.short_volume", "raw_market.nope"])
+    stmts = " ".join(st[0].lower() for st in conn.statements)
+    assert "delete from raw_market.short_volume" not in stmts
+    assert "delete from raw_market.option_daily" in stmts
+    assert out["retention_held"] == ["raw_market.short_volume"], "unknown names are ignored"
+
+
+def test_no_hold_is_the_default() -> None:
+    out = _trim(_DailyConn([]))
+    assert out["retention_held"] == []
+
+
 def test_stock_daily_is_not_trimmed_although_it_declares_a_window() -> None:
     """Its five years roll at the vendor, not here.
 
