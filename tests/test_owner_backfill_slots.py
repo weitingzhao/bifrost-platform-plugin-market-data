@@ -314,6 +314,12 @@ def test_a_new_slot_has_no_cron_and_no_cronjob(slot: str) -> None:
 
     cfg = yaml.safe_load(pathlib.Path("config/schedule.yaml").read_text())
     assert "cron" not in cfg["scheduler"]["slots"][slot], "Owner-run means Owner-triggered"
-    manifests = list(pathlib.Path("k8s").rglob("cronjob-*.yaml"))
+    manifests = list(pathlib.Path("k8s").rglob("*.yaml"))
     assert manifests, "the manifests moved; this test would pass by accident"
-    assert not [m for m in manifests if slot in m.name]
+    cronjobs = [
+        doc
+        for m in manifests
+        for doc in yaml.safe_load_all(m.read_text(encoding="utf-8"))
+        if isinstance(doc, dict) and doc.get("kind") == "CronJob"
+    ]
+    assert not [d for d in cronjobs if slot in yaml.safe_dump(d)]

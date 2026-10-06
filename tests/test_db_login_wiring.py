@@ -51,8 +51,8 @@ def test_every_password_comes_with_its_user() -> None:
             checked += 1
             assert env.get("POSTGRES_USER") == ("market-data-secrets", "postgres-user", True), name
             assert env["POSTGRES_PASSWORD"][:2] == ("market-data-secrets", "postgres-password"), name
-    # 3 Deployments, 14 CronJobs, the migrate Job.
-    assert checked == 18
+    # 3 Deployments and the migrate Job (no CronJobs since TD-124).
+    assert checked == 4
 
 
 def test_the_user_key_is_optional_so_old_secrets_keep_working() -> None:

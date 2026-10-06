@@ -1,8 +1,8 @@
 """Option daily backfill CLI — Wave LO-5.
 
 Enqueues ``option_daily`` jobs into ``ops_jobs.job_ingest`` for historical
-fill.  CronJob ``market-data-option-backfill`` is suspended until Owner
-Polygon tier decision (see docs/OPTION_BACKFILL_PROGRAM.md).
+fill.  Owner-run: the suspended ``market-data-option-backfill`` CronJob that
+once wrapped it was deleted (TD-124); see docs/OPTION_BACKFILL_PROGRAM.md.
 """
 
 from __future__ import annotations

@@ -60,32 +60,14 @@ STOCKS_HEALTH_JSON="$(probe_health 18080 stocks)"
 OPTIONS_HEALTH_JSON="$(probe_health 18081 options)"
 
 echo ""
-echo "== [3/6] CronJobs present =="
-EXPECTED_CRONS=(
-  market-data-stock-eod
-  market-data-eod-pipeline
-  market-data-universe-daily
-  market-data-corporate
-  market-data-calendar
-  market-data-option-refresh
-  market-data-option-bars
-  market-data-minute-bars
-  market-data-maintenance
-  market-data-reference
-  market-data-fundamentals-rotate
-)
-MISSING=0
-for cj in "${EXPECTED_CRONS[@]}"; do
-  if ! kubectl -n "$NS" get cronjob "$cj" >/dev/null 2>&1; then
-    echo "  missing CronJob: $cj"
-    MISSING=1
-  fi
-done
-if [[ "$MISSING" -ne 0 ]]; then
-  echo "FAIL: one or more CronJobs missing"
+echo "== [3/6] No CronJobs (Dagster owns every slot, TD-124) =="
+LEFT="$(kubectl -n "$NS" get cronjob -o name 2>/dev/null || true)"
+if [[ -n "$LEFT" ]]; then
+  echo "$LEFT" | sed 's/^/  still present: /'
+  echo "FAIL: CronJobs must not exist in ${NS} (Dagster market_slot_schedules fires the slots)"
   exit 1
 fi
-echo "  ${#EXPECTED_CRONS[@]} CronJobs present"
+echo "  0 CronJobs"
 
 echo ""
 echo "== [4/6] Worker job activity =="

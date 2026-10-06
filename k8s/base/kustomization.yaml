@@ -15,11 +15,6 @@ resources:
   - pvc-archive.yaml
   - network-policy.yaml
   - pdb.yaml
-  - cronjob-daily.yaml
-  - cronjob-option-bars.yaml
-  - cronjob-options-refresh.yaml
-  - cronjob-reference.yaml
-  - cronjob-maintenance.yaml
   - job-wave8-schema-migrate.yaml
 
 labels:
