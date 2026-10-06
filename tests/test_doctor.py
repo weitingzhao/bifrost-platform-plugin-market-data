@@ -35,6 +35,10 @@ class _Cur:
 
         if "from research.option_universe" in q:
             self._rows = list(d.get("universe", []))
+        elif "/* doctor: slot-evidence */" in q:
+            # (kind, mode, expired, dated, last) — the policed slots' own jobs
+            # still on the queue.
+            self._rows = list(d.get("slot_jobs", []))
         elif "from raw_market.option_contract" in q:
             self._rows = _scoped("live")
         elif "/* doctor: degraded-snapshot */" in q:
@@ -147,6 +151,11 @@ def _pin_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doc, "filter_optionable_underlyings", lambda conn, syms: list(syms))
 
 
+#: The rows the doctor judges the policed slots by: their own, not the
+#: dimension rows they share with sibling slots (TD-101).
+POLICED_SLOT_ROWS = tuple(f"slot:{slot}" for slot in doc.POLICED_SLOTS)
+
+
 def _fresh(hours: float) -> datetime:
     return NOW - timedelta(hours=hours)
 
@@ -180,11 +189,15 @@ def _healthy_data() -> dict[str, Any]:
         "ratios": 5000,
         "short_volume": 15000,
         "freshness": [
-            {"dimension": "calendar", "last_run_at": _fresh(5)},
-            {"dimension": "ticker_sync", "last_run_at": _fresh(5)},
-            {"dimension": "option_contract", "last_run_at": _fresh(5)},
-            {"dimension": "dividends", "last_run_at": _fresh(5)},
-            {"dimension": "financials", "last_run_at": _fresh(5)},
+            {"dimension": d, "last_run_at": _fresh(5)}
+            for d in (
+                "calendar",
+                "ticker_sync",
+                "option_contract",
+                "dividends",
+                "financials",
+                *POLICED_SLOT_ROWS,
+            )
         ],
     }
 
@@ -239,8 +252,9 @@ def _rotate_ran(last_run: datetime, now: datetime) -> dict[str, Any]:
     data = _healthy_data()
     data["freshness"] = [
         {"dimension": d, "last_run_at": now - timedelta(hours=1)}
-        for d in ("calendar", "ticker_sync", "option_contract", "dividends")
-    ] + [{"dimension": "financials", "last_run_at": last_run}]
+        for d in POLICED_SLOT_ROWS
+        if d != "slot:fundamentals-rotate"
+    ] + [{"dimension": "slot:fundamentals-rotate", "last_run_at": last_run}]
     return data
 
 
@@ -274,7 +288,7 @@ def test_the_rotate_is_stale_once_two_trading_days_go_missing() -> None:
 
 def test_stale_reference_slots_get_dateless_enqueue() -> None:
     data = _healthy_data()
-    data["freshness"] = [{"dimension": "calendar", "last_run_at": _fresh(80)}]  # others never written
+    data["freshness"] = [{"dimension": "slot:calendar", "last_run_at": _fresh(80)}]  # others never written
     rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
     stale = {f["slot"]: f for f in rep["findings"] if f["id"].startswith("stale:")}
     assert stale["calendar"]["severity"] == "warn"

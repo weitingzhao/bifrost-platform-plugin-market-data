@@ -22,6 +22,11 @@ from bifrost_market_data.ingest.index_options import (
     storage_underlying,
 )
 from bifrost_market_data.symbol_rename import resolve_storage
+from bifrost_market_data.symbol_void import (
+    NO_LISTED_OPTIONS,
+    clear_symbol_void,
+    record_symbol_void,
+)
 from bifrost_market_data.worker.claim import JobRow
 
 _CONTRACT_COLS = (
@@ -147,6 +152,19 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
     except Exception:
         conn.rollback()
         raise
+
+    # The live catalogue, whole: the vendor's answer is the name's verdict. Empty
+    # is "no listed options", remembered so option-refresh stops asking every
+    # run; rows clear it. Keyed by the requested symbol, which is what the
+    # scheduler lists. A dated or expired walk says nothing about today's listing.
+    whole_live_walk = expired is False and not any(
+        payload.get(k) for k in ("expiration_date", "expiration_date_gte", "expiration_date_lte")
+    )
+    if whole_live_walk:
+        if contract_rows:
+            clear_symbol_void(conn, underlying, NO_LISTED_OPTIONS)
+        elif not results:
+            record_symbol_void(conn, underlying, NO_LISTED_OPTIONS, note="no listed options")
 
     return {
         "rows_written": n,

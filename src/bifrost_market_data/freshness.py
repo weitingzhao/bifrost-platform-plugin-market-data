@@ -27,6 +27,67 @@ def dimension_for_kind(kind: str) -> str:
     return _DIMENSION_ALIASES.get(key, key)
 
 
+#: Prefix of the freshness rows a policed slot's own jobs write. A dimension
+#: row says when anything last touched the table; several slots share one, so
+#: ``ticker_sync`` was bumped every night by ticker-details' 200 detail jobs
+#: (one row each) while the reference walk it was meant to evidence could have
+#: stopped. A ``slot:<id>`` row is bumped only by that slot's jobs, and only when
+#: they delivered rows.
+SLOT_FRESHNESS_PREFIX = "slot:"
+
+
+def slot_freshness_key(slot: str) -> str:
+    return f"{SLOT_FRESHNESS_PREFIX}{slot}"
+
+
+def _policed_slot_of_option_contract(payload: Mapping[str, Any]) -> str | None:
+    # option-refresh walks the live catalogue: explicit expired=False and no
+    # date bounds. option-contract-expired walks quarters of the expired one.
+    if payload.get("expired") is not False:
+        return None
+    if any(payload.get(k) for k in ("expiration_date", "expiration_date_gte", "expiration_date_lte")):
+        return None
+    return "option-refresh"
+
+
+#: Every kind ``policed_slot_for_job`` can name a slot for.
+POLICED_SLOT_KINDS: tuple[str, ...] = (
+    "calendar",
+    "ticker_sync",
+    "option_contract",
+    "dividends_market",
+    "splits_market",
+    "financials",
+)
+
+
+def policed_slot_for_job(kind: str, payload: Mapping[str, Any] | None) -> str | None:
+    """The doctor-policed slot whose own work this job is, or None.
+
+    Read from the job's shape, the way the slot enqueues it
+    (``scheduler.daily.enqueue_slot``); ``tests/test_slot_freshness.py`` runs
+    every slot through the real enqueue and holds this function to it, so a
+    sibling slot that shares a kind (ticker-details, option-contract-expired,
+    corporate-backfill) can never evidence a policed one. An Owner-run backfill
+    of the same shape (``scheduler.backfill``) does count: it is the same fetch.
+    """
+    k = str(kind or "").strip()
+    p = payload or {}
+    if k == "calendar":
+        return "calendar"
+    if k == "ticker_sync":
+        # The whole-market list walk. Its delisted lookups ride the same slot but
+        # are a handful of single names; the walk is what the slot is for.
+        return "reference" if p.get("mode") == "universe" else None
+    if k == "option_contract":
+        return _policed_slot_of_option_contract(p)
+    if k in ("dividends_market", "splits_market"):
+        return "corporate"
+    if k == "financials":
+        return "fundamentals-rotate"
+    return None
+
+
 def rows_written_from_result(result: Mapping[str, Any] | None) -> int:
     """Extract rows_written from a handler result dict (default 0)."""
     if not result:

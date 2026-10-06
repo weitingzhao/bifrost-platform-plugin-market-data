@@ -41,6 +41,8 @@ from bifrost_market_data.scheduler.enqueue import (
 from bifrost_market_data.research_pins import load_pinned_contracts, load_pinned_underlyings
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.symbol_void import (
+    NO_LISTED_OPTIONS,
+    NO_LISTED_OPTIONS_RECHECK_DAYS,
     load_voided_symbols,
     load_voids_by_prefix,
     record_symbol_void,
@@ -601,7 +603,7 @@ def stalest_underlyings(conn: Any) -> dict[str, Any] | None:
 
 
 def enumerated_underlyings(conn: Any) -> set[str] | None:
-    """Every underlying already tried: contracts on file, or a finished contract job this week.
+    """Every underlying already tried: contracts on file, or a "no listed options" verdict.
 
     Returns None when the lookup fails. The caller must treat None as "do not
     ramp", never as "nothing is enumerated yet": on 2026-09-08 the previous
@@ -610,40 +612,50 @@ def enumerated_underlyings(conn: Any) -> set[str] | None:
     the tail of the universe was never reached.
 
     Two sources, unioned. Contracts on file is what the rest of the pipeline
-    cares about; finished jobs cover the names the vendor lists no options for,
-    which would otherwise be "new" forever. Both queries are index-shaped —
-    no UPPER(TRIM()) over the contract table.
+    cares about; the void the catalogue walk leaves (``NO_LISTED_OPTIONS``)
+    covers the names the vendor lists no options for, which would otherwise be
+    "new" forever. The second source used to be done jobs "this week" — read
+    from ``ops_jobs.job_ingest``, which keeps finished rows 48 hours
+    (``TRIM_KEEP_HOURS``), so the week was two days. Both queries are
+    index-shaped — no UPPER(TRIM()) over the contract table.
     """
     have: set[str] = set()
-    for sql in (
+    queries: tuple[tuple[str, tuple[Any, ...]], ...] = (
         # A loose index scan: one probe per distinct underlying on the
         # (underlying, expiry) index, milliseconds regardless of row count.
         # Plain DISTINCT is a sequential scan — 1.7s at 660k rows against the
         # role's 2s statement_timeout, and growing with the backfill.
-        """
-        /* enumerated_underlyings: contracts */
-        WITH RECURSIVE u AS (
-            SELECT min(underlying) AS s FROM raw_market.option_contract
-            UNION ALL
-            SELECT (SELECT min(underlying) FROM raw_market.option_contract WHERE underlying > u.s)
-            FROM u WHERE u.s IS NOT NULL
-        )
-        SELECT s FROM u WHERE s IS NOT NULL
-        """,
-        """
-        /* enumerated_underlyings: finished jobs */
-        SELECT DISTINCT payload->>'underlying'
-        FROM ops_jobs.job_ingest
-        WHERE kind = 'option_contract' AND status = 'done'
-          AND created_at >= now() - interval '7 days'
-        """,
-    ):
+        (
+            """
+            /* enumerated_underlyings: contracts */
+            WITH RECURSIVE u AS (
+                SELECT min(underlying) AS s FROM raw_market.option_contract
+                UNION ALL
+                SELECT (SELECT min(underlying) FROM raw_market.option_contract WHERE underlying > u.s)
+                FROM u WHERE u.s IS NOT NULL
+            )
+            SELECT s FROM u WHERE s IS NOT NULL
+            """,
+            (),
+        ),
+        (
+            """
+            /* enumerated_underlyings: no-options voids */
+            SELECT symbol AS s FROM ops_jobs.symbol_source_void WHERE data_type = %s
+            """,
+            (NO_LISTED_OPTIONS,),
+        ),
+    )
+    for sql, params in queries:
         try:
             with conn.cursor() as cur:
-                # The role caps statements at 2s; this pair is index-shaped but
-                # the jobs table is large, so give the lookup room of its own.
+                # The role caps statements at 2s; the loose scan walks a large
+                # table, so give the lookup room of its own.
                 cur.execute("SET LOCAL statement_timeout = '20s'")
-                cur.execute(sql)
+                if params:
+                    cur.execute(sql, params)
+                else:
+                    cur.execute(sql)
                 rows = cur.fetchall() if hasattr(cur, "fetchall") else []
         except Exception as exc:  # noqa: BLE001 — the caller fails closed
             logger.warning("enumerated_underlyings lookup failed; not ramping this run: %s", exc)
@@ -653,7 +665,7 @@ def enumerated_underlyings(conn: Any) -> set[str] | None:
                 pass
             return None
         for row in rows or []:
-            sym = row.get("underlying") if isinstance(row, Mapping) else (row[0] if row else None)
+            sym = row.get("s") if isinstance(row, Mapping) else (row[0] if row else None)
             if sym:
                 have.add(str(sym).strip().upper())
     return have
@@ -2525,13 +2537,26 @@ def enqueue_slot(
         # name before its job finished is a no-op: jobs dedup on payload hash.
         # The rotation below then keeps everyone fresh.
         max_new = int(scfg.get("max_new_per_run") or 0)
+        # Names the vendor answered "no listed options" for within the re-check
+        # window sit out of both lists; once the verdict ages past it they come
+        # back as never-walked and are asked again at the head of the rotation.
+        recheck_days = int(scfg.get("no_options_recheck_days") or NO_LISTED_OPTIONS_RECHECK_DAYS)
+        no_options = (
+            load_voided_symbols(conn, NO_LISTED_OPTIONS, max_age_days=recheck_days)
+            if symbols
+            else set()
+        )
         fresh: list[str] = []
         if symbols and max_new > 0 and tier_of:
             have = enumerated_underlyings(conn)
             # None means the lookup failed. Ramping on an unknown state is how
             # the same 150 names got re-enumerated all afternoon; skip instead.
             if have is not None:
-                fresh = [s for s in symbols if s not in have and s not in bench_set][:max_new]
+                fresh = [
+                    s
+                    for s in symbols
+                    if s not in have and s not in bench_set and s not in no_options
+                ][:max_new]
         fresh_set = set(fresh)
         if symbols:
             # Stalest first. The old rotation hashed the *target date*, which is
@@ -2540,7 +2565,9 @@ def enqueue_slot(
             # about every 48 days. Ordering by when each catalogue was last
             # walked advances on every run and repairs a missed one by itself.
             last_seen = stalest_underlyings(conn)
-            candidates = [s for s in symbols if s not in bench_set and s not in fresh_set]
+            candidates = [
+                s for s in symbols if s not in bench_set and s not in fresh_set and s not in no_options
+            ]
             if last_seen is not None:
                 # Never enumerated sorts before any timestamp.
                 candidates.sort(key=lambda s: (last_seen.get(s) is not None, last_seen.get(s), s))
@@ -2549,7 +2576,11 @@ def enqueue_slot(
                 # than treat every name as equally stale.
                 offset = int(hashlib.sha256(day_s.encode("utf-8")).hexdigest(), 16) % len(symbols)
                 rotated = symbols[offset:] + symbols[:offset]
-                candidates = [s for s in rotated if s not in bench_set and s not in fresh_set]
+                candidates = [
+                    s
+                    for s in rotated
+                    if s not in bench_set and s not in fresh_set and s not in no_options
+                ]
             batch = list(benches) + fresh + candidates[: max(0, batch_size)]
         else:
             batch = list(benches)

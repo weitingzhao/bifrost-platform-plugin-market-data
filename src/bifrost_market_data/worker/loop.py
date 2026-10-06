@@ -13,7 +13,9 @@ from bifrost_market_data.config import load_config, postgres_connect_kwargs
 from bifrost_market_data.freshness import (
     dimension_for_kind,
     extra_freshness_from_result,
+    policed_slot_for_job,
     rows_written_from_result,
+    slot_freshness_key,
     update_freshness,
 )
 from bifrost_market_data.worker.pool import ConnectionPool
@@ -167,11 +169,12 @@ async def process_one_job(
             result = await _run_handler(handler, job)
         mark_done(conn, job.id, result)
         try:
-            update_freshness(
-                conn,
-                dimension_for_kind(job.kind),
-                rows_written_from_result(result),
-            )
+            rows_written = rows_written_from_result(result)
+            update_freshness(conn, dimension_for_kind(job.kind), rows_written)
+            # The policed slot's own row: only its jobs, only when they delivered.
+            slot = policed_slot_for_job(job.kind, job.payload)
+            if slot is not None and rows_written > 0:
+                update_freshness(conn, slot_freshness_key(slot), rows_written)
             for extra_dim, extra_rows in extra_freshness_from_result(result).items():
                 update_freshness(conn, extra_dim, extra_rows)
         except Exception as freshness_err:

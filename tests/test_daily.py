@@ -227,8 +227,11 @@ class _DailyCursor:
             seen = sorted({und for _t, und, *_r in self.parent.option_contracts})
             self.parent._fetchall = [(u,) for u in seen]
             self.parent._fetchone = None
-        elif "enumerated_underlyings: finished jobs" in q:
-            self.parent._fetchall = [(u,) for u in self.parent.done_contract_jobs]
+        elif "enumerated_underlyings: no-options voids" in q:
+            assert params == ("option_contract",)
+            self.parent._fetchall = [
+                (u,) for u in [*self.parent.no_options, *self.parent.no_options_aged]
+            ]
             self.parent._fetchone = None
         elif "from market.option_contract" in q or "from raw_market.option_contract" in q:
             underlyings = set(params[0]) if params else set()
@@ -300,7 +303,12 @@ class _DailyCursor:
             self.parent._fetchone = None
         elif "symbol_source_void" in q:
             if q.lstrip().startswith("select"):
-                self.parent._fetchall = [(sym,) for sym in self.parent.voided]
+                voids = (
+                    self.parent.no_options
+                    if params and params[0] == "option_contract"
+                    else self.parent.voided
+                )
+                self.parent._fetchall = [(sym,) for sym in voids]
             self.parent._fetchone = None
         elif "watchlist_cache" in q:
             if q.lstrip().startswith("select"):
@@ -366,7 +374,8 @@ class _DailyConn:
         voided: list[str] | None = None,
         watchlist_cache: list[str] | None = None,
         research_universe: list[tuple[str, str, int]] | None = None,
-        done_contract_jobs: list[str] | None = None,
+        no_options: list[str] | None = None,
+        no_options_aged: list[str] | None = None,
         raise_on_enumerated: bool = False,
         catalogue_updated: dict[str, Any] | None = None,
         raise_on_stalest: bool = False,
@@ -379,7 +388,10 @@ class _DailyConn:
         self.voided = voided or []
         self.watchlist_cache = watchlist_cache or []
         self.research_universe = research_universe or []
-        self.done_contract_jobs = done_contract_jobs or []
+        # "no listed options" voids checked inside the re-check window, and ones
+        # older than it: both have been tried, only the first sit out the run.
+        self.no_options = no_options or []
+        self.no_options_aged = no_options_aged or []
         self.raise_on_enumerated = raise_on_enumerated
         # {underlying: when its catalogue was last walked}; missing = never
         self.catalogue_updated = dict(catalogue_updated or {})
@@ -2074,26 +2086,25 @@ def test_option_refresh_does_not_ramp_when_the_enumerated_lookup_fails() -> None
     assert len(unds) == 3 + 1, "benchmarks and the rotation only — no ramp on an unknown state"
 
 
-def test_option_refresh_treats_a_finished_empty_enumeration_as_done() -> None:
-    # A name the vendor lists no options for has a done job and no contracts;
-    # it must not be "new" every six hours.
+def test_option_refresh_treats_a_no_options_verdict_as_tried() -> None:
+    # A name the vendor lists no options for has a void and no contracts; it
+    # must not be "new" every six hours, nor the head of every rotation (TD-118:
+    # 17 such names, ten runs each in 48 hours, all 0 rows).
     rows = [("NOOPT", "core", 24), ("N001", "core", 24)]
-    conn = _DailyConn(research_universe=rows, option_contracts=[], done_contract_jobs=["NOOPT"])
+    conn = _DailyConn(research_universe=rows, option_contracts=[], no_options=["NOOPT"])
     r = enqueue_slot(
         conn,
         "option-refresh",
         target_date=date(2026, 9, 9),
         scheduler_cfg={
             "slots": {
-                "option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 0}
+                "option-refresh": {"universe": "research", "max_new_per_run": 12, "batch_size": 5}
             }
         },
     )
     unds = [j["payload"]["underlying"] for j in r["jobs"]]
     assert "N001" in unds[3:4], "the never-tried name ramps"
-    assert unds.count("NOOPT") <= 1 and "NOOPT" not in unds[3:4], (
-        "the tried-and-empty name is not a newcomer"
-    )
+    assert "NOOPT" not in unds, "neither a newcomer nor in the rotation"
 
 
 def test_bulk_insert_is_chunked_so_no_statement_outgrows_the_role_timeout() -> None:

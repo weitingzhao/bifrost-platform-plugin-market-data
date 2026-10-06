@@ -20,7 +20,7 @@ import statistics
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -40,7 +40,12 @@ from bifrost_market_data.scheduler.daily import (
     union_iv_radar_benchmarks,
 )
 from bifrost_market_data.symbol_void import load_voids_by_prefix
-from bifrost_market_data.scheduler.enqueue import insert_jobs_bulk
+from bifrost_market_data.freshness import (
+    POLICED_SLOT_KINDS,
+    policed_slot_for_job,
+    slot_freshness_key,
+)
+from bifrost_market_data.scheduler.enqueue import TRIM_KEEP_HOURS, insert_jobs_bulk
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import (
     chain_session,
@@ -1300,6 +1305,71 @@ def _freshness(conn: Any) -> dict[str, datetime]:
     return out
 
 
+#: Bounded: it scans the finished jobs of six kinds, and it only runs for a
+#: policed slot with no ``slot:<id>`` freshness row of its own.
+SLOT_EVIDENCE_TIMEOUT = "20s"
+
+_SLOT_EVIDENCE_SQL = """
+/* doctor: slot-evidence */
+SELECT kind,
+       payload->>'mode' AS mode,
+       payload->>'expired' AS expired,
+       COALESCE(payload->>'expiration_date', payload->>'expiration_date_gte',
+                payload->>'expiration_date_lte') IS NOT NULL AS dated,
+       max(finished_at) AS last
+FROM ops_jobs.job_ingest
+WHERE status = 'done' AND kind = ANY(%s)
+  AND (result->>'rows_written')::numeric > 0
+GROUP BY 1, 2, 3, 4
+""".strip()
+
+
+def _slot_job_evidence(conn: Any) -> dict[str, datetime] | None:
+    """slot → when a job of that slot's own shape last delivered rows; None if unreadable.
+
+    Covers only what the queue still holds (``TRIM_KEEP_HOURS``). It is how a
+    slot is judged before its ``slot:<id>`` row exists — the first runs after
+    the worker started writing them.
+    """
+    out: dict[str, datetime] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{SLOT_EVIDENCE_TIMEOUT}'")
+            cur.execute(_SLOT_EVIDENCE_SQL, (list(POLICED_SLOT_KINDS),))
+            rows = list(cur.fetchall() or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("doctor slot evidence read failed: %s", exc)
+        _rollback(conn)
+        return None
+    for row in rows:
+        if isinstance(row, Mapping):
+            kind, mode, expired, dated, last = (
+                row.get("kind"),
+                row.get("mode"),
+                row.get("expired"),
+                row.get("dated"),
+                row.get("last"),
+            )
+        else:
+            kind, mode, expired, dated, last = row[0], row[1], row[2], row[3], row[4]
+        if not isinstance(last, datetime):
+            continue
+        payload: dict[str, Any] = {}
+        if mode is not None:
+            payload["mode"] = mode
+        if expired is not None:
+            payload["expired"] = {"true": True, "false": False}.get(str(expired), expired)
+        if dated:
+            payload["expiration_date_gte"] = "dated"
+        slot = policed_slot_for_job(str(kind or ""), payload)
+        if slot is None:
+            continue
+        last = last if last.tzinfo else last.replace(tzinfo=UTC)
+        if slot not in out or last > out[slot]:
+            out[slot] = last
+    return out
+
+
 def resolve_session(conn: Any, now: datetime) -> tuple[date, bool]:
     """The session the tables should hold by now — see ``session.resolve_session``.
 
@@ -1338,6 +1408,12 @@ def _closed_days_since(conn: Any, last: datetime, now: datetime) -> int:
     if today < first:
         return 0
     return (today - first).days + 1 - len(expected_trading_days(conn, start=first, end=today))
+
+
+def _shared_dimension_note(last: datetime | None, dim: str, now: datetime) -> str:
+    if last is None:
+        return ""
+    return f" freshness.{dim}, which other slots also write, is {(now - last).total_seconds() / 3600.0:.1f}h old."
 
 
 def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[str, Any]:
@@ -1781,9 +1857,27 @@ def run_doctor(
     )
 
     # ── Staleness of the rotate / reference slots ──
+    # Each slot is judged by its own deliveries, never by the dimension row it
+    # shares: ticker_sync was bumped nightly by ticker-details' detail jobs, so
+    # a stopped reference walk read fresh (TD-101). The dimension row is quoted
+    # alongside, for the reader comparing with the panels that show it.
     fresh = _freshness(conn)
+    slot_jobs: dict[str, datetime] | None = {}
+    if any(slot_freshness_key(slot) not in fresh for slot in STALENESS):
+        slot_jobs = _slot_job_evidence(conn)
     for slot, (dim, max_age_h) in STALENESS.items():
-        last = fresh.get(dim)
+        key = slot_freshness_key(slot)
+        source = f"freshness.{key}"
+        last = fresh.get(key)
+        if last is None and slot_jobs is not None:
+            last = slot_jobs.get(slot)
+            source = f"its own last delivering job (no {key} row yet)"
+        elif last is None:
+            # The queue could not be read either. Falling back to the shared row
+            # is the old answer, and saying so beats raising a stale that would
+            # send the self-heal to force the slot on a failed read.
+            last = fresh.get(dim)
+            source = f"freshness.{dim}, shared with other slots (slot evidence unreadable)"
         age_h = (now_utc - last).total_seconds() / 3600.0 if last else None
         # A slot that skips closed days is not late for them. fundamentals-rotate
         # fires every day and enqueues nothing on the fires that fall on a New
@@ -1809,7 +1903,7 @@ def run_doctor(
                 f"< {max_age_h:g}h",
                 None if due_h is None else round(due_h, 1),
                 (
-                    f"freshness.{dim} is {age_h:.1f}h old"
+                    f"{slot} last delivered rows {age_h:.1f}h ago, by {source}"
                     + (
                         f", {due_h:.1f}h not counting {closed} closed day(s) the slot does not run on"
                         if closed
@@ -1817,8 +1911,12 @@ def run_doctor(
                     )
                     + f" (limit {max_age_h:g}h)."
                     if age_h is not None
-                    else f"freshness.{dim} has never been written."
-                ),
+                    else (
+                        f"{slot} has no {key} row and no job of its own delivered rows"
+                        f" in the {TRIM_KEEP_HOURS:g}h the queue keeps."
+                    )
+                )
+                + _shared_dimension_note(fresh.get(dim), dim, now_utc),
                 fix=_slot_fix(slot, None) if stale else None,
                 auto_fixable=stale,
             )

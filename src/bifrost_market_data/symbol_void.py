@@ -15,6 +15,16 @@ from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
+#: data_type of the void the live contract catalogue walk leaves when the vendor
+#: lists no options for a name. option-refresh put those names at the head of
+#: every six-hourly batch, forever: 17 of them, ten runs each in 48 hours, every
+#: one 0 rows (measured 2026-10-06).
+NO_LISTED_OPTIONS = "option_contract"
+#: How long a "no listed options" verdict stands before option-refresh asks
+#: again. A week, not the month financials get: a new listing's options arrive
+#: within days of its IPO, and a week is still 28 runs not spent.
+NO_LISTED_OPTIONS_RECHECK_DAYS = 7
+
 
 def record_symbol_void(conn: Any, symbol: str, data_type: str, *, note: str | None = None) -> None:
     """Best-effort: the vendor answered with nothing for ``symbol`` / ``data_type``."""
