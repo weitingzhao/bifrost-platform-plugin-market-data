@@ -12,9 +12,13 @@ from bifrost_market_data.ingest._upsert import (
     parse_option_right,
     physical_table_name,
 )
+from bifrost_market_data.ingest.contract_pages import (
+    PAGE_LIMIT,
+    contract_page_cap,
+    reject_truncated_catalogue,
+)
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
-    is_index_option_underlying,
     storage_underlying,
 )
 from bifrost_market_data.symbol_rename import resolve_storage
@@ -43,9 +47,9 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
     expired = payload.get("expired")
     if expired is None:
         expired = False
-    # SPX lists ~36k live contracts (1,000 a page); the old 20-page cap truncated
-    # SPX, SPY and QQQ. Index chains get more room still.
-    max_pages = int(payload.get("max_pages") or (120 if is_index_option_underlying(storage) else 60))
+    # SPX lists ~29k live contracts: ~30 pages of 1,000 against a 120-page cap
+    # (TD-90 — at the old 250 a page it used 118 of 120).
+    max_pages = int(payload.get("max_pages") or contract_page_cap(storage))
 
     data = await client.fetch_options_contracts(
         underlying_ticker=api_underlying,
@@ -55,6 +59,7 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         expiration_date_lte=payload.get("expiration_date_lte"),
         max_pages=max_pages,
     )
+    reject_truncated_catalogue("option_contract", storage, data, max_pages)
     results = list(data.get("results") or [])
     # Same rename resolution as the chain snapshot: the catalogue is keyed by
     # option_ticker and its underlying is an update column, so a stale request
@@ -148,6 +153,8 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         "expirations_written": n_exp,
         "underlying": storage,
         "api_underlying": api_underlying,
-        "truncated": bool(data.get("truncated")),
+        "truncated": False,
         "pages": data.get("pages"),
+        "max_pages": max_pages,
+        "page_limit": PAGE_LIMIT,
     }

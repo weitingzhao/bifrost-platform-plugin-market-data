@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from bifrost_market_data.ingest._upsert import batch_upsert, parse_date, physical_table_name
+from bifrost_market_data.ingest.contract_pages import (
+    PAGE_LIMIT,
+    contract_page_cap,
+    reject_truncated_catalogue,
+)
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
     storage_underlying,
@@ -21,13 +26,15 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
         raise ValueError("option_expiration payload requires underlying")
     storage = storage_underlying(underlying)
     api_underlying = contracts_api_underlying(underlying)
-    max_pages = int(payload.get("max_pages") or (80 if storage == "SPX" else 20))
+    # Same walk as option_contract, so the same page budget.
+    max_pages = int(payload.get("max_pages") or contract_page_cap(storage))
 
     data = await client.fetch_options_contracts(
         underlying_ticker=api_underlying,
         expired=False,
         max_pages=max_pages,
     )
+    reject_truncated_catalogue("option_expiration", storage, data, max_pages)
     results = list(data.get("results") or [])
     seen: set[Any] = set()
     for item in results:
@@ -68,6 +75,8 @@ async def handle_option_expiration(job: JobRow, client: Any, conn: Any) -> Mappi
         "rows_written": n,
         "underlying": storage,
         "api_underlying": api_underlying,
-        "truncated": bool(data.get("truncated")),
+        "truncated": False,
         "pages": data.get("pages"),
+        "max_pages": max_pages,
+        "page_limit": PAGE_LIMIT,
     }

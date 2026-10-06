@@ -333,8 +333,9 @@ class PolygonClient:
     ) -> dict[str, Any]:
         """GET ``/v3/reference/options/contracts`` with pagination.
 
-        ``max_pages`` defaults to 60 (60k contracts at 1,000/page): SPX alone
-        lists ~36k live contracts, so the old 20-page cap truncated it.
+        Pages are ``ep.OPTIONS_CONTRACTS_PAGE_LIMIT`` (1,000) contracts, so the
+        default 60 pages is 60k contracts. Callers size the cap per underlying
+        (``ingest/contract_pages.py``) and must treat ``truncated`` as a failure.
         """
         path = ep.options_contracts_path()
         params = ep.options_contracts_params(

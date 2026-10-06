@@ -31,7 +31,7 @@ def test_options_contracts_params() -> None:
     params = ep.options_contracts_params(underlying_ticker="aapl", expired=False)
     assert params["underlying_ticker"] == "AAPL"
     assert params["expired"] == "false"
-    assert params["limit"] == 250
+    assert params["limit"] == 1000
 
 
 def test_options_snapshot_path() -> None:

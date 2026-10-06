@@ -55,6 +55,12 @@ def aggs_range_params(
     return params
 
 
+#: The vendor's maximum page size for the contracts reference. Callers size
+#: their page caps against this figure (``ingest/contract_pages.py``); the old
+#: default of 250 quietly made "120 pages" mean 30,000 contracts, not 120,000.
+OPTIONS_CONTRACTS_PAGE_LIMIT = 1000
+
+
 def options_contracts_path() -> str:
     return "/v3/reference/options/contracts"
 
@@ -64,14 +70,14 @@ def options_contracts_params(
     underlying_ticker: str | None = None,
     expiration_date: str | None = None,
     expired: bool | None = None,
-    limit: int = 250,
+    limit: int = OPTIONS_CONTRACTS_PAGE_LIMIT,
     order: str = "asc",
     sort: str = "ticker",
     expiration_date_gte: str | None = None,
     expiration_date_lte: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
-        "limit": min(int(limit), 1000),
+        "limit": min(int(limit), OPTIONS_CONTRACTS_PAGE_LIMIT),
         "order": order,
         "sort": sort,
     }

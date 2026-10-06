@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from bifrost_market_data.ingest._upsert import session_anchor
+from bifrost_market_data.ingest.contract_pages import CATALOGUE_KINDS, PAGE_CAP_WARN_RATIO
 from bifrost_market_data.ingest.index_options import VENDOR_SPOT_SOURCE, storage_underlying
 from bifrost_market_data.quality import fetch_completed_trading_days, filter_optionable_underlyings
 from bifrost_market_data.scheduler.daily import (
@@ -1192,6 +1193,80 @@ def _failed_since(conn: Any, since: datetime) -> dict[str, int] | None:
     return out
 
 
+#: How far back the page-headroom check reads finished catalogue walks. Every
+#: live catalogue is refreshed several times a day, so two days sees each name.
+PAGE_CAP_WINDOW = timedelta(days=2)
+
+
+def _page_cap_findings(conn: Any, now: datetime) -> list[Finding]:
+    """How close each contract-catalogue walk came to its page cap (TD-90).
+
+    A walk that reaches the cap now fails its job, but by then the catalogue
+    has already stopped refreshing. This turns amber first: any underlying
+    whose latest walks used more than ``PAGE_CAP_WARN_RATIO`` of the cap.
+
+    Only results that record ``max_pages`` are read. Those are the walks at
+    1,000 contracts a page; older rows (250 a page) would report a squeeze the
+    release already removed.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                /* doctor: page-cap */
+                SELECT kind, upper(payload->>'underlying') AS underlying,
+                       max((result->>'pages')::numeric) AS pages,
+                       max((result->>'max_pages')::numeric) AS max_pages
+                FROM ops_jobs.job_ingest
+                WHERE kind = ANY(%s) AND status = 'done' AND finished_at >= %s
+                  AND result ? 'max_pages'
+                GROUP BY 1, 2
+                """,
+                (list(CATALOGUE_KINDS), now - PAGE_CAP_WINDOW),
+            )
+            rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    except Exception as exc:  # noqa: BLE001 — one failed check must not sink the report
+        logger.warning("doctor page-cap read failed: %s", exc)
+        _rollback(conn)
+        return []
+    usage: dict[str, list[tuple[float, str, int, int]]] = {}
+    for row in rows or []:
+        kind, und, pages, cap = (
+            list(row.values()) if isinstance(row, Mapping) else list(row)
+        )[:4]
+        if not kind or not pages or not cap:
+            continue
+        usage.setdefault(str(kind), []).append((int(pages) / int(cap), str(und or "?"), int(pages), int(cap)))
+    findings: list[Finding] = []
+    for kind in sorted(usage):
+        ranked = sorted(usage[kind], reverse=True)
+        near = [u for u in ranked if u[0] > PAGE_CAP_WARN_RATIO]
+        top = ranked[0]
+        shown = near or ranked[:3]
+        listing = ", ".join(f"{u} {p}/{c}" for _r, u, p, c in shown[:12])
+        detail = (
+            f"{len(near)} of {len(ranked)} underlying(s) used more than "
+            f"{PAGE_CAP_WARN_RATIO:.0%} of the {kind} page cap in the last "
+            f"{PAGE_CAP_WINDOW.days} days: {listing}. At the cap the walk fails; "
+            "raise the cap in ingest/contract_pages.py before it gets there."
+            if near
+            else f"Highest page use for {kind} in the last {PAGE_CAP_WINDOW.days} days: {listing}."
+        )
+        findings.append(
+            Finding(
+                f"page_cap:{kind}",
+                "option-refresh",
+                "warn" if near else "ok",
+                f"Catalogue page headroom: {kind}",
+                f"<= {PAGE_CAP_WARN_RATIO:.0%} of cap",
+                f"{top[0]:.0%} ({top[1]} {top[2]}/{top[3]})",
+                detail,
+                missing_sample=[u for _r, u, _p, _c in near[:12]],
+            )
+        )
+    return findings
+
+
 def _distinct(conn: Any, sql: str, params: tuple[Any, ...], key: str) -> list[str] | None:
     try:
         with conn.cursor() as cur:
@@ -1890,6 +1965,8 @@ def run_doctor(
                 f"{stuck} job(s) have been running past the stale limit; the workers reclaim them on their next tick.",
             )
         )
+
+    findings.extend(_page_cap_findings(conn, now_utc))
 
     # ── Workers and vendor (informational: fixes live outside the plugin) ──
     for pool, health in (worker_health or {}).items():

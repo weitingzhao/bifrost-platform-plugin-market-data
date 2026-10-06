@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from bifrost_market_data.contracts import OPTION_WINDOW_DAYS
 from bifrost_market_data.ingest._upsert import as_float, parse_date
+from bifrost_market_data.ingest.contract_pages import PAGE_LIMIT, reject_truncated_catalogue
 from bifrost_market_data.ingest.index_options import (
     contracts_api_underlying,
     spot_proxy_for,
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STRIKE_PCT = 0.30
 DEFAULT_DTE = 90
+#: One underlying-month of expired contracts; 200 pages of 1,000 (TD-90: it was
+#: 200 of 250). The largest month seen used 3 pages.
 MAX_CONTRACT_PAGES = 200
 INSERT_CHUNK = 500
 
@@ -176,6 +179,8 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         expiration_date_lte=expiry_lte.isoformat(),
         max_pages=MAX_CONTRACT_PAGES,
     )
+    # A short list would plan a month with its tail missing and report it done.
+    reject_truncated_catalogue("option_backfill_plan", storage, data, MAX_CONTRACT_PAGES)
     results = list(data.get("results") or [])
     window_start = expiry_gte - timedelta(days=dte)
     dates, values = _closes(conn, storage, window_start, expiry_lte)
@@ -265,6 +270,8 @@ async def handle_option_backfill_plan(job: JobRow, client: Any, conn: Any) -> Ma
         "spot_source": spot_source,
         "enqueued": enqueued,
         "deduped": len(ids) - enqueued,
-        "truncated": bool(data.get("truncated")),
+        "truncated": False,
         "pages": data.get("pages"),
+        "max_pages": MAX_CONTRACT_PAGES,
+        "page_limit": PAGE_LIMIT,
     }
