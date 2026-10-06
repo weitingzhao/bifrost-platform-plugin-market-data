@@ -263,8 +263,10 @@ def _count_jobs_in_window(
             status = str(row[0] or "")
             n = int(row[1] or 0)
         out["created"] += n
+        # Added, not assigned: grouped by shape, one status spans several rows
+        # (corporate's dividends_market and splits_market are both "done").
         if status in out:
-            out[status] = n
+            out[status] += n
         elif status == "success":
             out["done"] += n
     return out

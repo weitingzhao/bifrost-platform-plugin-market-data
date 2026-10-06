@@ -471,3 +471,16 @@ def test_a_slot_no_sibling_shares_keeps_counting_its_kind() -> None:
     row = _adherence("ticker-details", "30 3 * * *", conn, _NOW)
     assert row["adherence"] == "on_plan", row
     assert row["freshness_dimension"] == "ticker_sync"
+
+
+def test_a_status_spread_over_several_shapes_is_added_up() -> None:
+    """0.80.0 showed corporate as created=2 done=1: the second group overwrote the first."""
+    fire = datetime(2026, 10, 5, 23, 0, tzinfo=UTC)
+    jobs = [
+        {"status": "done", "kind": k, "payload": {}, "created_at": fire + timedelta(seconds=30)}
+        for k in ("dividends_market", "splits_market")
+    ]
+    row = _adherence("corporate", "0 23 * * *", _AdhConn(jobs, {}), fire + timedelta(hours=3))
+    assert row["jobs_in_window"] == {
+        "created": 2, "done": 2, "failed": 0, "pending": 0, "running": 0
+    }
