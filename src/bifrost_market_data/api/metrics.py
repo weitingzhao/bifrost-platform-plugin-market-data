@@ -23,6 +23,7 @@ from fastapi.responses import PlainTextResponse
 
 from bifrost_market_data import __version__
 from bifrost_market_data.api.doctor import DOCTOR_CACHE, _DOCTOR_EMPTY, _doctor_payload
+from bifrost_market_data.api.http_metrics import HTTP_METRICS
 
 router = APIRouter(tags=["metrics"])
 
@@ -119,7 +120,9 @@ def metrics() -> PlainTextResponse:
     report = DOCTOR_CACHE.read(
         _DOCTOR_KEY, lambda: _doctor_payload(False), empty=dict(_DOCTOR_EMPTY)
     )
-    return PlainTextResponse(render_metrics(report), media_type="text/plain; version=0.0.4")
+    # Request counts and latency for the API alert rules (TD-161).
+    text = render_metrics(report) + HTTP_METRICS.render()
+    return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
 
 __all__ = ["router", "render_metrics"]

@@ -22,6 +22,7 @@ from bifrost_market_data.api.coverage_dimensions import router as dimensions_rou
 from bifrost_market_data.api.docs import router as docs_router
 from bifrost_market_data.api.doctor import router as doctor_router
 from bifrost_market_data.api.health import router as health_router
+from bifrost_market_data.api.http_metrics import HttpMetricsMiddleware
 from bifrost_market_data.api.ingest import router as ingest_router
 from bifrost_market_data.api.ingest_ticker import router as ingest_ticker_router
 from bifrost_market_data.api.ingest_options import router as ingest_options_router
@@ -67,6 +68,8 @@ def create_app() -> FastAPI:
         ),
         lifespan=_lifespan,
     )
+    # http_requests_total / latency for the API alert rules (TD-161).
+    app.add_middleware(HttpMetricsMiddleware)
     app.include_router(dimensions_router)
     app.include_router(docs_router)
     app.include_router(health_router)
