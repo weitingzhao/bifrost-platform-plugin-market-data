@@ -171,7 +171,7 @@ async def process_one_job(
         try:
             rows_written = rows_written_from_result(result)
             update_freshness(conn, dimension_for_kind(job.kind), rows_written)
-            # The policed slot's own row: only its jobs, only when they delivered.
+            # The shape-named slot's own row: only its jobs, only when they delivered.
             slot = policed_slot_for_job(job.kind, job.payload)
             if slot is not None and rows_written > 0:
                 update_freshness(conn, slot_freshness_key(slot), rows_written)

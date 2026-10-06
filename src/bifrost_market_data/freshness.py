@@ -62,7 +62,10 @@ POLICED_SLOT_KINDS: tuple[str, ...] = (
 
 
 def policed_slot_for_job(kind: str, payload: Mapping[str, Any] | None) -> str | None:
-    """The doctor-policed slot whose own work this job is, or None.
+    """The shape-named slot whose own work this job is, or None.
+
+    Every slot this can name is in ``SHAPE_NAMED_SLOTS``; the doctor polices all
+    of them but ticker-details (``doctor.POLICED_SLOTS``).
 
     Read from the job's shape, the way the slot enqueues it
     (``scheduler.daily.enqueue_slot``); ``tests/test_slot_freshness.py`` runs
@@ -78,7 +81,14 @@ def policed_slot_for_job(kind: str, payload: Mapping[str, Any] | None) -> str | 
     if k == "ticker_sync":
         # The whole-market list walk. Its delisted lookups ride the same slot but
         # are a handful of single names; the walk is what the slot is for.
-        return "reference" if p.get("mode") == "universe" else None
+        if p.get("mode") == "universe":
+            return "reference"
+        # The per-symbol detail rotation. Without its own name, reference's
+        # 21:30 walk bumped ``ticker_sync`` after the 03:30 fire, and a stopped
+        # ticker-details read on plan in the Console (TD-175).
+        if p.get("mode") == "detail":
+            return "ticker-details"
+        return None
     if k == "option_contract":
         return _policed_slot_of_option_contract(p)
     if k in ("dividends_market", "splits_market"):
@@ -90,10 +100,19 @@ def policed_slot_for_job(kind: str, payload: Mapping[str, Any] | None) -> str | 
 
 #: Every slot ``policed_slot_for_job`` can name: the slots whose own jobs can be
 #: told apart from a sibling's by shape. The Console's schedule adherence credits
-#: these only with their own jobs and their ``slot:<id>`` row (TD-167); the
-#: doctor polices the same list (``tests/test_slot_freshness.py`` holds the two equal).
+#: these only with their own jobs and their ``slot:<id>`` row (TD-167, TD-175).
+#: The doctor polices all of them but ticker-details, which has no staleness
+#: contract: naming it here changes what the Console credits, not what the doctor
+#: warns about (``tests/test_slot_freshness.py`` holds that difference).
 SHAPE_NAMED_SLOTS: frozenset[str] = frozenset(
-    {"calendar", "reference", "option-refresh", "corporate", "fundamentals-rotate"}
+    {
+        "calendar",
+        "reference",
+        "option-refresh",
+        "corporate",
+        "fundamentals-rotate",
+        "ticker-details",
+    }
 )
 
 #: The payload fields ``policed_slot_for_job`` reads, as columns over

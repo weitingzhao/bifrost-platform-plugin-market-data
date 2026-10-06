@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -505,3 +505,86 @@ def test_every_schedulable_slot_declares_its_evidence() -> None:
         judged = bool(ev.get("kinds")) or bool(ev.get("freshness"))
         exempt = ev.get("migrated") or ev.get("retired")
         assert judged or exempt, f"{slot}: declares neither kinds nor freshness"
+
+
+# ── TD-174: the trading day of a fire is its New York date ──────────────────
+
+
+class _RotateConn(_DashConn):
+    """financials jobs at given times; the window read returns those inside it."""
+
+    def __init__(self, created: list[datetime], slot_row: datetime | None) -> None:
+        super().__init__()
+        self.created = created
+        self.freshness_rows = (
+            [("slot:fundamentals-rotate", slot_row, 40, "ok")] if slot_row else []
+        )
+
+    def cursor(self) -> _DashCur:
+        cur = _DashCur(self)
+        execute = cur.execute
+
+        def windowed(query: str, params: Any = None) -> None:
+            execute(query, params)
+            q = query.lower()
+            if "from ops_jobs.job_ingest" in q and "payload->>'mode'" in q:
+                _kinds, start, end = params
+                n = sum(1 for t in self.created if start <= t < end)
+                cur._rows = [("done", "financials", None, None, False, n)] if n else []
+
+        cur.execute = windowed  # type: ignore[method-assign]
+        return cur
+
+
+def _rotate(conn: _DashConn, now: datetime, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_schedule",
+        lambda: {"scheduler": {"slots": {"fundamentals-rotate": {"cron": "0 3 * * *"}}}},
+    )
+    report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
+    return next(s for s in report["schedule"]["slots"] if s["slot"] == "fundamentals-rotate")
+
+
+# Saturday 2026-10-03 03:00 UTC is Friday evening in New York: the last rotation
+# of the week. Sunday and Monday 03:00 UTC are Saturday and Sunday there.
+_FRI_NY_FIRE = datetime(2026, 10, 3, 3, 0, tzinfo=timezone.utc)
+
+
+def test_a_monday_0300_utc_rotate_fire_is_not_missed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The TD-174 ratchet: Monday 03:00 UTC is Sunday in New York; the slot enqueues nothing."""
+    conn = _RotateConn(
+        [_FRI_NY_FIRE + timedelta(seconds=5)], _FRI_NY_FIRE + timedelta(minutes=40)
+    )
+    row = _rotate(conn, datetime(2026, 10, 5, 5, 0, tzinfo=timezone.utc), monkeypatch)
+    assert row["adherence"] == "on_plan", row
+    assert row["last_fire"] == "2026-10-03T03:00:00Z"
+    assert row["jobs_in_window"]["created"] == 1
+
+
+def test_a_tuesday_0300_utc_rotate_fire_with_no_jobs_is_missed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tuesday 03:00 UTC is Monday in New York: a session, so nothing there is a miss."""
+    conn = _RotateConn(
+        [_FRI_NY_FIRE + timedelta(seconds=5)], _FRI_NY_FIRE + timedelta(minutes=40)
+    )
+    row = _rotate(conn, datetime(2026, 10, 6, 5, 0, tzinfo=timezone.utc), monkeypatch)
+    assert row["adherence"] == "missed", row
+    assert row["last_fire"] == "2026-10-06T03:00:00Z"
+
+
+def test_the_friday_ny_rotation_is_not_excused_as_a_saturday(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saturday 03:00 UTC is Friday in New York. Judged on the UTC date it was a
+    weekend fire, and a stopped Friday rotation hid behind Thursday's."""
+    thu_ny_fire = _FRI_NY_FIRE - timedelta(days=1)
+    conn = _RotateConn(
+        [thu_ny_fire + timedelta(seconds=5)], thu_ny_fire + timedelta(minutes=40)
+    )
+    row = _rotate(conn, datetime(2026, 10, 3, 5, 0, tzinfo=timezone.utc), monkeypatch)
+    assert row["adherence"] == "missed", row
+    assert row["last_fire"] == "2026-10-03T03:00:00Z"

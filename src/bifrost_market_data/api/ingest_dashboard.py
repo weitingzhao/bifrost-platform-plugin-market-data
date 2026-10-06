@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from time import monotonic
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from collections.abc import Sequence
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -89,7 +89,9 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
     # Shares its kind with `reference` (the whole-market list); this slot is the
     # per-symbol detail rotation. Missing from this map from 0.33.0 until 0.34.1,
     # so the judge looked for no evidence at all and could only ever say
-    # "missed" -- even the night the Dagster run succeeded.
+    # "missed" -- even the night the Dagster run succeeded. Shape-named since
+    # 0.81.0: judged by its detail jobs and ``slot:ticker-details``, because
+    # reference's walk bumps ``ticker_sync`` after this slot's 03:30 fire (TD-175).
     "ticker-details": {"kinds": ["ticker_sync"], "freshness": "ticker_sync"},
     "option-backfill": {
         "kinds": ["option_backfill_plan"],
@@ -502,6 +504,20 @@ def _oldest_pending_age_sec(conn: Any, now: datetime) -> float | None:
     return max(0.0, (now - ts).total_seconds())
 
 
+def _ny_date(fire: datetime) -> date:
+    """The New York date a UTC fire falls on: the day the scheduler gates on.
+
+    ``enqueue_slot`` skips a holiday-gated slot when ``today_ny()`` is closed, so
+    fundamentals-rotate's Monday 03:00 UTC fire (Sunday evening in New York)
+    rightly enqueues nothing. Asking about the UTC date called it a Monday and
+    scored it missed every week (TD-174); the doctor's ``_closed_days_since``
+    counts New York dates for the same reason.
+    """
+    if fire.tzinfo is None:
+        fire = fire.replace(tzinfo=timezone.utc)
+    return fire.astimezone(_ET).date()
+
+
 def _previous_expected_fire(
     conn: Any,
     *,
@@ -523,7 +539,7 @@ def _previous_expected_fire(
     if slot_id not in SKIP_ON_HOLIDAY_SLOTS:
         return last, "cron"
     try:
-        trading = is_trading_day(conn, last.date())
+        trading = is_trading_day(conn, _ny_date(last))
     except Exception:
         return last, "cron"
     if trading:
@@ -537,7 +553,7 @@ def _previous_expected_fire(
         if prev is None or (cursor is not None and prev >= cursor):
             return None, "skip"
         try:
-            if is_trading_day(conn, prev.date()):
+            if is_trading_day(conn, _ny_date(prev)):
                 return prev, "trading"
         except Exception:
             return last, "cron"
@@ -615,7 +631,8 @@ def _slot_adherence(
     # A slot whose own jobs can be told apart by shape is credited with those
     # alone and with its own ``slot:<id>`` row, never with the dimension row it
     # shares: ticker-details' detail jobs bump ``ticker_sync`` every night, so a
-    # stopped reference walk read on plan (TD-167, after the doctor's TD-101).
+    # stopped reference walk read on plan (TD-167, after the doctor's TD-101),
+    # and reference's walk bumps it after ticker-details' fire (TD-175).
     own_slot = slot_id if slot_id in SHAPE_NAMED_SLOTS else None
     if own_slot is not None:
         fresh_dim = slot_freshness_key(own_slot)
@@ -724,7 +741,7 @@ def _slot_adherence(
     # (Fri EOD) so a real miss is still visible; empty lookback ⇒ on_plan skip.
     if not evidence_ok and slot_id in SKIP_ON_HOLIDAY_SLOTS:
         try:
-            trading_last = is_trading_day(conn, cron_last.date())
+            trading_last = is_trading_day(conn, _ny_date(cron_last))
         except Exception:
             trading_last = True
         if not trading_last:

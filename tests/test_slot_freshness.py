@@ -82,11 +82,11 @@ def test_no_slot_enqueues_a_job_shaped_like_another_policed_slot(
         pytest.skip(f"{slot}: {exc}")
     named = {policed_slot_for_job(j["kind"], j["payload"]) for j in jobs} - {None}
     assert named <= {slot}, f"{slot} enqueues jobs the doctor would credit to {named - {slot}}"
-    if slot in doc.POLICED_SLOTS:
+    if slot in SHAPE_NAMED_SLOTS:
         assert named == {slot}, f"{slot}'s own jobs must evidence it"
 
 
-@pytest.mark.parametrize("slot", doc.POLICED_SLOTS)
+@pytest.mark.parametrize("slot", sorted(SHAPE_NAMED_SLOTS))
 def test_every_policed_slot_is_driven_and_named(
     slot: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -179,11 +179,21 @@ async def _freshness_writes(
 
 
 @pytest.mark.asyncio
-async def test_a_detail_job_bumps_the_dimension_and_not_the_reference_slot(
+async def test_a_detail_job_bumps_the_dimension_and_its_own_slot_not_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writes = await _freshness_writes(
         monkeypatch, "ticker_sync", {"mode": "detail", "symbol": "AAPL"}, 1
+    )
+    assert writes == [("ticker_sync", 1, "ok"), ("slot:ticker-details", 1, "ok")]
+
+
+@pytest.mark.asyncio
+async def test_a_delisted_lookup_is_nobody_s_slot_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes = await _freshness_writes(
+        monkeypatch, "ticker_sync", {"mode": "delisted", "symbol": "XYZ"}, 1
     )
     assert writes == [("ticker_sync", 1, "ok")]
 
@@ -268,9 +278,25 @@ def test_slot_rows_are_named_for_the_slot() -> None:
     assert slot_freshness_key("reference") == "slot:reference"
 
 
-def test_the_doctor_polices_exactly_the_slots_a_job_shape_can_name() -> None:
-    """The Console adherence (TD-167) and the doctor (TD-101) judge the same slots."""
-    assert set(doc.POLICED_SLOTS) == SHAPE_NAMED_SLOTS
+def test_the_doctor_polices_every_shape_named_slot_but_ticker_details() -> None:
+    """The Console adherence (TD-167, TD-175) and the doctor (TD-101) judge the same
+    slots, except ticker-details: it has no staleness contract, and naming it for
+    the Console must not add a doctor finding."""
+    assert set(doc.POLICED_SLOTS) == SHAPE_NAMED_SLOTS - {"ticker-details"}
+    assert "ticker-details" not in staleness_by_slot()
+
+
+def test_naming_ticker_details_adds_no_doctor_finding() -> None:
+    """Even when the doctor reads the queue for slot evidence and a detail job is on it."""
+    data = _without(_healthy_data(), "slot:reference")
+    data["slot_jobs"] = [
+        ("ticker_sync", "universe", None, False, NOW - timedelta(hours=7)),
+        ("ticker_sync", "detail", None, False, NOW - timedelta(hours=1)),
+    ]
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    stale = {f["id"] for f in rep["findings"] if f["id"].startswith("stale:")}
+    assert stale == {f"stale:{s}" for s in doc.POLICED_SLOTS}
+    assert not any("ticker-details" in f["id"] for f in rep["findings"])
 
 
 def test_the_shape_columns_rebuild_what_the_function_reads() -> None:
@@ -466,11 +492,76 @@ def test_option_refresh_is_not_credited_with_the_expired_catalogue() -> None:
 
 
 def test_a_slot_no_sibling_shares_keeps_counting_its_kind() -> None:
-    """ticker-details is not shape-named: its jobs and dimension row still evidence it."""
-    conn = _AdhConn(_detail_jobs(), {"ticker_sync": _DETAIL_AT})
-    row = _adherence("ticker-details", "30 3 * * *", conn, _NOW)
+    """related-rotate is not shape-named: its jobs and dimension row still evidence it."""
+    fire = datetime(2026, 9, 14, 22, 30, tzinfo=UTC)
+    jobs = [
+        {
+            "status": "done",
+            "kind": "ticker_related",
+            "payload": {"symbol": "AAPL"},
+            "created_at": fire + timedelta(seconds=5),
+        }
+    ]
+    conn = _AdhConn(jobs, {"ticker_related": fire + timedelta(minutes=2)})
+    row = _adherence("related-rotate", "30 22 * * *", conn, _NOW)
     assert row["adherence"] == "on_plan", row
-    assert row["freshness_dimension"] == "ticker_sync"
+    assert row["freshness_dimension"] == "ticker_related"
+
+
+# ── TD-175: ticker-details is credited with its own jobs too ───────────────
+
+# Tuesday 2026-09-15: ticker-details fired 03:30 UTC, reference walked at 21:30.
+_TD_FIRE = datetime(2026, 9, 15, 3, 30, tzinfo=UTC)
+_REF_WALK = datetime(2026, 9, 15, 21, 30, 7, tzinfo=UTC)
+_EVENING = datetime(2026, 9, 15, 22, 0, tzinfo=UTC)
+
+
+def _walk(at: datetime) -> list[dict[str, Any]]:
+    return [
+        {"status": "done", "kind": "ticker_sync", "payload": {"mode": "universe"}, "created_at": at},
+        {
+            "status": "done",
+            "kind": "ticker_sync",
+            "payload": {"mode": "delisted", "symbol": "XYZ"},
+            "created_at": at,
+        },
+    ]
+
+
+def test_a_stopped_ticker_details_is_missed_although_reference_ran() -> None:
+    """The TD-175 ratchet: reference's walk bumps ``ticker_sync`` after the 03:30
+    fire, and that is no evidence the detail rotation ran."""
+    conn = _AdhConn(
+        _walk(_REF_WALK),
+        {"ticker_sync": _REF_WALK + timedelta(minutes=1), "slot:reference": _REF_WALK},
+    )
+    row = _adherence("ticker-details", "30 3 * * *", conn, _EVENING)
+    assert row["adherence"] == "missed", row
+    assert row["freshness_dimension"] == "slot:ticker-details"
+    assert row["jobs_in_window"]["created"] == 0
+
+
+def test_a_reference_job_inside_the_detail_window_is_not_counted() -> None:
+    """A walk run by hand at 03:35 sits inside ticker-details' window; it still does not count."""
+    conn = _AdhConn(_walk(_TD_FIRE + timedelta(minutes=5)), {})
+    row = _adherence("ticker-details", "30 3 * * *", conn, _EVENING)
+    assert row["adherence"] == "missed", row
+
+
+def test_the_detail_rotation_is_ticker_details_evidence() -> None:
+    jobs = [*_walk(_REF_WALK), *_detail_jobs()]
+    for j in jobs[2:]:
+        j["created_at"] = _TD_FIRE + timedelta(seconds=5)
+    conn = _AdhConn(jobs, {"ticker_sync": _REF_WALK})
+    row = _adherence("ticker-details", "30 3 * * *", conn, _EVENING)
+    assert row["adherence"] == "on_plan", row
+    assert row["jobs_in_window"]["created"] == 3
+
+
+def test_after_trim_the_ticker_details_row_carries_the_fire() -> None:
+    walked = _AdhConn([], {"slot:ticker-details": _TD_FIRE + timedelta(minutes=4)})
+    row = _adherence("ticker-details", "30 3 * * *", walked, _EVENING)
+    assert row["adherence"] == "on_plan" and "freshness.slot:ticker-details" in row["detail"]
 
 
 def test_a_status_spread_over_several_shapes_is_added_up() -> None:
