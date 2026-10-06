@@ -61,7 +61,11 @@ class _DashCur:
         elif "from ops_jobs.ingest_freshness" in q:
             self._rows = list(self.parent.freshness_rows)
         elif "from ops_jobs.job_ingest" in q and "created_at >=" in q:
-            self._rows = list(self.parent.window_rows)
+            # A shape-named slot (TD-167) asks for its jobs grouped by shape.
+            if "payload->>'mode'" in q:
+                self._rows = list(self.parent.shaped_window_rows)
+            else:
+                self._rows = list(self.parent.window_rows)
         else:
             self._rows = []
 
@@ -95,6 +99,8 @@ class _DashConn:
             ("calendar", datetime(2026, 8, 16, 22, 0, tzinfo=timezone.utc), 1, "ok"),
         ]
         self.window_rows = [("done", 5)]
+        # (status, kind, mode, expired, dated, n)
+        self.shaped_window_rows: list[tuple[Any, ...]] = []
         self.activity_rows = [
             (
                 "stock_daily",
@@ -219,7 +225,9 @@ def test_weekend_cron_with_jobs_stays_on_plan(monkeypatch: pytest.MonkeyPatch) -
 
     conn = _DashConn()
     conn.freshness_rows = []
-    conn.window_rows = [("done", 36)]
+    # corporate is credited with its own jobs only, so the window read is by shape.
+    conn.window_rows = []
+    conn.shaped_window_rows = [("done", "dividends_market", None, None, False, 36)]
     now = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
     report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     corp = next(s for s in report["schedule"]["slots"] if s["slot"] == "corporate")
@@ -432,13 +440,13 @@ def test_freshness_alone_is_evidence_after_trim(monkeypatch: pytest.MonkeyPatch)
     conn = _DashConn()
     conn.window_rows = []  # trimmed
     conn.freshness_rows = [
-        ("ticker_sync", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")
+        ("slot:reference", datetime(2026, 8, 16, 21, 35, tzinfo=timezone.utc), 5300, "ok")
     ]
     now = datetime(2026, 8, 17, 20, 30, tzinfo=timezone.utc)
     report = build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
     ref = next(s for s in report["schedule"]["slots"] if s["slot"] == "reference")
     assert ref["adherence"] == "on_plan"
-    assert "freshness.ticker_sync" in ref["detail"]
+    assert "freshness.slot:reference" in ref["detail"]
     assert report["husbandry"]["verdict"] != "missed"
 
 

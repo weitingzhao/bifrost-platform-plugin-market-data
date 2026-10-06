@@ -41,7 +41,9 @@ from bifrost_market_data.scheduler.daily import (
 )
 from bifrost_market_data.symbol_void import load_voids_by_prefix
 from bifrost_market_data.freshness import (
+    JOB_SHAPE_COLUMNS_SQL,
     POLICED_SLOT_KINDS,
+    payload_from_shape,
     policed_slot_for_job,
     slot_freshness_key,
 )
@@ -1309,13 +1311,10 @@ def _freshness(conn: Any) -> dict[str, datetime]:
 #: policed slot with no ``slot:<id>`` freshness row of its own.
 SLOT_EVIDENCE_TIMEOUT = "20s"
 
-_SLOT_EVIDENCE_SQL = """
+_SLOT_EVIDENCE_SQL = f"""
 /* doctor: slot-evidence */
 SELECT kind,
-       payload->>'mode' AS mode,
-       payload->>'expired' AS expired,
-       COALESCE(payload->>'expiration_date', payload->>'expiration_date_gte',
-                payload->>'expiration_date_lte') IS NOT NULL AS dated,
+       {JOB_SHAPE_COLUMNS_SQL},
        max(finished_at) AS last
 FROM ops_jobs.job_ingest
 WHERE status = 'done' AND kind = ANY(%s)
@@ -1354,14 +1353,7 @@ def _slot_job_evidence(conn: Any) -> dict[str, datetime] | None:
             kind, mode, expired, dated, last = row[0], row[1], row[2], row[3], row[4]
         if not isinstance(last, datetime):
             continue
-        payload: dict[str, Any] = {}
-        if mode is not None:
-            payload["mode"] = mode
-        if expired is not None:
-            payload["expired"] = {"true": True, "false": False}.get(str(expired), expired)
-        if dated:
-            payload["expiration_date_gte"] = "dated"
-        slot = policed_slot_for_job(str(kind or ""), payload)
+        slot = policed_slot_for_job(str(kind or ""), payload_from_shape(mode, expired, dated))
         if slot is None:
             continue
         last = last if last.tzinfo else last.replace(tzinfo=UTC)
@@ -1410,10 +1402,37 @@ def _closed_days_since(conn: Any, last: datetime, now: datetime) -> int:
     return (today - first).days + 1 - len(expected_trading_days(conn, start=first, end=today))
 
 
-def _shared_dimension_note(last: datetime | None, dim: str, now: datetime) -> str:
+def _slots_sharing_dimension(slot: str, dim: str) -> tuple[str, ...]:
+    """The other scheduled slots whose jobs also bump ``freshness.<dim>``.
+
+    Read from the dashboard's evidence map, the same table the TD-101 test pins
+    the sharing with: reference/ticker-details, option-refresh/option-contract-
+    expired, corporate/corporate-backfill. calendar and fundamentals-rotate own
+    theirs.
+    """
+    # Imported here: ``bifrost_market_data.api`` builds the app, which imports
+    # this module, so a top-level import is circular.
+    from bifrost_market_data.api.ingest_dashboard import SLOT_EVIDENCE
+
+    return tuple(
+        sorted(s for s, ev in SLOT_EVIDENCE.items() if ev.get("freshness") == dim and s != slot)
+    )
+
+
+def _dimension_note(slot: str, last: datetime | None, dim: str, now: datetime) -> str:
+    """The dimension row's age, quoted for the reader comparing with the panels.
+
+    Sharing is mentioned only when the row really is shared: telling an operator
+    that calendar's own row is "also written by other slots" sends them to
+    distrust the one row that is theirs (TD-168).
+    """
     if last is None:
         return ""
-    return f" freshness.{dim}, which other slots also write, is {(now - last).total_seconds() / 3600.0:.1f}h old."
+    age = f"{(now - last).total_seconds() / 3600.0:.1f}h old"
+    sharers = _slots_sharing_dimension(slot, dim)
+    if not sharers:
+        return f" freshness.{dim} is {age}."
+    return f" freshness.{dim}, which {', '.join(sharers)} also bumps, is {age}."
 
 
 def _slot_fix(slot: str, session: date | None, *, force: bool = True) -> dict[str, Any]:
@@ -1916,7 +1935,7 @@ def run_doctor(
                         f" in the {TRIM_KEEP_HOURS:g}h the queue keeps."
                     )
                 )
-                + _shared_dimension_note(fresh.get(dim), dim, now_utc),
+                + _dimension_note(slot, fresh.get(dim), dim, now_utc),
                 fix=_slot_fix(slot, None) if stale else None,
                 auto_fixable=stale,
             )

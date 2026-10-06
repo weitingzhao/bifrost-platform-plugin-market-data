@@ -166,7 +166,7 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         elif not results:
             record_symbol_void(conn, underlying, NO_LISTED_OPTIONS, note="no listed options")
 
-    return {
+    result: dict[str, Any] = {
         "rows_written": n,
         "expirations_written": n_exp,
         "underlying": storage,
@@ -176,3 +176,10 @@ async def handle_option_contract(job: JobRow, client: Any, conn: Any) -> Mapping
         "max_pages": max_pages,
         "page_limit": PAGE_LIMIT,
     }
+    # The expiry list comes off the same pages since the option_expiration kind
+    # stopped being enqueued, so this handler is that dimension's writer. Without
+    # it ops_jobs.ingest_freshness.option_expiration sat frozen at 2026-09-06 and
+    # still listed "ok" (TD-169).
+    if n_exp:
+        result["freshness_extra"] = {"option_expiration": n_exp}
+    return result

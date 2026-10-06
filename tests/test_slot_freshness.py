@@ -10,7 +10,7 @@ had the walk stopped, the doctor would have gone on calling it fresh.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Self
 
 import pytest
@@ -18,10 +18,14 @@ from test_daily import _DailyConn
 from test_doctor import NOW, UNIVERSE, _Conn, _healthy_data
 
 from bifrost_market_data import doctor as doc
+from bifrost_market_data.api import ingest_dashboard as dash
 from bifrost_market_data.api.ingest_dashboard import SLOT_EVIDENCE
 from bifrost_market_data.contracts import staleness_by_slot
 from bifrost_market_data.freshness import (
+    JOB_SHAPE_COLUMNS_SQL,
     POLICED_SLOT_KINDS,
+    SHAPE_NAMED_SLOTS,
+    payload_from_shape,
     policed_slot_for_job,
     slot_freshness_key,
 )
@@ -225,7 +229,7 @@ def test_a_stopped_reference_walk_reads_stale_while_ticker_details_keeps_the_row
     assert f["severity"] == "warn"
     assert f["actual"] == 60.0
     assert "freshness.slot:reference" in f["detail"]
-    assert "freshness.ticker_sync, which other slots also write, is 1.0h old" in f["detail"]
+    assert "freshness.ticker_sync, which ticker-details also bumps, is 1.0h old" in f["detail"]
     assert f["fix"] == {"action": "enqueue-slot", "slot": "reference", "force": True}
 
 
@@ -262,3 +266,208 @@ def test_the_queue_is_not_read_when_every_slot_has_its_row() -> None:
 
 def test_slot_rows_are_named_for_the_slot() -> None:
     assert slot_freshness_key("reference") == "slot:reference"
+
+
+def test_the_doctor_polices_exactly_the_slots_a_job_shape_can_name() -> None:
+    """The Console adherence (TD-167) and the doctor (TD-101) judge the same slots."""
+    assert set(doc.POLICED_SLOTS) == SHAPE_NAMED_SLOTS
+
+
+def test_the_shape_columns_rebuild_what_the_function_reads() -> None:
+    """One SQL fragment feeds both readers; it must carry every field the function keys on."""
+    for col in ("'mode'", "'expired'", "'expiration_date'", "'expiration_date_gte'"):
+        assert col in JOB_SHAPE_COLUMNS_SQL
+    assert payload_from_shape("universe", None, False) == {"mode": "universe"}
+    live = payload_from_shape(None, "false", False)
+    assert policed_slot_for_job("option_contract", live) == "option-refresh"
+    dated = payload_from_shape(None, "false", True)
+    assert policed_slot_for_job("option_contract", dated) is None
+
+
+# ── TD-168: the doctor mentions sharing only where it is real ──────────────
+
+
+@pytest.mark.parametrize("slot", doc.POLICED_SLOTS)
+def test_the_sharing_clause_appears_only_for_a_shared_dimension(slot: str) -> None:
+    data = _healthy_data()
+    rep = doc.run_doctor(_Conn(data), now=NOW, watchlist=UNIVERSE)
+    f = next(x for x in rep["findings"] if x["id"] == f"stale:{slot}")
+    dim = staleness_by_slot()[slot][0]
+    shared = slot in {"reference", "option-refresh", "corporate"}
+    assert f"freshness.{dim}" in f["detail"]
+    assert ("also bumps" in f["detail"]) is shared, f["detail"]
+    assert "other slots also write" not in f["detail"]
+
+
+# ── TD-167: the Console's adherence credits a policed slot with its own jobs ─
+
+
+class _AdhCur:
+    def __init__(self, parent: _AdhConn) -> None:
+        self.parent = parent
+        self._rows: list[Any] = []
+
+    def execute(self, query: str, params: Any = None) -> None:
+        self.parent.statements.append((query, params))
+        q = query.lower()
+        if "from ops_jobs.ingest_freshness" in q:
+            self._rows = [(d, t, 1, "ok") for d, t in self.parent.freshness.items()]
+            return
+        kinds, start, end = params
+        jobs = [
+            j
+            for j in self.parent.jobs
+            if j["kind"] in kinds and start <= j["created_at"] < end
+        ]
+        if "payload->>'mode'" in q:
+            groups: dict[tuple[Any, ...], int] = {}
+            for j in jobs:
+                p = j["payload"]
+                dated = any(
+                    p.get(k)
+                    for k in ("expiration_date", "expiration_date_gte", "expiration_date_lte")
+                )
+                expired = None if p.get("expired") is None else str(p["expired"]).lower()
+                key = (j["status"], j["kind"], p.get("mode"), expired, dated)
+                groups[key] = groups.get(key, 0) + 1
+            self._rows = [(*k, n) for k, n in groups.items()]
+        else:
+            by: dict[str, int] = {}
+            for j in jobs:
+                by[j["status"]] = by.get(j["status"], 0) + 1
+            self._rows = list(by.items())
+
+    def fetchall(self) -> list[Any]:
+        return list(self._rows)
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _AdhConn:
+    def __init__(self, jobs: list[dict[str, Any]], freshness: dict[str, datetime]) -> None:
+        self.jobs = jobs
+        self.freshness = freshness
+        self.statements: list[tuple[str, Any]] = []
+
+    def cursor(self) -> _AdhCur:
+        return _AdhCur(self)
+
+    def rollback(self) -> None:
+        return None
+
+
+def _adherence(slot: str, cron: str, conn: _AdhConn, now: datetime) -> dict[str, Any]:
+    return dash._slot_adherence(
+        conn,
+        slot_id=slot,
+        cron=cron,
+        now=now,
+        grace_minutes=45,
+        freshness=dash._freshness_map(conn),
+    )
+
+
+# Tuesday 2026-09-15: reference fired 21:30 UTC on the 14th, ticker-details 03:30 on the 15th.
+_REF_FIRE = datetime(2026, 9, 14, 21, 30, tzinfo=UTC)
+_DETAIL_AT = datetime(2026, 9, 15, 3, 30, 5, tzinfo=UTC)
+_NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
+
+
+def _detail_jobs(n: int = 3) -> list[dict[str, Any]]:
+    return [
+        {
+            "status": "done",
+            "kind": "ticker_sync",
+            "payload": {"mode": "detail", "symbol": f"S{i}"},
+            "created_at": _DETAIL_AT,
+        }
+        for i in range(n)
+    ]
+
+
+def test_a_stopped_reference_walk_is_missed_although_ticker_details_ran() -> None:
+    """The TD-167 ratchet: a ticker-details job is not evidence that reference ran."""
+    conn = _AdhConn(_detail_jobs(), {"ticker_sync": _DETAIL_AT})
+    row = _adherence("reference", "30 21 * * *", conn, _NOW)
+    assert row["adherence"] == "missed", row
+    assert row["freshness_dimension"] == "slot:reference"
+    assert row["jobs_in_window"]["created"] == 0
+
+
+def test_a_sibling_job_inside_the_window_is_not_counted_either() -> None:
+    """Even a detail job created inside reference's own window does not count."""
+    jobs = _detail_jobs()
+    for j in jobs:
+        j["created_at"] = _REF_FIRE + timedelta(minutes=5)
+    conn = _AdhConn(jobs, {"ticker_sync": _REF_FIRE + timedelta(minutes=6)})
+    row = _adherence("reference", "30 21 * * *", conn, _NOW)
+    assert row["adherence"] == "missed", row
+
+
+def test_the_universe_walk_is_reference_evidence() -> None:
+    walk = {
+        "status": "done",
+        "kind": "ticker_sync",
+        "payload": {"mode": "universe"},
+        "created_at": _REF_FIRE + timedelta(seconds=7),
+    }
+    delisted = {
+        "status": "done",
+        "kind": "ticker_sync",
+        "payload": {"mode": "delisted", "symbol": "XYZ"},
+        "created_at": _REF_FIRE + timedelta(seconds=7),
+    }
+    conn = _AdhConn([walk, delisted, *_detail_jobs()], {"ticker_sync": _DETAIL_AT})
+    row = _adherence("reference", "30 21 * * *", conn, _NOW)
+    assert row["adherence"] == "on_plan", row
+    assert row["jobs_in_window"]["created"] == 1
+
+
+def test_after_trim_the_slot_row_carries_the_fire_and_the_shared_row_does_not() -> None:
+    walked = _AdhConn([], {slot_freshness_key("reference"): _REF_FIRE + timedelta(minutes=2)})
+    row = _adherence("reference", "30 21 * * *", walked, _NOW)
+    assert row["adherence"] == "on_plan" and "freshness.slot:reference" in row["detail"]
+
+    shared_only = _AdhConn([], {"ticker_sync": _DETAIL_AT})
+    assert _adherence("reference", "30 21 * * *", shared_only, _NOW)["adherence"] == "missed"
+
+
+def test_option_refresh_is_not_credited_with_the_expired_catalogue() -> None:
+    fire = datetime(2026, 9, 15, 6, 20, tzinfo=UTC)
+    expired = {
+        "status": "done",
+        "kind": "option_contract",
+        "payload": {
+            "underlying": "SPY",
+            "expired": True,
+            "expiration_date_gte": "2025-01-01",
+            "expiration_date_lte": "2025-03-31",
+        },
+        "created_at": fire + timedelta(minutes=1),
+    }
+    conn = _AdhConn([expired], {"option_contract": fire + timedelta(minutes=3)})
+    assert _adherence("option-refresh", "20 */6 * * *", conn, _NOW)["adherence"] == "missed"
+    conn.jobs.append(
+        {
+            "status": "pending",
+            "kind": "option_contract",
+            "payload": {"underlying": "AAPL", "expired": False},
+            "created_at": fire + timedelta(minutes=1),
+        }
+    )
+    assert _adherence("option-refresh", "20 */6 * * *", conn, _NOW)["adherence"] == "on_plan"
+
+
+def test_a_slot_no_sibling_shares_keeps_counting_its_kind() -> None:
+    """ticker-details is not shape-named: its jobs and dimension row still evidence it."""
+    conn = _AdhConn(_detail_jobs(), {"ticker_sync": _DETAIL_AT})
+    row = _adherence("ticker-details", "30 3 * * *", conn, _NOW)
+    assert row["adherence"] == "on_plan", row
+    assert row["freshness_dimension"] == "ticker_sync"

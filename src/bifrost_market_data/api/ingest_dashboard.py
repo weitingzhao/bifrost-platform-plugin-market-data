@@ -10,6 +10,13 @@ from collections.abc import Sequence
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from bifrost_market_data.freshness import (
+    JOB_SHAPE_COLUMNS_SQL,
+    SHAPE_NAMED_SLOTS,
+    payload_from_shape,
+    policed_slot_for_job,
+    slot_freshness_key,
+)
 from bifrost_market_data.queue_history import KEEP_DAYS as QUEUE_SAMPLE_KEEP_DAYS
 from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
 from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
@@ -187,31 +194,69 @@ PLANNED_ON_UPGRADE_SLOT_IDS = frozenset(
 )
 
 
+_OWN_JOBS_IN_WINDOW_SQL = f"""
+SELECT status, kind,
+       {JOB_SHAPE_COLUMNS_SQL},
+       COUNT(*)::bigint AS n
+FROM ops_jobs.job_ingest
+WHERE kind = ANY(%s)
+  AND created_at >= %s
+  AND created_at < %s
+GROUP BY 1, 2, 3, 4, 5
+""".strip()
+
+
 def _count_jobs_in_window(
     conn: Any,
     *,
     kinds: list[str],
     start: datetime,
     end: datetime,
+    own_slot: str | None = None,
 ) -> dict[str, int]:
+    """Jobs of ``kinds`` created in ``[start, end)``, by status.
+
+    With ``own_slot``, only the jobs ``policed_slot_for_job`` names as that
+    slot's own: reference and ticker-details both enqueue ``ticker_sync``, and a
+    detail job is no evidence that the universe walk ran (TD-167).
+    """
     if not kinds:
         return {"created": 0, "done": 0, "failed": 0, "pending": 0, "running": 0}
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT status, COUNT(*)::bigint AS n
-            FROM ops_jobs.job_ingest
-            WHERE kind = ANY(%s)
-              AND created_at >= %s
-              AND created_at < %s
-            GROUP BY status
-            """,
-            (kinds, start, end),
-        )
+        if own_slot is None:
+            cur.execute(
+                """
+                SELECT status, COUNT(*)::bigint AS n
+                FROM ops_jobs.job_ingest
+                WHERE kind = ANY(%s)
+                  AND created_at >= %s
+                  AND created_at < %s
+                GROUP BY status
+                """,
+                (kinds, start, end),
+            )
+        else:
+            cur.execute(_OWN_JOBS_IN_WINDOW_SQL, (kinds, start, end))
         rows = cur.fetchall() or []
     out = {"created": 0, "done": 0, "failed": 0, "pending": 0, "running": 0}
     for row in rows:
-        if isinstance(row, Mapping):
+        if own_slot is not None:
+            if isinstance(row, Mapping):
+                status = str(row.get("status") or "")
+                kind, mode, expired, dated = (
+                    row.get("kind"),
+                    row.get("mode"),
+                    row.get("expired"),
+                    row.get("dated"),
+                )
+                n = int(row.get("n") or 0)
+            else:
+                status, kind, mode, expired, dated = (str(row[0] or ""), *row[1:5])
+                n = int(row[5] or 0)
+            shape = payload_from_shape(mode, expired, dated)
+            if policed_slot_for_job(str(kind or ""), shape) != own_slot:
+                continue
+        elif isinstance(row, Mapping):
             status = str(row.get("status") or "")
             n = int(row.get("n") or 0)
         else:
@@ -507,10 +552,13 @@ def _evidence_for_fire(
     fire: datetime,
     now: datetime,
     grace_minutes: int,
+    own_slot: str | None = None,
 ) -> tuple[bool, dict[str, int], bool, str | None, datetime]:
     grace_end = fire + timedelta(minutes=grace_minutes)
     window_end = min(now, grace_end + timedelta(hours=2))
-    counts = _count_jobs_in_window(conn, kinds=kinds, start=fire, end=window_end)
+    counts = _count_jobs_in_window(
+        conn, kinds=kinds, start=fire, end=window_end, own_slot=own_slot
+    )
     fresh_hit = False
     fresh_last: str | None = None
     if fresh_dim and fresh_dim in freshness:
@@ -562,6 +610,13 @@ def _slot_adherence(
     evidence = SLOT_EVIDENCE.get(slot_id, {"kinds": [], "freshness": None})
     kinds = list(evidence.get("kinds") or [])
     fresh_dim = evidence.get("freshness")
+    # A slot whose own jobs can be told apart by shape is credited with those
+    # alone and with its own ``slot:<id>`` row, never with the dimension row it
+    # shares: ticker-details' detail jobs bump ``ticker_sync`` every night, so a
+    # stopped reference walk read on plan (TD-167, after the doctor's TD-101).
+    own_slot = slot_id if slot_id in SHAPE_NAMED_SLOTS else None
+    if own_slot is not None:
+        fresh_dim = slot_freshness_key(own_slot)
     inline = bool(evidence.get("inline"))
     migrated = bool(evidence.get("migrated"))
     retired = bool(evidence.get("retired"))
@@ -660,6 +715,7 @@ def _slot_adherence(
         fire=last,
         now=now,
         grace_minutes=slot_grace,
+        own_slot=own_slot,
     )
 
     # Weekend/holiday cron with no evidence → fall back to last trading-day fire
@@ -703,6 +759,7 @@ def _slot_adherence(
                     fire=last,
                     now=now,
                     grace_minutes=slot_grace,
+                    own_slot=own_slot,
                 )
 
     if evidence_ok:

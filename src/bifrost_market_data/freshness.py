@@ -88,6 +88,35 @@ def policed_slot_for_job(kind: str, payload: Mapping[str, Any] | None) -> str | 
     return None
 
 
+#: Every slot ``policed_slot_for_job`` can name: the slots whose own jobs can be
+#: told apart from a sibling's by shape. The Console's schedule adherence credits
+#: these only with their own jobs and their ``slot:<id>`` row (TD-167); the
+#: doctor polices the same list (``tests/test_slot_freshness.py`` holds the two equal).
+SHAPE_NAMED_SLOTS: frozenset[str] = frozenset(
+    {"calendar", "reference", "option-refresh", "corporate", "fundamentals-rotate"}
+)
+
+#: The payload fields ``policed_slot_for_job`` reads, as columns over
+#: ``ops_jobs.job_ingest``. A reader groups by these and hands each group to
+#: ``payload_from_shape`` — one place, so the SQL cannot drift from the function.
+JOB_SHAPE_COLUMNS_SQL = """payload->>'mode' AS mode,
+       payload->>'expired' AS expired,
+       COALESCE(payload->>'expiration_date', payload->>'expiration_date_gte',
+                payload->>'expiration_date_lte') IS NOT NULL AS dated"""
+
+
+def payload_from_shape(mode: Any, expired: Any, dated: Any) -> dict[str, Any]:
+    """The payload ``policed_slot_for_job`` needs, rebuilt from ``JOB_SHAPE_COLUMNS_SQL``."""
+    payload: dict[str, Any] = {}
+    if mode is not None:
+        payload["mode"] = mode
+    if expired is not None:
+        payload["expired"] = {"true": True, "false": False}.get(str(expired), expired)
+    if dated:
+        payload["expiration_date_gte"] = "dated"
+    return payload
+
+
 def rows_written_from_result(result: Mapping[str, Any] | None) -> int:
     """Extract rows_written from a handler result dict (default 0)."""
     if not result:
