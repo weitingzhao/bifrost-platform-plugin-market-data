@@ -323,7 +323,14 @@ def row_dict(row: Any, columns: Sequence[str]) -> dict[str, Any]:
             d = as_date(out[key])
             if d is not None:
                 out[key] = d.isoformat()
-    for key in ("snapshot_ts", "fetched_at", "updated_at", "last_run_at", "computed_at"):
+    for key in (
+        "snapshot_ts",
+        "fetched_at",
+        "updated_at",
+        "last_run_at",
+        "computed_at",
+        "last_trade_ts",
+    ):
         if key in out and out[key] is not None:
             out[key] = iso_value(out[key])
     return out

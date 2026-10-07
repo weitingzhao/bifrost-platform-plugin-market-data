@@ -138,6 +138,39 @@ def test_snapshots_names_the_parameter_it_actually_has(monkeypatch, wrong: str, 
     assert wrong in detail and right in detail
 
 
+
+# ── TD-250: when the close was traded ─────────────────────────────────────
+
+MORNING = datetime(2026, 9, 10, 13, 48, 3, tzinfo=timezone.utc)
+
+
+def test_each_row_says_when_its_close_was_traded() -> None:
+    """``day_close`` of a thin contract can be a morning trade; the row carries its time."""
+    conn = _Conn([{**SNAPSHOT_ROW, "last_trade_ts": MORNING}])
+    (row,) = opt.query_snapshots(conn, symbol="NVDA", as_of=SESSION)
+    sql, _ = _reads(conn)[0]
+    assert "s.last_trade_ts" in sql
+    assert row["last_trade_ts"] == MORNING.isoformat()
+    # The old keys are all still there: the field is added, nothing renamed.
+    assert set(SNAPSHOT_ROW) <= set(row)
+
+
+def test_a_tuple_row_maps_last_trade_ts_by_its_select_position() -> None:
+    cols = list(SNAPSHOT_ROW) + ["last_trade_ts"]
+    conn = _Conn([tuple({**SNAPSHOT_ROW, "last_trade_ts": MORNING}[c] for c in cols)])
+    (row,) = opt.query_snapshots(conn, symbol="NVDA")
+    assert row["day_close"] == 3.85 and row["fetched_at"] == CLOSE.isoformat()
+    assert row["last_trade_ts"] == MORNING.isoformat()
+
+
+def test_a_contract_that_never_traded_has_no_last_trade_ts(monkeypatch) -> None:
+    monkeypatch.setattr(opt, "require_db", lambda: _Conn([{**SNAPSHOT_ROW, "last_trade_ts": None}]))
+    client = TestClient(create_app())
+    res = client.get("/market/options/snapshots", params={"symbol": "NVDA", "as_of": "2026-09-10"})
+    (row,) = res.json()["rows"]
+    assert "last_trade_ts" in row and row["last_trade_ts"] is None
+
+
 # ── P6: daily bars for one contract and one range ─────────────────────────
 
 

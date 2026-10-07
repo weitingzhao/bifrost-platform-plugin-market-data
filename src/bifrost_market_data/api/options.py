@@ -154,6 +154,13 @@ def query_snapshots(
     calendar day, which is the session's EOD anchor. A session with no rows comes
     back empty — never the newest session instead, because a reader asking what
     the chain looked like on the 10th cannot use the 15th and not notice.
+
+    ``last_trade_ts`` says when ``day_close`` was traded (TD-250): a thin
+    contract's close can be a morning trade or a trade from an earlier session,
+    and a reader valuing the book at the close needs to tell. It is the vendor's
+    day-bar update time on this plan, which runs about 15 minutes behind the
+    trade (equity options read up to 16:15 New York at the close); None when
+    the contract never traded.
     """
     sym = normalize_symbol(symbol)
     if not table_exists(conn, "market", "option_snapshot"):
@@ -185,7 +192,7 @@ def query_snapshots(
         SELECT s.option_ticker, s.underlying, s.snapshot_ts,
                s.iv, s.delta, s.gamma, s.theta, s.vega,
                s.open_interest, s.day_volume, s.day_close, s.day_vwap,
-               s.fetched_at
+               s.fetched_at, s.last_trade_ts
         FROM (
             SELECT DISTINCT ON (option_ticker) *
             FROM raw_market.option_snapshot
@@ -212,6 +219,7 @@ def query_snapshots(
         "day_close",
         "day_vwap",
         "fetched_at",
+        "last_trade_ts",
     )
     with conn.cursor() as cur:
         cur.execute(sql, tuple(params))
