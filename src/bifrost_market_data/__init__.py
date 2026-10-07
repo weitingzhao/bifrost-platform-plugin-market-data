@@ -1,3 +1,3 @@
 """Bifrost Market Data Subcontractor — Polygon.io ingestion."""
 
-__version__ = "0.85.0"
+__version__ = "0.86.0"
