@@ -12,7 +12,11 @@ from pathlib import Path
 
 import yaml
 
-BASE = Path(__file__).resolve().parents[1] / "k8s" / "base"
+# The schema Job left k8s/base (TD-119) and still has to take the same login.
+ROOTS = (
+    Path(__file__).resolve().parents[1] / "k8s" / "base",
+    Path(__file__).resolve().parents[1] / "k8s" / "migrate",
+)
 
 
 def _containers(doc: dict) -> list[dict]:
@@ -34,10 +38,11 @@ def _secret_env(container: dict) -> dict[str, tuple[str, str, bool]]:
 
 def _workloads() -> list[tuple[str, dict]]:
     found = []
-    for path in sorted(BASE.glob("*.yaml")):
-        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
-            if isinstance(doc, dict) and doc.get("kind") in ("Deployment", "CronJob", "Job"):
-                found.append((f"{path.name}:{doc['metadata']['name']}", doc))
+    for root in ROOTS:
+        for path in sorted(root.glob("*.yaml")):
+            for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                if isinstance(doc, dict) and doc.get("kind") in ("Deployment", "CronJob", "Job"):
+                    found.append((f"{path.name}:{doc['metadata']['name']}", doc))
     return found
 
 
