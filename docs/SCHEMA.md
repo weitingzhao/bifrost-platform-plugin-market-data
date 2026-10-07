@@ -251,7 +251,7 @@ Replaces `public.option_open_interest_daily`.
 
 | Path | When | Behavior |
 |------|------|----------|
-| Live ingest (`kind=option_open_interest`) | Daily `eod-pipeline` CronJob + API backfill enqueue | Fetches current Polygon options snapshot OI → upsert (updates existing rows). Polygon has **no historical OI API**. |
+| Live ingest (`kind=option_open_interest`) | Daily `eod-pipeline` slot (Dagster `market_universe_calendar_schedule` → `POST /market/ingest/enqueue-slot`) + API backfill enqueue | Fetches current Polygon options snapshot OI → upsert (updates existing rows). Polygon has **no historical OI API**. |
 | Snapshot extract (retired 0.13.0 — OI is written by the chain snapshot handler) | `scripts/backfill_oi.py`, weekly `oi-gap-heal` slot (Sat 04:00 UTC) | DB-to-DB: for each `(option_ticker, NY calendar day)` take `MAX(snapshot_ts)` where `open_interest IS NOT NULL`. **`ON CONFLICT DO NOTHING`** — never overwrites live ingest rows; only fills gaps (D4=B, D5=A, D6=B). |
 
 Coverage check: `quality.check_option_oi_coverage` requires ≥1 OI row per watchlist underlying × recent trading day.
@@ -402,7 +402,7 @@ Replaces Trade-owned `public.ticker_types`.
 **PK:** `(code, asset_class, locale)`
 
 Ingest kind `ticker_type` (no payload) TRUNCATEs then upserts the full
-dictionary (~25 rows). No CronJob — enqueue manually when Polygon codes change.
+dictionary (~25 rows). No schedule (no Dagster slot) — enqueue manually when Polygon codes change.
 
 Trade consumers read via Plugin HTTP (`/market/reference/ticker-types`).
 

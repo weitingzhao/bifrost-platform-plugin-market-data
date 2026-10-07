@@ -25,7 +25,7 @@ src/bifrost_market_data/
   polygon/     # REST client (P2)
   worker/      # PG-as-broker loop (P3)
   ingest/      # upsert handlers (P4)
-  scheduler/   # CronJob enqueue (P5)
+  scheduler/   # slot → job enqueue (P5); Dagster fires each slot via POST /market/ingest/enqueue-slot
 k8s/base/      # Deployments + NetworkPolicy
 ```
 

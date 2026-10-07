@@ -1,4 +1,7 @@
-"""Daily / EOD job generation — CronJob-driven enqueue into ops_jobs.job_ingest."""
+"""Daily / EOD job generation — slot enqueue into ops_jobs.job_ingest.
+
+Dagster fires each slot via POST /market/ingest/enqueue-slot.
+"""
 
 from __future__ import annotations
 

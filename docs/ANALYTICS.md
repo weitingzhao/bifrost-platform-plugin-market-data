@@ -2,26 +2,28 @@
 
 > **Ownership (Wave 2.1 — 2026-08-21):** Daily upsert computation for
 > `market_analytics.*` (max-pain / ATM IV / PCR / IV percentile) has **moved** to
-> **`bifrost-research`** (`engines/volatility/` + CronJobs in `research` NS).
->
-> See: `bifrost-research/k8s/engines/cronjob-volatility.yaml`
-> (`research-max-pain`, `research-atm-iv-pcr`, `research-iv-percentile`).
+> **`bifrost-research`** (`engines/volatility/`, run by the Dagster asset
+> `engines/volatility` in job `research_trading_day`).
 >
 > This Plugin retains:
 > - Pure-function helpers (`analytics/max_pain_math.py`) for live max-pain compute
 > - **Deprecated** read routes under `/market/analytics/*` (still read Golden Source
 >   tables; prefer Research API `:8795` / platform proxy `/api/v1/research/*`)
 
-Derived metrics written into `market_analytics.*` by **Research Engine** CronJobs
-(not by this Plugin's scheduler).
+Derived metrics written by the **Research engines** under Dagster
+(not by this Plugin).
 
-## Schedules (UTC) — Research NS
+## Schedule — Dagster (bifrost-research)
 
-| Slot | Cron | Writes | Owner |
-|------|------|--------|-------|
-| `max-pain` | `45 22 * * *` | `max_pain_daily` | `bifrost-research` |
-| `atm-iv-pcr` | `0 23 * * *` | `atm_iv_daily` + `pcr_daily` | `bifrost-research` |
-| `iv-percentile` | `15 23 * * *` | `iv_percentile_daily` | `bifrost-research` |
+All three run in Dagster job `research_trading_day`
+(`research_trading_day_schedule`, `30 22 * * 1-5` America/New_York); none has a
+cron of its own.
+
+| Slot | Writes | Owner |
+|------|--------|-------|
+| `max-pain` | `max_pain_daily` | `bifrost-research` |
+| `atm-iv-pcr` | `atm_iv_daily` + `pcr_daily` | `bifrost-research` |
+| `iv-percentile` | `iv_percentile_daily` | `bifrost-research` |
 
 Plugin `scheduler/daily.py` **rejects** these slot names (`MIGRATED_ANALYTICS_SLOTS`)
 so they cannot be re-enqueued here by mistake.

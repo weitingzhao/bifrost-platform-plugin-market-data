@@ -24,7 +24,7 @@
 |------|------|
 | Polygon REST ingest | 股票/期权日线、快照、合约目录、基本面、公司行动 → `market.*` |
 | PG-as-broker workers | `ops_jobs.job_ingest` + asyncio Deployment（无 Celery） |
-| CronJob scheduler | 替代 Celery Beat，定时 enqueue |
+| Slot enqueue（`scheduler/`） | 替代 Celery Beat。本插件不排程：Dagster（`bifrost-research` `orchestration/market_slot_schedules.py`）按时调用 `POST /market/ingest/enqueue-slot` 触发每个 slot；插件不带 k8s 定时作业（TD-124），`config/schedule.yaml` 里的 cron 只是队列看板判 adherence 用的副本 |
 
 ## 架构边界
 
@@ -63,7 +63,7 @@ make test
 make db-init              # schema apply (+ best-effort roles)
 make apply-roles          # create_roles.sql (needs elevated PG role)
 make run-api              # Plugin API on :8790
-make verify-market-data   # P6: K8s deploy + health + CronJobs + platform probe
+make verify-market-data   # P6: K8s deploy + health + no scheduled k8s jobs (Dagster owns slots) + platform probe
 make sync-platform-write-token  # copy write-token → platform-stg/prod for Console enqueue
 make sync-write-auth-overlay    # ConfigMap overlay of deps.py (X-Market-Data-Write-Token on image 0.3.2)
 ```

@@ -14,6 +14,13 @@ UTC for Dagster's three New York fires (wrong by an hour once DST ends) and
 (``scripts/snapshot_dagster_roster.py``); research's own test holds the roster to
 its ScheduleDefinitions. ``test_schedule_config_parity`` holds the cluster copy
 to this one.
+
+bifrost-research keeps the same file at ``tests/fixtures/dagster_slot_roster.json``
+and its ``test_market_slot_roster_snapshot.py`` fails when a market schedule
+changes without it (TD-200), pointing here. The two files are byte-identical;
+``test_the_research_copy_is_this_file`` checks that when a sibling
+bifrost-research checkout is present and skips otherwise, so neither CI needs
+the other's checkout.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from bifrost_market_data.api.ingest_dashboard import slot_crons
@@ -30,6 +38,7 @@ from bifrost_market_data.scheduler.cronutil import iter_cron_fires, previous_fir
 
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "tests" / "fixtures" / "dagster_slot_roster.json"
+RESEARCH_COPY = ROOT.parent / "bifrost-research" / "tests" / "fixtures" / "dagster_slot_roster.json"
 
 
 def _snapshot() -> list[dict[str, Any]]:
@@ -63,7 +72,9 @@ COPIES = {
 
 def test_the_snapshot_is_not_empty() -> None:
     dagster = _dagster_by_slot()
-    assert len(dagster) >= 20, "the snapshot lost its market slots; this test would pass by accident"
+    assert len(dagster) >= 20, (
+        "the snapshot lost its market slots; this test would pass by accident"
+    )
     for slot, (_, zones) in dagster.items():
         assert len(zones) == 1, f"{slot}: one slot is fired in one zone ({zones})"
 
@@ -84,7 +95,9 @@ def test_no_slot_has_a_cron_dagster_does_not_fire() -> None:
     """A cron without a Dagster schedule is a fire the dashboard waits for in vain."""
     dagster = _dagster_by_slot()
     for name, slots in COPIES.items():
-        extra = sorted(s for s, cfg in slots.items() if slot_crons(cfg or {})[0] and s not in dagster)
+        extra = sorted(
+            s for s, cfg in slots.items() if slot_crons(cfg or {})[0] and s not in dagster
+        )
         assert extra == [], f"{name}: cron on slots Dagster does not schedule: {extra}"
 
 
@@ -118,5 +131,17 @@ def test_the_row_names_the_zone_so_the_console_does_not_read_it_as_utc() -> None
     from bifrost_market_data.api.ingest_dashboard import cron_label
 
     crons, tz = slot_crons(COPIES["config/schedule.yaml"]["intraday-chain"])
-    assert cron_label(crons, tz) == "30 10 * * 1-5 | 0 13 * * 1-5 | 30 15 * * 1-5 (America/New_York)"
+    assert (
+        cron_label(crons, tz) == "30 10 * * 1-5 | 0 13 * * 1-5 | 30 15 * * 1-5 (America/New_York)"
+    )
     assert cron_label("0 22 * * *", None) == "0 22 * * *"
+
+
+def test_the_research_copy_is_this_file() -> None:
+    if not RESEARCH_COPY.is_file():
+        pytest.skip("no sibling bifrost-research checkout with the TD-200 fixture")
+    assert RESEARCH_COPY.read_bytes() == SNAPSHOT.read_bytes(), (
+        "bifrost-research tests/fixtures/dagster_slot_roster.json differs from this snapshot: "
+        "run scripts/snapshot_dagster_roster.py, then copy tests/fixtures/dagster_slot_roster.json "
+        "over the research copy (or pull both repos if one checkout is behind)"
+    )

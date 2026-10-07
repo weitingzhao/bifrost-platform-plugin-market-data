@@ -10,7 +10,7 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 
 | Component | Target |
 |-----------|--------|
-| Workers / CronJobs | `plugin-market-data-stg` via `kubectl apply -k k8s/overlays/stg` |
+| Workers | `plugin-market-data-stg` via `kubectl apply -k k8s/overlays/stg` |
 | Postgres DB | `bifrost_stg` |
 | Redis (config URL) | `redis-queue-stg.data.svc.cluster.local` |
 | PG NetworkPolicy | `postgres-trade-ingress` allows `plugin-market-data-stg` |
@@ -25,9 +25,11 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 | `scripts/create_roles.sql` | done |
 | `scripts/p9_drop_legacy_tables.sql` | done (`legacy=0`) |
 | STG workers consume `ticker_sync` | after overlay apply |
-| Daily `reference` CronJob (`ticker_sync` universe) | schedule `30 21 * * *` UTC |
-| Daily `fundamentals-rotate` CronJob (`financials` batch_size=40) | schedule `0 3 * * *` UTC; skip non-trading days |
-| Daily `related-rotate` CronJob (`ticker_related` batch_size=40) | schedule `30 22 * * *` UTC; skip non-trading days |
+| Daily `reference` slot (`ticker_sync` universe) | Dagster `market_reference_schedule` → `POST /market/ingest/enqueue-slot` |
+| Daily `fundamentals-rotate` slot (`financials` batch_size=40) | Dagster `market_fundamentals_rotate_schedule`; skip non-trading days |
+| Daily `related-rotate` slot (`ticker_related` batch_size=40) | Dagster `market_related_schedule`; skip non-trading days |
+
+Slot crons are not kept here: Dagster (`bifrost-research` `orchestration/market_slot_schedules.py`) fires every slot via `POST /market/ingest/enqueue-slot`, and the plugin ships no scheduled k8s jobs (TD-124). The plugin's copy for the queue dashboard is `config/schedule.yaml`, held to `tests/fixtures/dagster_slot_roster.json`.
 
 ### 养库 SLA（dev / analysis base）
 
@@ -39,7 +41,7 @@ Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plug
 
 **Image**: `bifrost-market-data:0.1.2` (`k8s/base` `newTag`) — includes scheduler slots `reference` + `fundamentals-rotate`.
 
-**Readiness rollup** (Platform Gallery optional KPI): **RETIRED** — `public.stock_readiness_daily` dropped from Trade DB (core 0.10.7+); `market-data-readiness-refresh` CronJob remains **suspend**. SEPA readiness KPIs use Golden Source `dw_stock.mart_sepa_*` via Research API / Plugin `/market/readiness/*`.
+**Readiness rollup** (Platform Gallery optional KPI): **RETIRED** — `public.stock_readiness_daily` dropped from Trade DB (core 0.10.7+); the `readiness-refresh` slot is retired and has no schedule. SEPA readiness KPIs use Golden Source `dw_stock.mart_sepa_*` via Research API / Plugin `/market/readiness/*`.
 
 ### `price_ready` gap (DEV, 2026-08-02)
 
@@ -106,9 +108,6 @@ SELECT dimension, last_run_at, status, rows_written
 "
 ```
 
-CronJobs (after overlay apply):
-
-```bash
-kubectl -n plugin-market-data-stg get cronjob \
-  -l 'bifrost.market-data/slot in (reference,fundamentals-rotate)'
-```
+Slot fires (Dagster, not the overlay): check the queue dashboard's adherence for
+`reference` / `fundamentals-rotate`, or research-api
+`GET /research/orchestration/status` for the two `market_*_schedule` rows.

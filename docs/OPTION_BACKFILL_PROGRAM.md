@@ -39,7 +39,7 @@ contracts in a two-year window.
 
 ## Engineering (after A or B)
 
-1. Unsuspend `market-data-option-backfill` CronJob
+1. Unsuspend `market-data-option-backfill` CronJob (history: deleted 2026-10-06, TD-124; the backfill CLI `worker/backfill.py` is Owner-run)
 2. Monitor `raw_market.option_daily` span via Console Massive Ingest Daily volume
 3. Enable LO-3b in research `validate_hook` when `_option_coverage_available()` passes
 

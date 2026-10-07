@@ -1,4 +1,7 @@
-"""CronJob-driven job enqueue into ops_jobs.job_ingest (P5)."""
+"""Slot → job enqueue into ops_jobs.job_ingest (P5).
+
+Dagster fires each slot via POST /market/ingest/enqueue-slot.
+"""
 
 from bifrost_market_data.scheduler.daily import (
     SLOT_NAMES,
