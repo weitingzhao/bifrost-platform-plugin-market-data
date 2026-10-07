@@ -1,0 +1,168 @@
+{
+  "_source": "bifrost-research src/bifrost_research/api/schedule_roster.py",
+  "schedules": [
+    {
+      "schedule": "market_corporate_backfill_schedule",
+      "timezone": "UTC",
+      "cron": "0 7 1 * *",
+      "slots": [
+        "corporate-backfill"
+      ]
+    },
+    {
+      "schedule": "market_corporate_schedule",
+      "timezone": "UTC",
+      "cron": "0 23 * * *",
+      "slots": [
+        "corporate"
+      ]
+    },
+    {
+      "schedule": "market_fundamentals_market_schedule",
+      "timezone": "UTC",
+      "cron": "30 4 * * 2-6",
+      "slots": [
+        "fundamentals-market"
+      ]
+    },
+    {
+      "schedule": "market_fundamentals_rotate_schedule",
+      "timezone": "UTC",
+      "cron": "0 3 * * *",
+      "slots": [
+        "fundamentals-rotate"
+      ]
+    },
+    {
+      "schedule": "market_intraday_chain_1030_schedule",
+      "timezone": "America/New_York",
+      "cron": "30 10 * * 1-5",
+      "slots": [
+        "intraday-chain"
+      ]
+    },
+    {
+      "schedule": "market_intraday_chain_1300_schedule",
+      "timezone": "America/New_York",
+      "cron": "0 13 * * 1-5",
+      "slots": [
+        "intraday-chain"
+      ]
+    },
+    {
+      "schedule": "market_intraday_chain_1530_schedule",
+      "timezone": "America/New_York",
+      "cron": "30 15 * * 1-5",
+      "slots": [
+        "intraday-chain"
+      ]
+    },
+    {
+      "schedule": "market_minute_bars_schedule",
+      "timezone": "UTC",
+      "cron": "15 23 * * *",
+      "slots": [
+        "minute-bars"
+      ]
+    },
+    {
+      "schedule": "market_movers_schedule",
+      "timezone": "UTC",
+      "cron": "10 21 * * *",
+      "slots": [
+        "stock-movers"
+      ]
+    },
+    {
+      "schedule": "market_option_bars_schedule",
+      "timezone": "UTC",
+      "cron": "45 22 * * *",
+      "slots": [
+        "option-bars"
+      ]
+    },
+    {
+      "schedule": "market_option_depth_schedule",
+      "timezone": "UTC",
+      "cron": "30 7 * * 0",
+      "slots": [
+        "option-depth"
+      ]
+    },
+    {
+      "schedule": "market_option_refresh_schedule",
+      "timezone": "UTC",
+      "cron": "20 */6 * * *",
+      "slots": [
+        "option-refresh"
+      ]
+    },
+    {
+      "schedule": "market_ratios_market_schedule",
+      "timezone": "UTC",
+      "cron": "10 5-8,11,14,20 * * *",
+      "slots": [
+        "ratios-market"
+      ]
+    },
+    {
+      "schedule": "market_reference_schedule",
+      "timezone": "UTC",
+      "cron": "30 21 * * *",
+      "slots": [
+        "reference"
+      ]
+    },
+    {
+      "schedule": "market_related_schedule",
+      "timezone": "UTC",
+      "cron": "30 22 * * *",
+      "slots": [
+        "related-rotate"
+      ]
+    },
+    {
+      "schedule": "market_snapshot_schedule",
+      "timezone": "UTC",
+      "cron": "5 21 * * *",
+      "slots": [
+        "stock-snapshot"
+      ]
+    },
+    {
+      "schedule": "market_ticker_details_schedule",
+      "timezone": "UTC",
+      "cron": "30 3 * * *",
+      "slots": [
+        "ticker-details"
+      ]
+    },
+    {
+      "schedule": "market_treasury_schedule",
+      "timezone": "UTC",
+      "cron": "0 12,23 * * 1-5",
+      "slots": [
+        "treasury"
+      ]
+    },
+    {
+      "schedule": "market_trim_schedule",
+      "timezone": "UTC",
+      "cron": "15 2 * * *",
+      "slots": [
+        "trim"
+      ]
+    },
+    {
+      "schedule": "market_universe_calendar_schedule",
+      "timezone": "UTC",
+      "cron": "0 22 * * *",
+      "slots": [
+        "universe-daily",
+        "calendar",
+        "stock-eod",
+        "eod-pipeline"
+      ]
+    }
+  ]
+}

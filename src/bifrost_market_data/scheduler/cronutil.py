@@ -1,13 +1,28 @@
-"""Minimal 5-field cron helpers (UTC) for schedule plan / adherence UI.
+"""Minimal 5-field cron helpers for the schedule plan / adherence UI.
 
-Supports common forms used in ``schedule.yaml``:
-``M H * * *``, ``M */N * * *``, ``M H * * D`` (dow 0=Sun..6=Sat).
-Does not implement full cron semantics (lists/ranges beyond ``*/N``).
+The crons are the ones in ``schedule.yaml``, which copies the Dagster roster
+(bifrost-research ``orchestration/market_slot_schedules.py``) slot by slot.
+A slot may carry several crons (``intraday-chain`` fires three times a session)
+and an execution timezone (``America/New_York`` for the market-clock fires);
+both are honoured, so a DST change moves the expected fire with Dagster's.
+
+Fields: minute, hour, day of month, month, day of week (0=Sun..6=Sat), each
+``*``, ``*/N``, ``A``, ``A-B``, ``A-B/N`` or a comma list of those. When both
+day of month and day of week are restricted a time matches either (cron's rule).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
+
+#: One slot's crons: a single expression or several.
+CronSpec = str | Sequence[str]
+
+_Fields = tuple[
+    set[int] | None, set[int] | None, set[int] | None, set[int] | None, set[int] | None
+]
 
 
 def _parse_field(field: str, minimum: int, maximum: int) -> set[int] | None:
@@ -45,73 +60,121 @@ def _parse_field(field: str, minimum: int, maximum: int) -> set[int] | None:
     return out
 
 
-def parse_cron(expr: str) -> tuple[set[int] | None, set[int] | None, set[int] | None]:
-    """Parse ``minute hour dow`` (day-of-month/month must be ``*`` for our slots)."""
+def _parse_all(expr: str) -> _Fields:
     parts = expr.strip().split()
     if len(parts) != 5:
         raise ValueError(f"expected 5-field cron, got {expr!r}")
-    minute_s, hour_s, dom, month, dow_s = parts
-    if dom != "*" or month != "*":
-        # Still allow; we only match minute/hour/dow and ignore dom/month filters
-        # when they are not ``*`` by treating as unsupported → empty fires.
-        if dom != "*" or month != "*":
-            raise ValueError(f"unsupported cron (dom/month must be *): {expr!r}")
-    minutes = _parse_field(minute_s, 0, 59)
-    hours = _parse_field(hour_s, 0, 23)
-    dows = _parse_field(dow_s, 0, 6)
+    minute_s, hour_s, dom_s, month_s, dow_s = parts
+    return (
+        _parse_field(minute_s, 0, 59),
+        _parse_field(hour_s, 0, 23),
+        _parse_field(dom_s, 1, 31),
+        _parse_field(month_s, 1, 12),
+        _parse_field(dow_s, 0, 6),
+    )
+
+
+def parse_cron(expr: str) -> tuple[set[int] | None, set[int] | None, set[int] | None]:
+    """Parse ``minute hour dow`` of a cron whose day of month and month are ``*``."""
+    minutes, hours, doms, months, dows = _parse_all(expr)
+    if doms is not None or months is not None:
+        raise ValueError(f"day of month / month restricted; use the fire helpers: {expr!r}")
     return minutes, hours, dows
 
 
-def _matches(dt: datetime, minutes: set[int] | None, hours: set[int] | None, dows: set[int] | None) -> bool:
+def _matches(dt: datetime, fields: _Fields) -> bool:
+    minutes, hours, doms, months, dows = fields
     if minutes is not None and dt.minute not in minutes:
         return False
     if hours is not None and dt.hour not in hours:
         return False
-    if dows is not None and dt.weekday() == 6:  # Python: Mon=0..Sun=6; cron: Sun=0
-        cron_dow = 0
-    elif dows is not None:
-        cron_dow = dt.weekday() + 1  # Mon=1 .. Sat=6
-    else:
-        cron_dow = None
-    if dows is not None and cron_dow not in dows:
+    if months is not None and dt.month not in months:
         return False
-    return True
+    cron_dow = (dt.weekday() + 1) % 7  # Python: Mon=0..Sun=6; cron: Sun=0..Sat=6
+    dom_ok = doms is None or dt.day in doms
+    dow_ok = dows is None or cron_dow in dows
+    if doms is not None and dows is not None:
+        return dom_ok or dow_ok
+    return dom_ok and dow_ok
+
+
+def _exprs(spec: CronSpec) -> list[str]:
+    if isinstance(spec, str):
+        return [spec]
+    return [str(e) for e in spec]
+
+
+def _zone(tz: str | tzinfo | None) -> tzinfo:
+    if tz is None or tz == "" or tz == "UTC":
+        return timezone.utc
+    if isinstance(tz, str):
+        return ZoneInfo(tz)
+    return tz
+
+
+def _restricts_day(spec: CronSpec) -> bool:
+    return any(f[2] is not None or f[3] is not None for f in map(_parse_all, _exprs(spec)))
 
 
 def iter_cron_fires(
-    expr: str,
+    expr: CronSpec,
     *,
     start: datetime,
     end: datetime,
+    tz: str | tzinfo | None = None,
 ) -> list[datetime]:
-    """Return fire times in ``[start, end)`` at minute resolution (UTC)."""
+    """Return UTC fire times in ``[start, end)`` at minute resolution.
+
+    ``expr`` is one cron or several (their union); ``tz`` is the zone the crons
+    are read in, as Dagster's ``execution_timezone`` (default UTC).
+    """
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    minutes, hours, dows = parse_cron(expr)
-    # Align to minute
-    cur = start.replace(second=0, microsecond=0)
+    parsed = [_parse_all(e) for e in _exprs(expr)]
+    zone = _zone(tz)
+    utc = zone is timezone.utc
+    cur = start.astimezone(timezone.utc).replace(second=0, microsecond=0)
     if cur < start:
         cur += timedelta(minutes=1)
     out: list[datetime] = []
     while cur < end:
-        if _matches(cur, minutes, hours, dows):
+        local = cur if utc else cur.astimezone(zone)
+        if any(_matches(local, f) for f in parsed):
             out.append(cur)
         cur += timedelta(minutes=1)
     return out
 
 
-def next_fires(expr: str, *, after: datetime, count: int = 3, horizon_days: int = 14) -> list[datetime]:
+def next_fires(
+    expr: CronSpec,
+    *,
+    after: datetime,
+    count: int = 3,
+    horizon_days: int = 14,
+    tz: str | tzinfo | None = None,
+) -> list[datetime]:
+    if _restricts_day(expr):
+        horizon_days = max(horizon_days, 62)
     start = after + timedelta(minutes=1)
     end = after + timedelta(days=horizon_days)
-    fires = iter_cron_fires(expr, start=start, end=end)
+    fires = iter_cron_fires(expr, start=start, end=end, tz=tz)
     return fires[: max(0, int(count))]
 
 
-def previous_fire(expr: str, *, before: datetime, lookback_days: int = 14) -> datetime | None:
+def previous_fire(
+    expr: CronSpec,
+    *,
+    before: datetime,
+    lookback_days: int = 14,
+    tz: str | tzinfo | None = None,
+) -> datetime | None:
+    if _restricts_day(expr):
+        # A monthly cron (``0 7 1 * *``) has no fire in a two-week lookback.
+        lookback_days = max(lookback_days, 32)
     start = before - timedelta(days=lookback_days)
-    fires = iter_cron_fires(expr, start=start, end=before)
+    fires = iter_cron_fires(expr, start=start, end=before, tz=tz)
     return fires[-1] if fires else None
 
 

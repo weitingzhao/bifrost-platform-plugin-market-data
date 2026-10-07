@@ -9,6 +9,8 @@ data:
   # This is the runtime copy. `config/schedule.yaml` in the repo holds the same
   # block for local runs and tests; the two are edited together, and a drift
   # between them is a slot behaving differently in the cluster than it reads.
+  # Slot firing is Dagster's (bifrost-research market_slot_schedules.py); the
+  # crons here copy it for adherence scoring (tests/test_dagster_slot_roster.py).
   schedule.yaml: |
     scheduler:
       platform_api_url: http://platform-api.bifrost-platform-prod.svc.cluster.local:8780
@@ -201,9 +203,11 @@ data:
           cron: "10 21 * * *"
           priority: 4
         intraday-chain:
-          # Dagster fires this three times a NY session (10:30 / 13:00 / 15:30 ET);
-          # the cron here is the first fire, for dashboard display only.
-          cron: "30 14 * * 1-5"
+          # Three fires a NY session, read in New York time like Dagster's
+          # market_intraday_chain_{1030,1300,1530}_schedule: a fixed UTC cron
+          # would drift an hour at every DST change.
+          cron: ["30 10 * * 1-5", "0 13 * * 1-5", "30 15 * * 1-5"]
+          timezone: America/New_York
           priority: 3
         ticker-details:
           # /v3/reference/tickers/{ticker} only. The list endpoint does not carry
@@ -258,11 +262,12 @@ data:
           priority: 1
           days: 730
         corporate-backfill:
-          # Manual / one-off: the full dividend and split history of every symbol in
+          # The full dividend and split history of every symbol in
           # research.option_universe union the watchlist. The daily `corporate` slot
           # walks a -7/+60 day window of the whole market, which never reaches back,
-          # so a screen on dividend history had nothing to read.
-          # No cron: Owner-run, so the dashboard must not score it for adherence.
+          # so a screen on dividend history had nothing to read. Dagster fires it
+          # monthly (market_corporate_backfill_schedule); maintenance, not gated.
+          cron: "0 7 1 * *"
           priority: 1
         option-contract-expired:
           # Manual / one-off: contracts that have already expired, which the live

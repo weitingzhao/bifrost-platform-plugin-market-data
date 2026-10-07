@@ -18,7 +18,13 @@ from bifrost_market_data.freshness import (
     slot_freshness_key,
 )
 from bifrost_market_data.queue_history import KEEP_DAYS as QUEUE_SAMPLE_KEEP_DAYS
-from bifrost_market_data.scheduler.cronutil import iso_z, iter_cron_fires, next_fires, previous_fire
+from bifrost_market_data.scheduler.cronutil import (
+    CronSpec,
+    iso_z,
+    iter_cron_fires,
+    next_fires,
+    previous_fire,
+)
 from bifrost_market_data.scheduler.daily import SKIP_ON_HOLIDAY_SLOTS, load_schedule
 from bifrost_market_data.subscription import SLOT_REQUIREMENTS
 from bifrost_market_data.trading_calendar import is_trading_day
@@ -105,14 +111,16 @@ SLOT_EVIDENCE: dict[str, dict[str, Any]] = {
         "freshness": "option_daily",
         "maintenance": True,
     },
-    # Owner-run one-offs. Marked maintenance for the same reason option-backfill
-    # is: without a cron there is no session they could have missed, and an
-    # unscheduled slot must not be able to fail the Research gate.
+    # Monthly (Dagster, 07:00 UTC on the 1st) and otherwise Owner-run. A history
+    # top-up has no session it could have missed, so it must not be able to
+    # fail the Research gate.
     "corporate-backfill": {
         "kinds": ["dividends", "splits"],
         "freshness": "dividends",
         "maintenance": True,
     },
+    # Owner-run one-offs (no Dagster schedule, so no cron): there is no session
+    # they could have missed, and an unscheduled slot must not fail the gate.
     "filings-backfill": {
         "kinds": ["sec_filings_symbol"],
         "freshness": "sec_filings",
@@ -177,7 +185,7 @@ SLOT_NOTES: dict[str, str] = {
     "treasury": "Treasury constant-maturity yields",
     "option-backfill": "Option history planner (one job per underlying-month)",
     "option-depth": "Option history for names short of their depth target or with empty months, weekly (only the missing months)",
-    "corporate-backfill": "Full dividend / split history per symbol (Owner-run)",
+    "corporate-backfill": "Full dividend / split history per symbol (monthly)",
     "filings-backfill": "Two years of SEC 8-Ks and 10-K sections per universe name (Owner-run)",
     "option-contract-expired": "Expired option catalogue, a quarter at a time (Owner-run)",
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
@@ -522,8 +530,9 @@ def _previous_expected_fire(
     conn: Any,
     *,
     slot_id: str,
-    cron: str,
+    cron: CronSpec,
     before: datetime,
+    tz: str | None = None,
 ) -> tuple[datetime | None, str]:
     """Return ``(fire, mode)`` for adherence evidence.
 
@@ -533,7 +542,7 @@ def _previous_expected_fire(
       NYSE session fire (Fri EOD must still show freshness/jobs)
     - ``skip`` — only non-trading fires in lookback and no evidence (ok)
     """
-    last = previous_fire(cron, before=before)
+    last = previous_fire(cron, before=before, tz=tz)
     if last is None:
         return None, "cron"
     if slot_id not in SKIP_ON_HOLIDAY_SLOTS:
@@ -549,7 +558,7 @@ def _previous_expected_fire(
     # date — caller should prefer evidence on ``last`` when present.
     cursor: datetime | None = last
     for _ in range(21):
-        prev = previous_fire(cron, before=cursor) if cursor is not None else None
+        prev = previous_fire(cron, before=cursor, tz=tz) if cursor is not None else None
         if prev is None or (cursor is not None and prev >= cursor):
             return None, "skip"
         try:
@@ -613,18 +622,49 @@ def _grace_minutes_for_slot(slot_id: str, fire: datetime, grace_minutes: int) ->
     return max(grace_minutes, int((extended - fire).total_seconds() // 60))
 
 
+def cron_label(cron: CronSpec, tz: str | None = None) -> str:
+    """The ``cron`` a dashboard row shows: the expression itself for one UTC
+    cron, otherwise the crons joined and the zone named, so a reader (and the
+    Console, which reads a bare five-field cron as UTC) never takes a New York
+    10:30 for 10:30 UTC."""
+    crons = [cron] if isinstance(cron, str) else [str(c) for c in cron]
+    text = " | ".join(c.strip() for c in crons if c.strip())
+    if text and tz and tz != "UTC":
+        text = f"{text} ({tz})"
+    return text
+
+
+def slot_crons(scfg: Mapping[str, Any]) -> tuple[list[str], str | None]:
+    """A slot's crons and execution zone as ``schedule.yaml`` declares them.
+
+    ``cron`` is one expression or a list (one per Dagster schedule that fires
+    the slot); ``timezone`` is Dagster's ``execution_timezone``, UTC if absent.
+    """
+    raw = scfg.get("cron")
+    if raw is None:
+        crons: list[str] = []
+    elif isinstance(raw, str):
+        crons = [raw.strip()] if raw.strip() else []
+    else:
+        crons = [str(c).strip() for c in raw if str(c).strip()]
+    tz = str(scfg.get("timezone") or "").strip() or None
+    return crons, tz
+
+
 def _slot_adherence(
     conn: Any,
     *,
     slot_id: str,
-    cron: str,
+    cron: CronSpec,
     now: datetime,
     grace_minutes: int,
+    tz: str | None = None,
     freshness: Mapping[str, dict[str, Any]],
     activity: Mapping[str, dict[str, Any]] | None = None,
     horizon_start: datetime | None = None,
     horizon_end: datetime | None = None,
 ) -> dict[str, Any]:
+    label = cron_label(cron, tz)
     evidence = SLOT_EVIDENCE.get(slot_id, {"kinds": [], "freshness": None})
     kinds = list(evidence.get("kinds") or [])
     fresh_dim = evidence.get("freshness")
@@ -643,7 +683,8 @@ def _slot_adherence(
     if cron and horizon_start is not None and horizon_end is not None:
         try:
             fires_iso = [
-                iso_z(t) for t in iter_cron_fires(cron, start=horizon_start, end=horizon_end)
+                iso_z(t)
+                for t in iter_cron_fires(cron, start=horizon_start, end=horizon_end, tz=tz)
             ]
         except ValueError:
             fires_iso = []
@@ -651,7 +692,7 @@ def _slot_adherence(
     if migrated:
         return {
             "slot": slot_id,
-            "cron": cron or None,
+            "cron": label or None,
             "note": SLOT_NOTES.get(slot_id, "moved to Research"),
             "ok": True,
             "adherence": "migrated",
@@ -674,7 +715,7 @@ def _slot_adherence(
         )
         return {
             "slot": slot_id,
-            "cron": cron or None,
+            "cron": label or None,
             "note": SLOT_NOTES.get(slot_id, "retired"),
             "ok": True,
             "adherence": "retired",
@@ -690,12 +731,12 @@ def _slot_adherence(
             "drain": None,
         }
     try:
-        cron_last = previous_fire(cron, before=now)
-        nxt = next_fires(cron, after=now, count=3)
+        cron_last = previous_fire(cron, before=now, tz=tz)
+        nxt = next_fires(cron, after=now, count=3, tz=tz)
     except ValueError as exc:
         return {
             "slot": slot_id,
-            "cron": cron,
+            "cron": label,
             "note": SLOT_NOTES.get(slot_id, ""),
             "ok": False,
             "adherence": "unsupported_cron",
@@ -710,7 +751,7 @@ def _slot_adherence(
     if cron_last is None:
         return {
             "slot": slot_id,
-            "cron": cron,
+            "cron": label,
             "note": SLOT_NOTES.get(slot_id, ""),
             "ok": True,
             "adherence": "unknown",
@@ -745,11 +786,13 @@ def _slot_adherence(
         except Exception:
             trading_last = True
         if not trading_last:
-            fallback, mode = _previous_expected_fire(conn, slot_id=slot_id, cron=cron, before=now)
+            fallback, mode = _previous_expected_fire(
+                conn, slot_id=slot_id, cron=cron, before=now, tz=tz
+            )
             if mode == "skip" or fallback is None:
                 return {
                     "slot": slot_id,
-                    "cron": cron,
+                    "cron": label,
                     "note": SLOT_NOTES.get(slot_id, ""),
                     "ok": True,
                     "adherence": "on_plan",
@@ -806,7 +849,7 @@ def _slot_adherence(
 
     return {
         "slot": slot_id,
-        "cron": cron,
+        "cron": label,
         "note": SLOT_NOTES.get(slot_id, ""),
         "ok": adherence in ("on_plan", "due", "unknown"),
         "adherence": adherence,
@@ -888,15 +931,17 @@ def build_queue_dashboard(
     for slot_id, scfg in sorted(slots_cfg.items()):
         if not isinstance(scfg, dict):
             continue
-        cron = str(scfg.get("cron") or "").strip()
-        if not cron:
+        crons, tz = slot_crons(scfg)
+        if not crons:
             continue
+        cron = crons[0] if len(crons) == 1 else crons
         active_slot_ids.add(str(slot_id))
         plan.append(
             _slot_adherence(
                 conn,
                 slot_id=str(slot_id),
                 cron=cron,
+                tz=tz,
                 now=now_utc,
                 grace_minutes=grace_minutes,
                 freshness=freshness,
@@ -980,8 +1025,8 @@ def build_queue_dashboard(
             "ready_now": "pending jobs waiting for worker claim (SKIP LOCKED)",
             "running": "jobs claimed by workers",
             "scheduled_future_jobs": (
-                "always 0 in job_ingest — CronJobs enqueue at fire time; "
-                "future plan lives in schedule.yaml / K8s CronJobs"
+                "always 0 in job_ingest — Dagster enqueues at fire time; the plan "
+                "is schedule.yaml's copy of the Dagster roster (market_slot_schedules)"
             ),
         },
         "queue": {

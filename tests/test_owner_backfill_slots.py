@@ -302,11 +302,13 @@ def test_an_unreadable_pin_table_is_empty_not_an_exception() -> None:
 def test_a_new_slot_is_registered_everywhere_it_has_to_be(slot: str) -> None:
     assert slot in SLOT_NAMES
     assert slot in SLOT_EVIDENCE and slot in SLOT_NOTES
-    assert slot in MAINTENANCE_SLOT_IDS, "no cron, so it must not decide the gate verdict"
+    assert slot in MAINTENANCE_SLOT_IDS, "a history top-up must not decide the gate verdict"
     assert any(slot in c.slots for c in CONTRACTS), "the dataset it fills has to claim it"
 
 
-@pytest.mark.parametrize("slot", ["corporate-backfill", "option-contract-expired"])
+# corporate-backfill left this list: Dagster fires it monthly, so it carries
+# Dagster's cron (tests/test_dagster_slot_roster.py, TD-191).
+@pytest.mark.parametrize("slot", ["option-contract-expired"])
 def test_a_new_slot_has_no_cron_and_no_cronjob(slot: str) -> None:
     import pathlib
 

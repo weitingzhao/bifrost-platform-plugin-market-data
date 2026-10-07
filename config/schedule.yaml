@@ -1,5 +1,10 @@
-# Market-data scheduler slots (CronJob → CLI --slot).
-# Cron strings are informational; K8s CronJob YAML is the runtime schedule source.
+# Market-data scheduler slots (Dagster → POST /market/ingest/enqueue-slot).
+# Dagster fires every slot: bifrost-research orchestration/market_slot_schedules.py
+# is the schedule source. The `cron` / `timezone` fields here are a copy of it that
+# the queue dashboard scores adherence against (and the Console draws); changing
+# them changes no firing. tests/test_dagster_slot_roster.py holds them to the
+# roster snapshot in tests/fixtures/dagster_slot_roster.json — change Dagster
+# first, then re-run scripts/snapshot_dagster_roster.py and edit both copies.
 
 scheduler:
   # Watchlist: the union of all Trade environments' watchlists from Platform API
@@ -202,9 +207,11 @@ scheduler:
       cron: "10 21 * * *"
       priority: 4
     intraday-chain:
-      # Dagster fires this three times a NY session (10:30 / 13:00 / 15:30 ET);
-      # the cron here is the first fire, for dashboard display only.
-      cron: "30 14 * * 1-5"
+      # Three fires a NY session, read in New York time like Dagster's
+      # market_intraday_chain_{1030,1300,1530}_schedule: a fixed UTC cron
+      # would drift an hour at every DST change.
+      cron: ["30 10 * * 1-5", "0 13 * * 1-5", "30 15 * * 1-5"]
+      timezone: America/New_York
       priority: 3
     ticker-details:
       # /v3/reference/tickers/{ticker} only. The list endpoint does not carry
@@ -259,11 +266,12 @@ scheduler:
       priority: 1
       days: 730
     corporate-backfill:
-      # Manual / one-off: the full dividend and split history of every symbol in
+      # The full dividend and split history of every symbol in
       # research.option_universe union the watchlist. The daily `corporate` slot
       # walks a -7/+60 day window of the whole market, which never reaches back,
-      # so a screen on dividend history had nothing to read.
-      # No cron: Owner-run, so the dashboard must not score it for adherence.
+      # so a screen on dividend history had nothing to read. Dagster fires it
+      # monthly (market_corporate_backfill_schedule); maintenance, not gated.
+      cron: "0 7 1 * *"
       priority: 1
     option-contract-expired:
       # Manual / one-off: contracts that have already expired, which the live

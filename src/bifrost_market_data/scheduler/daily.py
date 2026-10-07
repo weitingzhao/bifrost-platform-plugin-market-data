@@ -123,8 +123,8 @@ SLOT_NAMES = (
     # Reference data, not session data: it has no holiday gate because a
     # company's listing date does not depend on the market being open.
     "ticker-details",
-    # Owner-run one-offs (no cron, like option-backfill): full corporate-action
-    # history per symbol, and the catalogue of contracts that have already expired.
+    # Full corporate-action history per symbol (Dagster, monthly on the 1st),
+    # and the catalogue of contracts that have already expired (Owner-run).
     "corporate-backfill",
     "option-contract-expired",
     # Owner-run: two years of SEC filings for every universe name (0.37.0).
