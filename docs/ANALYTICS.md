@@ -5,10 +5,9 @@
 > **`bifrost-research`** (`engines/volatility/`, run by the Dagster asset
 > `engines/volatility` in job `research_trading_day`).
 >
-> This Plugin retains:
-> - Pure-function helpers (`analytics/max_pain_math.py`) for live max-pain compute
-> - **Deprecated** read routes under `/market/analytics/*` (still read Golden Source
->   tables; prefer Research API `:8795` / platform proxy `/api/v1/research/*`)
+> This Plugin retains **deprecated** read routes under `/market/analytics/*`
+> (persisted Golden Source tables; prefer Research API `:8795`). Live
+> `/max-pain/compute` was removed (TD-102): Research already serves the filtered curve.
 
 Derived metrics written by the **Research engines** under Dagster
 (not by this Plugin).
@@ -40,8 +39,8 @@ Per `(symbol, expiry)` on a trade date:
 
 `max_pain_strike = argmin_K(pain(K))`
 
-Source: `market.option_open_interest` only (no Polygon). Live compute still available
-via Plugin `GET /market/analytics/max-pain/compute` (`max_pain_math`).
+Source: `market.option_open_interest` only (no Polygon), computed by Research.
+The plugin no longer computes a live curve.
 
 ### ATM IV (D10=A)
 
@@ -95,8 +94,6 @@ Responses include `Deprecation: true` and `X-Bifrost-Analytics-Owner: bifrost-re
 | Method | Path | Table / source |
 |--------|------|----------------|
 | GET | `/market/analytics/max-pain` | `max_pain_daily` (persisted) |
-| GET | `/market/analytics/max-pain/compute` | live from `market.option_open_interest` |
-| GET | `/market/analytics/max-pain/compute/history` | live OI series |
 | GET | `/market/analytics/atm-iv` | `atm_iv_daily` (persisted) |
 | GET | `/market/analytics/atm-iv/term` | term structure from `atm_iv_daily` |
 | GET | `/market/analytics/pcr` | `pcr_daily` |

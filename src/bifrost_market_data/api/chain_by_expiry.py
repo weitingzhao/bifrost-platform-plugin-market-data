@@ -80,6 +80,7 @@ def query_chain_by_expiry(
               LIMIT 1
             ) os ON TRUE
             WHERE oc.underlying = %s
+              AND substr(oc.option_ticker, 3, length(oc.option_ticker) - 17) !~ '[0-9]$'
             GROUP BY oc.expiry
             ORDER BY oc.expiry ASC
             """,
@@ -111,6 +112,7 @@ def query_chain_by_expiry(
                            THEN COALESCE(open_interest, 0) ELSE 0 END)::bigint AS call_oi
                 FROM raw_market.option_open_interest
                 WHERE underlying = %s AND trade_date = %s
+                  AND substr(option_ticker, 3, length(option_ticker) - 17) !~ '[0-9]$'
                 GROUP BY expiry
                 ORDER BY expiry ASC
                 """,

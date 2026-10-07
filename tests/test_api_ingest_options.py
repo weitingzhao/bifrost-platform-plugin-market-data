@@ -259,60 +259,6 @@ def test_options_liquidity_summary(monkeypatch) -> None:
     assert data["oi"]["sum"] == 110
 
 
-def test_max_pain_compute_route(monkeypatch) -> None:
-    from bifrost_market_data.api import analytics as analytics_mod
-
-    monkeypatch.setattr(analytics_mod, "_connect", lambda: _DummyConn())
-    monkeypatch.setattr(
-        analytics_mod,
-        "compute_max_pain_live",
-        lambda *_a, **_k: {
-            "ok": True,
-            "symbol": "AAPL",
-            "expiry": "2025-06-20",
-            "trade_date": "2024-06-20",
-            "max_pain_strike": 100.0,
-            "total_pain_at_strike": 1.0,
-            "total_oi": 10,
-            "points": [],
-            "source": "live_oi",
-        },
-    )
-    client = TestClient(create_app())
-    resp = client.get(
-        "/market/analytics/max-pain/compute",
-        params={"symbol": "AAPL", "expiry": "2025-06-20"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["max_pain_strike"] == 100.0
-
-
-def test_max_pain_compute_history_route(monkeypatch) -> None:
-    from bifrost_market_data.api import analytics as analytics_mod
-
-    monkeypatch.setattr(analytics_mod, "_connect", lambda: _DummyConn())
-    monkeypatch.setattr(
-        analytics_mod,
-        "compute_max_pain_history",
-        lambda *_a, **_k: {
-            "ok": True,
-            "symbol": "AAPL",
-            "expiry": "2025-06-20",
-            "lookback_days": 30,
-            "series": [{"trade_date": "2024-06-20", "max_pain_strike": 100.0}],
-            "count": 1,
-            "source": "live_oi",
-        },
-    )
-    client = TestClient(create_app())
-    resp = client.get(
-        "/market/analytics/max-pain/compute/history",
-        params={"symbol": "AAPL", "expiry": "20250620", "lookback_days": 30},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["count"] == 1
-
-
 def test_atm_iv_term_route(monkeypatch) -> None:
     from bifrost_market_data.api import analytics as analytics_mod
 

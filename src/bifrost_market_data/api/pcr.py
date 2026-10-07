@@ -65,6 +65,7 @@ def query_pcr_aggregate(
                     FROM raw_market.option_open_interest
                     WHERE underlying = %s
                       AND trade_date >= (CURRENT_DATE - %s)
+                      AND substr(option_ticker, 3, length(option_ticker) - 17) !~ '[0-9]$'
                     GROUP BY trade_date
                     ORDER BY trade_date ASC
                     """,
@@ -97,6 +98,7 @@ def query_pcr_aggregate(
                         ON os.option_ticker = oc.option_ticker
                       WHERE oc.underlying = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)
+                        AND substr(oc.option_ticker, 3, length(oc.option_ticker) - 17) !~ '[0-9]$'
                       ORDER BY oc.option_ticker,
                                DATE(timezone('America/New_York', os.snapshot_ts)),
                                os.snapshot_ts DESC
@@ -140,6 +142,7 @@ def query_pcr_aggregate(
                         ON os.option_ticker = oc.option_ticker
                       WHERE oc.underlying = %s
                         AND os.snapshot_ts >= (CURRENT_DATE - %s)
+                        AND substr(oc.option_ticker, 3, length(oc.option_ticker) - 17) !~ '[0-9]$'
                       ORDER BY oc.option_ticker,
                                DATE(timezone('America/New_York', os.snapshot_ts)),
                                os.snapshot_ts DESC
