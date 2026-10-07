@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi.responses import JSONResponse
 
-from bifrost_market_data.api.deps import iso_value, require_db, require_write_token, row_dict
+from bifrost_market_data.api.deps import (
+    connect_db,
+    iso_value,
+    require_db,
+    require_write_token,
+    row_dict,
+)
 from bifrost_market_data.config import load_config
 from bifrost_market_data.ingest import raw_handler_kinds
 from bifrost_market_data.scheduler.daily import (
@@ -183,13 +192,104 @@ def enqueue_job(
         conn.close()
 
 
+def _scheduler_cfg() -> dict[str, Any]:
+    cfg = load_config()
+    schedule = load_schedule()
+    scheduler_cfg = dict(schedule.get("scheduler") or {})
+    if isinstance(cfg.get("scheduler"), dict):
+        merged = dict(scheduler_cfg)
+        merged.update(cfg["scheduler"])
+        scheduler_cfg = merged
+    return scheduler_cfg
+
+
+def _parse_slot_date(body: Mapping[str, Any]) -> Any:
+    date_raw = body.get("date")
+    if not date_raw:
+        return None
+    try:
+        from datetime import date as date_cls
+
+        return date_cls.fromisoformat(str(date_raw)[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from exc
+
+
+def _start_trim(body: Mapping[str, Any], *, force: bool) -> JSONResponse:
+    """One trim at a time. The work runs after this response, on the lock connection."""
+    from bifrost_market_data.scheduler.trim_flight import (
+        TRIM_JOB_KIND,
+        TRIM_STATEMENT_TIMEOUT,
+        latest_running_id,
+        release,
+        retire_stale_and_insert,
+        start_single_flight,
+        try_acquire,
+        write_result,
+    )
+
+    target = _parse_slot_date(body)
+    scheduler_cfg = _scheduler_cfg()
+    conn = connect_db(statement_timeout=TRIM_STATEMENT_TIMEOUT)
+    payload = {"slot": "trim", "force": force, "date": body.get("date")}
+
+    def _running() -> str | None:
+        # The winner inserts the row before it returns. A loser that arrives
+        # in that gap waits briefly rather than answering with no job to poll.
+        for _ in range(40):
+            job_id = latest_running_id(conn)
+            if job_id is not None:
+                return str(job_id)
+            time.sleep(0.05)
+        return None
+
+    def _run() -> dict[str, Any]:
+        symbols = load_watchlist_symbols(conn, scheduler_cfg)
+        return enqueue_slot(
+            conn,
+            "trim",
+            target_date=resolve_target_date(target),
+            watchlist_symbols=symbols,
+            scheduler_cfg=scheduler_cfg,
+            force=force,
+            fire_date=None if target is not None else today_ny(),
+        )
+
+    def _unlock() -> None:
+        try:
+            release(conn)
+        finally:
+            conn.close()
+
+    try:
+        started = start_single_flight(
+            try_lock=lambda: try_acquire(conn),
+            running_job=_running,
+            begin=lambda: str(retire_stale_and_insert(conn, payload)),
+            run=_run,
+            finish=lambda job_id, status, result: write_result(conn, int(job_id), status, result),
+            unlock=_unlock,
+            spawn=lambda fn: threading.Thread(target=fn, name="market-trim", daemon=True).start(),
+        )
+    except Exception:
+        conn.close()
+        raise
+    if started["status"] == "already_running":
+        conn.close()
+    return JSONResponse(
+        status_code=202,
+        content={"kind": TRIM_JOB_KIND, **started},
+    )
+
+
 @router.post("/enqueue-slot", dependencies=[Depends(require_write_token)])
 def enqueue_schedule_slot(
     body: dict[str, Any] = Body(...),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Enqueue all jobs for a schedule slot (same as Cron ``scheduler.daily --slot``).
 
     Body: ``{ "slot": "stock-eod"|"eod-pipeline"|..., "date": "YYYY-MM-DD?", "force": false }``
+    ``trim`` answers 202 and runs in the background; every other slot stays inline.
     Used by Dagster batch assets — workers remain the executors.
     """
     slot = str(body.get("slot") or "").strip().lower()
@@ -201,23 +301,10 @@ def enqueue_schedule_slot(
             detail=f"unknown slot; allowed: {sorted(SLOT_NAMES)}",
         )
     force = bool(body.get("force") or False)
-    date_raw = body.get("date")
-    target = None
-    if date_raw:
-        try:
-            from datetime import date as date_cls
-
-            target = date_cls.fromisoformat(str(date_raw)[:10])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from exc
-
-    cfg = load_config()
-    schedule = load_schedule()
-    scheduler_cfg = dict(schedule.get("scheduler") or {})
-    if isinstance(cfg.get("scheduler"), dict):
-        merged = dict(scheduler_cfg)
-        merged.update(cfg["scheduler"])
-        scheduler_cfg = merged
+    if slot == "trim":
+        return _start_trim(body, force=force)
+    target = _parse_slot_date(body)
+    scheduler_cfg = _scheduler_cfg()
 
     conn = require_db()
     try:
