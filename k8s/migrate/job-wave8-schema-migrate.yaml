@@ -2,7 +2,7 @@
 # 2026-10-04), which owns raw_market and the market tables of ops_jobs.
 # Fresh Golden Source bootstrap: kubectl exec postgres pod + full init_schema or superuser apply_ddl.
 # Re-run: kubectl delete job job-wave8-schema-migrate -n plugin-market-data --ignore-not-found
-#         kubectl apply -f k8s/base/job-wave8-schema-migrate.yaml
+#         kubectl apply -k k8s/migrate
 apiVersion: batch/v1
 kind: Job
 metadata:

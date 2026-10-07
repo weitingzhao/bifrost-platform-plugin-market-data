@@ -5,16 +5,7 @@ namespace: plugin-market-data
 
 resources:
   - namespace.yaml
-  - deployment-stocks.yaml
-  - deployment-options.yaml
-  - deployment-api.yaml
-  - service.yaml
-  - service-api.yaml
-  - configmap.yaml
-  - configmap-schedule.yaml
-  - pvc-archive.yaml
-  - network-policy.yaml
-  - pdb.yaml
+  - job-wave8-schema-migrate.yaml
 
 labels:
   - pairs:
@@ -23,6 +14,7 @@ labels:
       app.kubernetes.io/component: market-data
     includeSelectors: false
 
+# Same pin as k8s/base. A migrate image that lags the API is the bug TD-119 closes.
 images:
   - name: bifrost-market-data
     newName: 192.168.10.73:30500/bifrost-market-data

@@ -40,18 +40,22 @@ run-api:
 
 kustomize-check:
 	kubectl kustomize k8s/base >/dev/null
+	kubectl kustomize k8s/migrate >/dev/null
 
 # A Job's pod template is immutable, and this one carries the release tag, so a
 # plain `kubectl apply -k` fails whenever the previous migration Job is still
 # inside its TTL. Deleting first is not a workaround: re-running the idempotent
 # migrations on every release is what the Job is for, and the ten releases it
 # spent pinned to 0.11.1 are what happens when it does not.
+# The migration is its own kustomization so the new API does not start before
+# the schema it expects is in place (TD-119).
 deploy:
 	kubectl -n plugin-market-data delete job job-wave8-schema-migrate --ignore-not-found
-	kubectl apply -k k8s/base
-	kubectl -n plugin-market-data rollout status deploy/market-data-api --timeout=180s
+	kubectl apply -k k8s/migrate
 	kubectl -n plugin-market-data wait --for=condition=complete --timeout=300s job/job-wave8-schema-migrate
 	kubectl -n plugin-market-data logs job/job-wave8-schema-migrate --tail=20
+	kubectl apply -k k8s/base
+	kubectl -n plugin-market-data rollout status deploy/market-data-api --timeout=180s
 
 verify-market-data:
 	bash scripts/verify-market-data.sh
