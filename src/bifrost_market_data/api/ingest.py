@@ -282,7 +282,11 @@ def _start_trim(body: Mapping[str, Any], *, force: bool) -> JSONResponse:
     )
 
 
-@router.post("/enqueue-slot", dependencies=[Depends(require_write_token)])
+@router.post(
+    "/enqueue-slot",
+    dependencies=[Depends(require_write_token)],
+    response_model=None,
+)
 def enqueue_schedule_slot(
     body: dict[str, Any] = Body(...),
 ) -> dict[str, Any] | JSONResponse:
