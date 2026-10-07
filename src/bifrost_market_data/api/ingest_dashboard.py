@@ -191,7 +191,7 @@ SLOT_NOTES: dict[str, str] = {
     "max-pain": "moved to Research (bifrost_research.scheduler.volatility)",
     "atm-iv-pcr": "moved to Research (bifrost_research.scheduler.volatility)",
     "iv-percentile": "moved to Research (bifrost_research.scheduler.volatility)",
-    "readiness-refresh": "Readiness rollup — RETIRED (Wave 14G-A; CronJob archived)",
+    "readiness-refresh": "Readiness rollup — RETIRED (Wave 14G-A; no Dagster schedule fires it)",
     "trim": "Trim old jobs (inline)",
 }
 

@@ -118,7 +118,7 @@ elif python3 "${ROOT}/scripts/verify_data_quality.py" 2>/tmp/market-data-quality
   echo "  verify_data_quality.py PASS"
 else
   DQ_OK=0
-  echo "  INFO: verify_data_quality.py not yet green (backfill / CronJobs may still be running)"
+  echo "  INFO: verify_data_quality.py not yet green (backfill / Dagster-fired slots may still be running)"
   tail -n 20 /tmp/market-data-quality.log || true
 fi
 

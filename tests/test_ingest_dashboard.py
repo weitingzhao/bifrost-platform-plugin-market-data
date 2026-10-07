@@ -588,3 +588,37 @@ def test_the_friday_ny_rotation_is_not_excused_as_a_saturday(
     row = _rotate(conn, datetime(2026, 10, 3, 5, 0, tzinfo=timezone.utc), monkeypatch)
     assert row["adherence"] == "missed", row
     assert row["last_fire"] == "2026-10-03T03:00:00Z"
+
+
+# ── TD-242: a dashboard miss is cheap ───────────────────────────────────────
+
+
+def test_a_dashboard_miss_is_a_handful_of_reads_and_little_cpu() -> None:
+    """The real schedule.yaml, every slot scored, nothing cached.
+
+    On 2026-10-07 a miss measured 1.6 s in the PROD API pod (median of 7), of
+    which the 24 SQL reads were 0.06 s: the rest was the cron minute walk, and
+    behind the pod's half-core limit it averaged 3.3 s per miss (platform-api
+    proxy p99 2.5-7.4 s). Round trips: four queue reads, two per active kind
+    (the swimlane), and at most two window counts per scheduled slot on a
+    weekday. The CPU bound is ~15x the day walk's cost on a laptop and a third
+    of what the minute walk cost there (0.46 s).
+    """
+    import time
+
+    from bifrost_market_data.api import ingest_dashboard as mod
+
+    conn = _DashConn()
+    now = datetime(2026, 10, 7, 15, 10, tzinfo=timezone.utc)  # a Wednesday session
+    slots = (mod.load_schedule().get("scheduler") or {}).get("slots") or {}
+    scheduled = sum(1 for s in slots.values() if isinstance(s, dict) and mod.slot_crons(s)[0])
+    active_kinds = len({r[0] for r in conn.queue_rows})
+
+    started = time.process_time()
+    report = mod.build_queue_dashboard(conn, use_cache=False, now=now, grace_minutes=45)
+    cpu = time.process_time() - started
+
+    assert scheduled >= 20, "schedule.yaml lost its slots; this bound would pass by accident"
+    assert len(report["schedule"]["slots"]) >= scheduled
+    assert len(conn.statements) <= 4 + 2 * active_kinds + 2 * scheduled
+    assert cpu < 0.15, f"a dashboard miss cost {cpu:.2f}s of CPU"

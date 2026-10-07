@@ -725,7 +725,7 @@ def resolve_watchlist_with_source(
     limit: int = 200,
     scheduler_cfg: Mapping[str, Any] | None = None,
 ) -> tuple[list[str], str]:
-    """Resolve coverage/quality watchlist the same way CronJobs do.
+    """Resolve coverage/quality watchlist the same way the slots do.
 
     Order:
     1. ``load_watchlist_symbols``: config override, Platform union, its cache
@@ -2927,7 +2927,7 @@ def main(argv: list[str] | None = None) -> int:
     import psycopg
 
     # CNPG / ClusterIP occasionally resets the first TCP handshake from short-lived
-    # CronJob pods; retry briefly before failing the Job.
+    # Job pods; retry briefly before failing the Job.
     # The `bifrost` role defaults to statement_timeout=2s, which is a writer
     # safety net sized for handler batches, not for the slots. Three separate
     # failures traced back to this one omission: the job trim's batched delete,

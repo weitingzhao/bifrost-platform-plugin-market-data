@@ -14,7 +14,7 @@ day of month and day of week are restricted a time matches either (cron's rule).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 #: One slot's crons: a single expression or several.
@@ -82,20 +82,26 @@ def parse_cron(expr: str) -> tuple[set[int] | None, set[int] | None, set[int] | 
     return minutes, hours, dows
 
 
-def _matches(dt: datetime, fields: _Fields) -> bool:
-    minutes, hours, doms, months, dows = fields
-    if minutes is not None and dt.minute not in minutes:
+def _day_matches(day: date, fields: _Fields) -> bool:
+    """Whether a local calendar day can carry a fire (month, day of month, day of week)."""
+    _, _, doms, months, dows = fields
+    if months is not None and day.month not in months:
         return False
-    if hours is not None and dt.hour not in hours:
-        return False
-    if months is not None and dt.month not in months:
-        return False
-    cron_dow = (dt.weekday() + 1) % 7  # Python: Mon=0..Sun=6; cron: Sun=0..Sat=6
-    dom_ok = doms is None or dt.day in doms
+    cron_dow = (day.weekday() + 1) % 7  # Python: Mon=0..Sun=6; cron: Sun=0..Sat=6
+    dom_ok = doms is None or day.day in doms
     dow_ok = dows is None or cron_dow in dows
     if doms is not None and dows is not None:
         return dom_ok or dow_ok
     return dom_ok and dow_ok
+
+
+def _matches(dt: datetime, fields: _Fields) -> bool:
+    minutes, hours = fields[0], fields[1]
+    if minutes is not None and dt.minute not in minutes:
+        return False
+    if hours is not None and dt.hour not in hours:
+        return False
+    return _day_matches(dt.date(), fields)
 
 
 def _exprs(spec: CronSpec) -> list[str]:
@@ -116,6 +122,21 @@ def _restricts_day(spec: CronSpec) -> bool:
     return any(f[2] is not None or f[3] is not None for f in map(_parse_all, _exprs(spec)))
 
 
+def _instants(wall: datetime, zone: tzinfo) -> list[datetime]:
+    """The UTC instants a local wall-clock minute names: none in a spring-forward
+    gap, two in a fall-back hour, otherwise one — the minutes a clock walking UTC
+    minute by minute would see reading that wall time."""
+    if zone is timezone.utc:
+        return [wall.replace(tzinfo=timezone.utc)]
+    out: list[datetime] = []
+    for fold in (0, 1):
+        instant = wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+        back = instant.astimezone(zone).replace(tzinfo=None, fold=0)
+        if back == wall and instant.second == 0 and instant not in out:
+            out.append(instant)
+    return out
+
+
 def iter_cron_fires(
     expr: CronSpec,
     *,
@@ -127,24 +148,41 @@ def iter_cron_fires(
 
     ``expr`` is one cron or several (their union); ``tz`` is the zone the crons
     are read in, as Dagster's ``execution_timezone`` (default UTC).
+
+    Walks local days and only the hours and minutes a cron names. This used to
+    test every UTC minute of the window: the queue dashboard asks for 14 days
+    back and 14 forward per slot (62 / 32 for a monthly cron), about a million
+    minute tests per call — 1.6 s of CPU, 3.3 s on average behind the API pod's
+    half-core limit, and the reason ``/ingest/queue-dashboard`` was the plugin's
+    slowest read (TD-242). The answer is the same minute walk's answer, DST gaps
+    and repeated fall-back hours included (``tests/test_cronutil_fires.py``).
     """
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
+    if end <= start:
+        return []
     parsed = [_parse_all(e) for e in _exprs(expr)]
     zone = _zone(tz)
-    utc = zone is timezone.utc
-    cur = start.astimezone(timezone.utc).replace(second=0, microsecond=0)
-    if cur < start:
-        cur += timedelta(minutes=1)
-    out: list[datetime] = []
-    while cur < end:
-        local = cur if utc else cur.astimezone(zone)
-        if any(_matches(local, f) for f in parsed):
-            out.append(cur)
-        cur += timedelta(minutes=1)
-    return out
+    first_day = start.astimezone(zone).date()
+    last_day = end.astimezone(zone).date()
+    fires: set[datetime] = set()
+    day = first_day
+    while day <= last_day:
+        for fields in parsed:
+            if not _day_matches(day, fields):
+                continue
+            minutes = sorted(fields[0]) if fields[0] is not None else range(60)
+            hours = sorted(fields[1]) if fields[1] is not None else range(24)
+            for hour in hours:
+                for minute in minutes:
+                    wall = datetime(day.year, day.month, day.day, hour, minute)
+                    for instant in _instants(wall, zone):
+                        if start <= instant < end:
+                            fires.add(instant)
+        day += timedelta(days=1)
+    return sorted(fires)
 
 
 def next_fires(

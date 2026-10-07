@@ -19,7 +19,7 @@ STOCK_DAILY_GAP_LOOKBACK_DAYS = 30
 FRESHNESS_MAX_AGE_HOURS = 24.0
 FRESHNESS_WEEKEND_MAX_AGE_HOURS = 72.0
 
-# Dimensions expected to be actively refreshed by daily CronJobs.
+# Dimensions expected to be refreshed every session by the slots Dagster fires.
 EXPECTED_FRESHNESS_DIMENSIONS = (
     "stock_daily",
     "option_snapshot",
