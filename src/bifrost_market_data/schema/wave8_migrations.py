@@ -66,19 +66,30 @@ def create_financials_entity_tables(cur: _Cursor) -> None:
             )
             """
         )
-        cur.execute(
-            f"""
-            CREATE INDEX IF NOT EXISTS {table}_symbol_period_date
-            ON raw_market.{table} (symbol, period_date DESC)
-            """
-        )
-        # Every index here led with `symbol`, so "who did we hold on the latest
-        # day" — SELECT DISTINCT symbol WHERE period_date = max(period_date) —
-        # had no choice but a full scan. Harmless at 76k rows; once the
-        # short_volume backfill took that table to 7M rows across 4.6 GB it blew
-        # the four-axis read's 120s budget and breadth reported 0 of 5,317 held
-        # when the day in fact held 15,248 rows. symbol rides along so the scan
-        # is index-only and never touches the jsonb heap.
+    # (period_date, symbol) is not created here. This function runs only while
+    # stock_financials is still a table; every deployed database is already a
+    # view, so migrate returns before it. The index lives in
+    # ensure_financials_period_date_symbol, which apply_ddl calls either way.
+    # symbol_period_date is not created: the primary key already leads with symbol.
+
+
+def ensure_financials_period_date_symbol(cur: _Cursor) -> None:
+    """Index (period_date, symbol) on every financials entity table.
+
+    Unconditional and idempotent. ``migrate_stock_financials_split`` returns
+    as soon as ``stock_financials`` is a view, which is every deployed
+    database, so an index created only inside ``create_financials_entity_tables``
+    never arrives. ``CREATE INDEX`` (not ``CONCURRENTLY``) is what a fresh
+    superuser ``apply_ddl`` can run inside its transaction. The live Golden
+    Source build is ``scripts/ddl/2026-10-07-td107-period-date-symbol.sql``
+    (``CONCURRENTLY``): ``short_volume`` is about 5 GB and must not take a
+    lock from this function.
+
+    ``symbol_period_date`` is intentionally absent. The primary key is
+    ``(symbol, period_date, period_type)``, so a second index with that prefix
+    does not serve "who is held on the latest day".
+    """
+    for table in FINANCIALS_ENTITY_TABLES:
         cur.execute(
             f"""
             CREATE INDEX IF NOT EXISTS {table}_period_date_symbol

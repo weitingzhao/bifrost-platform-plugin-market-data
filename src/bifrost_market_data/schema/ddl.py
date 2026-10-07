@@ -18,6 +18,7 @@ from bifrost_market_data.schema.wave8_migrations import (
     FINANCIALS_ENTITY_TABLES,
     add_financials_filing_date,
     create_option_contract_staleness_index,
+    ensure_financials_period_date_symbol,
     migrate_option_open_interest_partitioned,
     migrate_stock_financials_split,
     retire_data_ops_compat_schema,
@@ -139,6 +140,11 @@ def apply_ddl(conn: _Connection) -> None:
         _create_partition_helper(cur)
         migrate_option_open_interest_partitioned(cur)
         migrate_stock_financials_split(cur)
+        # After the split, including when it returned early because
+        # stock_financials is already a view. Tables are owned by postgres,
+        # so this stays on the superuser path. Live GS uses the CONCURRENTLY
+        # script instead of this in-transaction build.
+        ensure_financials_period_date_symbol(cur)
         add_financials_filing_date(cur)
         tune_short_volume_autovacuum(cur)
         retire_data_ops_compat_schema(cur)
