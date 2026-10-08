@@ -232,6 +232,33 @@ def query_inventory(conn: Any) -> dict[str, Any]:
 _ESTIMATED_COUNTS: tuple[str, ...] = ("option_daily",)
 
 
+def query_freshness(conn: Any) -> list[dict[str, Any]]:
+    """Every ``ops_jobs.ingest_freshness`` row, ordered by dimension.
+
+    The one query behind both ``db-summary``'s ``freshness`` and
+    ``coverage/freshness``. The platform's liveness probe reads the latter
+    every 30 s; measured 2026-10-07 in the API pod, db-summary's counts cost
+    4.6 s and this read 0.013 s. ``/market/status``'s ``freshness_summary`` is
+    no substitute: it keeps the 20 most recent rows and drops the rest.
+    """
+    if not table_exists(conn, "ops_jobs", "ingest_freshness"):
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT dimension, last_run_at, rows_written, status, updated_at
+                FROM ops_jobs.ingest_freshness
+                ORDER BY dimension ASC
+                """
+            )
+            rows = cur.fetchall() or []
+        cols = ("dimension", "last_run_at", "rows_written", "status", "updated_at")
+        return [row_dict(r, cols) for r in rows]
+    except Exception:
+        return []
+
+
 def query_db_summary(conn: Any) -> dict[str, Any]:
     """Aggregate row counts and ingest freshness dimensions.
 
@@ -258,22 +285,7 @@ def query_db_summary(conn: Any) -> dict[str, Any]:
         # the exact ones.
         "option_daily": estimated_rows(conn, "market.option_daily"),
     }
-    freshness: list[dict[str, Any]] = []
-    if table_exists(conn, "ops_jobs", "ingest_freshness"):
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT dimension, last_run_at, rows_written, status, updated_at
-                    FROM ops_jobs.ingest_freshness
-                    ORDER BY dimension ASC
-                    """
-                )
-                rows = cur.fetchall() or []
-            cols = ("dimension", "last_run_at", "rows_written", "status", "updated_at")
-            freshness = [row_dict(r, cols) for r in rows]
-        except Exception:
-            freshness = []
+    freshness = query_freshness(conn)
     return {
         "ok": True,
         "source": "db",
@@ -856,6 +868,21 @@ def coverage_db_summary() -> dict[str, Any]:
     conn = require_db()
     try:
         return query_db_summary(conn)
+    finally:
+        conn.close()
+
+
+@router.get("/freshness")
+def coverage_freshness() -> dict[str, Any]:
+    """db-summary's ``freshness`` and nothing else — no whole-database counts."""
+    conn = require_db()
+    try:
+        return {
+            "ok": True,
+            "source": "db",
+            "freshness": query_freshness(conn),
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
     finally:
         conn.close()
 
