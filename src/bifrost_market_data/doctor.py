@@ -1945,6 +1945,9 @@ def run_doctor(
     # How many failed is history and comes from the samples; which ones can be
     # retried is a fact about the queue right now and comes from the rows still
     # on it. They are different numbers, and the finding says so when they are.
+    # A retry enqueues a new job with the same payload_hash and leaves the failed
+    # row as it is; such a row is already handled and is not offered again
+    # (TD-281: an outage of 131 failures stalled on the newest 50 forever).
     since_24h = now_utc - timedelta(hours=24)
     failed_counts = _failed_since(conn, since_24h)
     on_queue: dict[str, tuple[int, str, list[int]]] = {}
@@ -1955,8 +1958,12 @@ def run_doctor(
                 SELECT kind, count(*)::bigint AS n,
                        min(result->>'error') AS sample_error,
                        array_agg(id ORDER BY id DESC) AS ids
-                FROM ops_jobs.job_ingest
+                FROM ops_jobs.job_ingest f
                 WHERE status = 'failed' AND finished_at >= %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ops_jobs.job_ingest r
+                      WHERE r.kind = f.kind AND r.payload_hash = f.payload_hash AND r.id > f.id
+                  )
                 GROUP BY kind ORDER BY n DESC
                 """,
                 (since_24h,),
@@ -1985,8 +1992,8 @@ def run_doctor(
         detail = f"{n} {kind} job(s) failed in 24h"
         if sample:
             detail += f" — {sample[:160]}"
-            if recorded is not None and present < n:
-                detail += f" — {present} still on the queue and retryable"
+            if recorded is not None and present != n:
+                detail += f" — {present} still on the queue and not yet retried"
         else:
             detail += " — the rows have been trimmed, so no error text or retry survives"
         if unentitled:

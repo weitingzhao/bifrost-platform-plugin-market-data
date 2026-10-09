@@ -758,8 +758,31 @@ def test_failure_counts_come_from_the_samples_not_the_surviving_rows() -> None:
     )
     f = next(x for x in rep["findings"] if x["id"] == "failed:option_daily")
     assert f["actual"] == 1956  # what the record says
-    assert "12 still on the queue and retryable" in f["detail"]
+    assert "12 still on the queue and not yet retried" in f["detail"]
     assert f["fix"] == {"action": "retry-jobs", "kind": "option_daily", "job_ids": [7, 8]}
+
+
+def test_failures_already_retried_are_not_offered_again() -> None:
+    """TD-281: a retry adds a job with the same payload_hash and leaves the failed row.
+
+    The prescription took the newest 50 failed rows whether or not they had been
+    retried, so after one heal every later heal deduped the same 50 and an outage
+    of 131 failures never got past them (2026-10-09, Massive key rotation).
+    """
+    conn = _Conn(
+        _failing(
+            failed_samples=[("option_daily", 4)],
+            failed=[{"kind": "option_daily", "n": 81, "sample_error": "Unknown API Key (HTTP 401)", "ids": [9550721, 9550719]}],
+        )
+    )
+    rep = doc.run_doctor(conn, now=NOW, watchlist=UNIVERSE)
+    sql = next(q for q, _ in conn.statements if "status = 'failed'" in q and "group by kind" in q)
+    assert "not exists" in sql
+    assert "r.kind = f.kind and r.payload_hash = f.payload_hash and r.id > f.id" in sql
+    f = next(x for x in rep["findings"] if x["id"] == "failed:option_daily")
+    # The samples undercount here (4); the finding says how many are still to retry.
+    assert "81 still on the queue and not yet retried" in f["detail"]
+    assert f["fix"]["job_ids"] == [9550721, 9550719]
 
 
 def test_a_kind_whose_rows_were_all_trimmed_still_reports_but_offers_no_retry() -> None:
