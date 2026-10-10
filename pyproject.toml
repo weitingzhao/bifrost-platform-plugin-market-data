@@ -48,3 +48,8 @@ pythonpath = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Keep the established default rule set stable across Ruff releases, as Research
+# does. New Ruff defaults otherwise enable hundreds of unrelated legacy rules.
+select = ["E4", "E7", "E9", "F"]

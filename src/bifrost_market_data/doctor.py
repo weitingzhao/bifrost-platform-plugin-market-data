@@ -2162,6 +2162,9 @@ def run_doctor(
         _rollback(conn)
 
     # ── Prescriptions: one per distinct fix ──
+    from bifrost_market_data.long_tenor import findings as long_tenor_findings
+    findings.extend(long_tenor_findings(conn, today=now_utc.date(), session=session))
+
     seen: set[str] = set()
     prescriptions: list[dict[str, Any]] = []
     for f in findings:

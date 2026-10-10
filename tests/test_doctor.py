@@ -33,7 +33,9 @@ class _Cur:
         def _scoped(key: str) -> list[Any]:
             return [(u, n) for u, n in d.get(key, {}).items() if scope is None or u in scope]
 
-        if "from research.option_universe" in q:
+        if "between 50 and 220" in q and "count(distinct" in q:
+            self._rows = d.get('long_breadth', [(day, len(UNIVERSE)) for day in SESSIONS])
+        elif "from research.option_universe" in q:
             self._rows = list(d.get("universe", []))
         elif "/* doctor: slot-evidence */" in q:
             # (kind, mode, expired, dated, last) — the policed slots' own jobs
