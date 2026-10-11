@@ -102,7 +102,7 @@ def append_bar(conn, request, bar) -> str:
 async def run_pilot(conn, client: PilotClient, requests, *, receipt: Path, lock: Path, control=None):
     import json
     from collections import Counter
-    report = {'requests': [], 'status': 'running'}
+    report = {'requests': [], 'status': 'running', 'historical_reference_records': []}
     with lock.open('a') as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with conn.cursor() as cur:
@@ -133,6 +133,9 @@ async def run_pilot(conn, client: PilotClient, requests, *, receipt: Path, lock:
                 report['requests'].append({'ticker':request['option_ticker'],
                     'outcome':{'existing_preserved':len(held)}})
             requests = pending
+            # data_writer has a 15s idle-in-transaction timeout. Session advisory
+            # locks survive COMMIT; no database transaction may span vendor I/O.
+            conn.commit()
             if control and requests:
                 detail = await client._request('/v3/reference/options/contracts/'+control['ticker'],
                                                {'as_of':control['session']})
@@ -149,11 +152,15 @@ async def run_pilot(conn, client: PilotClient, requests, *, receipt: Path, lock:
                     groups.setdefault((request['symbol'],day,request['expiry']),[]).append(request)
             for (symbol, day, expiry), members in sorted(groups.items()):
                 strikes = [parse_option_ticker(r['option_ticker'])['strike'] for r in members]
-                data = await client.fetch_options_contracts(underlying_ticker=symbol,
+                cached = getattr(client,'historical_reference_cache',{}).get((symbol,str(day),expiry))
+                data = cached if cached is not None else await client.fetch_options_contracts(underlying_ticker=symbol,
                     expiration_date=expiry, as_of=str(day), expired=False,
                     strike_gte=min(strikes),strike_lte=max(strikes),max_pages=1)
                 verify_historical_membership(data,{r['option_ticker'] for r in members})
                 catalogues[symbol,day,expiry] = {r['ticker'] for r in data.get('results') or []}
+                report['historical_reference_records'].append({'symbol':symbol,'session':str(day),
+                    'expiry':expiry,'data':data,'reused':cached is not None})
+                receipt.write_text(json.dumps(report,indent=2))
             report['historical_groups_verified'] = len(catalogues)
             for request in requests:
                 with conn.cursor() as cur:
@@ -161,6 +168,7 @@ async def run_pilot(conn, client: PilotClient, requests, *, receipt: Path, lock:
                         WHERE status='running' AND kind IN ('option_daily','option_backfill')""")
                     if cur.fetchone()[0]:
                         raise RuntimeError('history/EOD worker became active; stop pilot and reconcile')
+                conn.commit()
                 outcome = Counter()
                 if any(request['option_ticker'] not in catalogues[request['symbol'], day, request['expiry']] for day in request['days']):
                     outcome['reference_unknown'] += len(request['days'])
@@ -180,14 +188,16 @@ async def run_pilot(conn, client: PilotClient, requests, *, receipt: Path, lock:
                 receipt.write_text(json.dumps(report, indent=2))
             report['status'] = 'finished_requires_coverage_acceptance'
         except PolygonAPIError as exc:
-            conn.rollback()
             report['status'] = 'stopped'
             report['http_status'] = exc.status_code
+            if not getattr(conn,'closed',False):
+                conn.rollback()
             # No vendor body/URL/key in the receipt. 401/403 stop the whole pilot.
             raise
         except Exception:
-            conn.rollback()
             report['status'] = 'stopped'
+            if not getattr(conn,'closed',False):
+                conn.rollback()
             raise
         finally:
             report['attempts'] = dict(client.attempts)

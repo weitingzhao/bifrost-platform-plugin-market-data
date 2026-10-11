@@ -26,6 +26,10 @@ def main():
             raise ValueError('private checkpoint/control changed')
     checkpoint = json.loads(a.checkpoint.read_text())
     validate_checkpoint(checkpoint,a.phase)
+    approved_groups = {(r['symbol'],str(d),r['expiry']) for r in requests for d in r['days']}
+    for record in checkpoint.get('reconciled_reference_records',[]):
+        if (record['symbol'],record['session'],record['expiry']) not in approved_groups:
+            raise ValueError('reconciled reference exceeds current approved phase')
     controls = json.loads(a.controls.read_text())
     control = next(x for x in controls if x['symbol']==a.phase.split('_')[0])
     control = {**control,'ticker':control['option_ticker']}

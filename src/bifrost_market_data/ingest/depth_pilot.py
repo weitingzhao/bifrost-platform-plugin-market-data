@@ -94,6 +94,9 @@ class DepthClient(PilotClient):
         self.limits = dict(LIMITS)
         self.journal = journal
         self.budget_lock = asyncio.Lock()
+        self.historical_reference_cache = {}
+        for record in checkpoint.get('reconciled_reference_records',[]):
+            self.historical_reference_cache[record['symbol'],record['session'],record['expiry']] = record['data']
 
     async def _request_once(self, path, params=None, *, absolute_url=None):
         async with self.budget_lock:
