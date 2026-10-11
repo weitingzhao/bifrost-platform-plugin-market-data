@@ -70,6 +70,9 @@ def options_contracts_params(
     underlying_ticker: str | None = None,
     expiration_date: str | None = None,
     expired: bool | None = None,
+    as_of: str | None = None,
+    strike_gte: float | None = None,
+    strike_lte: float | None = None,
     limit: int = OPTIONS_CONTRACTS_PAGE_LIMIT,
     order: str = "asc",
     sort: str = "ticker",
@@ -91,6 +94,13 @@ def options_contracts_params(
         params["expiration_date.gte"] = expiration_date_gte
     if expiration_date_lte:
         params["expiration_date.lte"] = expiration_date_lte
+    if as_of is not None:
+        from datetime import date
+        params["as_of"] = date.fromisoformat(as_of).isoformat()
+    if strike_gte is not None:
+        params["strike_price.gte"] = strike_gte
+    if strike_lte is not None:
+        params["strike_price.lte"] = strike_lte
     return params
 
 
