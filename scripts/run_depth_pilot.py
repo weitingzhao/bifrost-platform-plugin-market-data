@@ -5,7 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from bifrost_market_data.ingest.depth_pilot import DepthClient, load_depth, validate_checkpoint
+from bifrost_market_data.ingest.depth_pilot import (
+    DepthClient, accepted_replay_requests, load_depth, validate_checkpoint,
+)
 from bifrost_market_data.ingest.long_pilot import run_pilot
 
 CONTROL_SHA256 = '05e079b5dd6383e4414babae245848ce0b7a9c73ca193e0ed1c37e002eca22df'
@@ -17,6 +19,7 @@ def main():
     for name in ('sha256','checkpoint-sha256','controls-sha256','phase'):
         p.add_argument('--'+name,required=True)
     p.add_argument('--execute',action='store_true')
+    p.add_argument('--replay-receipt',type=Path)
     a = p.parse_args()
     if a.controls_sha256 != CONTROL_SHA256:
         raise ValueError('controls must be the reviewed three read-only targets')
@@ -47,6 +50,21 @@ def main():
     poly = cfg.get('polygon') or {}
     key = os.environ.get('POLYGON_API_KEY') or os.environ.get('MASSIVE_API_KEY') or poly.get('api_key')
     conn = psycopg2.connect(**postgres_connect_kwargs(cfg,statement_timeout='20s'),connect_timeout=10)
+    terminal_empty_days = []
+    if a.replay_receipt:
+        try:
+            held = {}
+            with conn.cursor() as cur:
+                for request in requests:
+                    cur.execute('SELECT bar_date FROM raw_market.option_daily WHERE option_ticker=%s AND bar_date=ANY(%s)',
+                                (request['option_ticker'],request['days']))
+                    held[request['option_ticker']] = {r[0] for r in cur.fetchall()}
+            requests, terminal_empty_days = accepted_replay_requests(
+                requests, checkpoint, a.phase, a.replay_receipt.read_bytes(), held)
+            conn.commit()
+        except Exception:
+            conn.close()
+            raise
     async def execute():
         async with DepthClient(key,tier=poly.get('tier','starter'),max_retries=3,
                                checkpoint=checkpoint,phase=a.phase,journal=a.receipt.with_suffix('.http.json')) as client:
@@ -57,6 +75,7 @@ def main():
         conn.close()
         if a.receipt.exists():
             print('DEPTH_REPORT:'+json.dumps({'phase':a.phase,'manifest_sha256':a.sha256,
+                                            'terminal_empty_days_preserved':terminal_empty_days,
                                             **json.loads(a.receipt.read_text())}),flush=True)
 
 

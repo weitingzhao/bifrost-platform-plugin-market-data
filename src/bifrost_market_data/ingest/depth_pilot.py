@@ -116,3 +116,42 @@ class DepthClient(PilotClient):
             os.fsync(handle.fileno())
         print('DEPTH_HTTP:'+json.dumps(projected),flush=True)
         return await super()._request_once(path,params,absolute_url=absolute_url)
+
+
+def accepted_replay_requests(requests, checkpoint, phase, receipt_bytes, held):
+    """Replay an accepted receipt, retaining proved empty days as gaps, not bars.
+
+    Every remaining missing day must reconcile to that ticker's original empty
+    aggregate count. A deleted/unknown/invalid-price day therefore stops replay.
+    """
+    validate_checkpoint(checkpoint, phase)
+    digest = hashlib.sha256(receipt_bytes).hexdigest()
+    if (not checkpoint['accepted'].get(phase)
+            or checkpoint.get('receipt_sha256', {}).get(phase) != digest):
+        raise ValueError('replay requires an accepted receipt digest')
+    prior = json.loads(receipt_bytes)
+    if (prior.get('phase') != phase or prior.get('manifest_sha256') != DEPTH_SHA256
+            or prior.get('status') != 'finished_requires_coverage_acceptance'
+            or any(prior['attempts'][k] > checkpoint['attempts'][k] for k in LIMITS)):
+        raise ValueError('replay receipt is not a completed approved phase')
+    empties = {}
+    for record in prior['requests']:
+        ticker = record['ticker']
+        count = record['outcome'].get('listed_no_eligible_aggregate', 0)
+        if type(count) is not int or count < 0:
+            raise ValueError('invalid terminal empty count')
+        empties[ticker] = empties.get(ticker, 0) + count
+    output, terminal = [], []
+    for request in requests:
+        ticker = request['option_ticker']
+        present = held.get(ticker, set())
+        missing = set(request['days']) - present
+        if ticker not in empties or len(missing) != empties.pop(ticker):
+            raise ValueError('missing days differ from accepted empty receipt; reconcile')
+        terminal.extend((ticker, str(d)) for d in sorted(missing))
+        days = [d for d in request['days'] if d in present]
+        if days:
+            output.append({**request, 'days': days, 'start': str(min(days)), 'end': str(max(days))})
+    if empties:
+        raise ValueError('receipt exceeds approved replay phase')
+    return output, terminal

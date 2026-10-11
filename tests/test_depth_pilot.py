@@ -91,3 +91,50 @@ def test_sub_budget_stops_even_when_total_has_room(tmp_path):
         assert not (tmp_path/'journal.json').exists()
         await client.aclose()
     asyncio.run(check())
+
+
+def test_accepted_replay_preserves_proved_empty_gaps_without_fake_zero():
+    import hashlib
+    from datetime import date
+    from bifrost_market_data.ingest.depth_pilot import accepted_replay_requests
+    c = checkpoint()
+    c['accepted']['SPY_primary'] = True
+    days = [date(2026,7,1), date(2026,7,2)]
+    requests = [dict(option_ticker='test', days=days, start=str(days[0]), end=str(days[1]))]
+    prior = dict(phase='SPY_primary', manifest_sha256=DEPTH_SHA256,
+                 status='finished_requires_coverage_acceptance', attempts=c['attempts'],
+                 requests=[dict(ticker='test', outcome={'inserted':1,'listed_no_eligible_aggregate':1})])
+    content = json.dumps(prior).encode()
+    c['receipt_sha256'] = {'SPY_primary':hashlib.sha256(content).hexdigest()}
+    selected, gaps = accepted_replay_requests(requests,c,'SPY_primary',content,{'test':{days[0]}})
+    assert selected[0]['days'] == [days[0]] and requests[0]['days'] == days
+    assert gaps == [('test',str(days[1]))]
+    with pytest.raises(ValueError,match='missing days'):
+        accepted_replay_requests(requests,c,'SPY_primary',content,{})
+    with pytest.raises(ValueError,match='digest'):
+        accepted_replay_requests(requests,c,'SPY_primary',content+b' ',{'test':{days[0]}})
+    c['accepted'].pop('SPY_primary')
+    with pytest.raises(ValueError,match='accepted receipt'):
+        accepted_replay_requests(requests,c,'SPY_primary',content,{'test':{days[0]}})
+
+
+def test_replay_does_not_treat_unknown_or_invalid_price_as_terminal_empty():
+    import hashlib
+    from datetime import date
+    from bifrost_market_data.ingest.depth_pilot import accepted_replay_requests
+    c = checkpoint()
+    c['accepted']['SPY_primary'] = True
+    d = date(2026,7,1)
+    requests = [dict(option_ticker='test',days=[d])]
+    prior = dict(phase='SPY_primary',manifest_sha256=DEPTH_SHA256,
+                 status='finished_requires_coverage_acceptance',attempts=c['attempts'],
+                 requests=[dict(ticker='test',outcome={'invalid_price':1})])
+    content = json.dumps(prior).encode()
+    c['receipt_sha256'] = {'SPY_primary':hashlib.sha256(content).hexdigest()}
+    with pytest.raises(ValueError,match='missing days'):
+        accepted_replay_requests(requests,c,'SPY_primary',content,{})
+    prior['status'] = 'stopped'
+    content = json.dumps(prior).encode()
+    c['receipt_sha256']['SPY_primary'] = hashlib.sha256(content).hexdigest()
+    with pytest.raises(ValueError,match='completed'):
+        accepted_replay_requests(requests,c,'SPY_primary',content,{'test':{d}})
