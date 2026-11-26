@@ -531,7 +531,7 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         DepthTarget(
             "rolling_days",
             SEC_FILINGS_WINDOW_DAYS,
-            "Owner 2026-09-23: two years of 8-Ks — eight earnings prints (Item 2.02) for History",
+            "决定 2026-09-23: two years of 8-Ks — eight earnings prints (Item 2.02) for History",
         ),
         30.0,
         ("fundamentals-market", "filings-backfill"),
