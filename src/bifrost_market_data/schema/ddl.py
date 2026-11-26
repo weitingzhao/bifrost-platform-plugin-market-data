@@ -627,7 +627,7 @@ def _create_sec_filing_tables(cur: _Cursor) -> None:
     they are three different objects: a filing, the vendor's classification of
     events inside it, and a section of an annual report.
 
-    Scope is the Research universe, two years deep (Owner 2026-09-23). The
+    Scope is the Research universe, two years deep (决定 2026-09-23). The
     8-K text is the complete record — every 8-K a universe company filed, with
     the SEC item numbers parsed out of it — and ``'2.02' = ANY(items)`` is the
     earnings print date. The disclosures table is a partial enrichment: the
@@ -1610,7 +1610,7 @@ PLUGIN_SCHEMAS: tuple[str, ...] = ("raw_market", "ops_jobs")
 #: The schema the plugin owns outright: the schema itself and every relation in it.
 PLUGIN_OWNED_SCHEMA = "raw_market"
 
-#: ops_jobs is shared with the Flex Query plugin (D6 F5, Owner 2026-10-04): the
+#: ops_jobs is shared with the Flex Query plugin (D6 F5, 决定 2026-10-04): the
 #: schema and its partition helpers belong to ``postgres``, each plugin owns its
 #: own tables. These are the market-data ones; job_flex_ingest, flex_* are
 #: flex_writer's and are never reassigned from here.
@@ -1644,7 +1644,7 @@ def ownership_statements(role: str = PLUGIN_ROLE) -> tuple[str, ...]:
     ``ensure_month_partitions`` builds three months ahead, so from 2026-10 it
     fails, and inserts for 2027-01 have nowhere to land.
 
-    Scope (D6, Owner 2026-10-04): the schema ``raw_market`` and every relation in
+    Scope (D6, 决定 2026-10-04): the schema ``raw_market`` and every relation in
     it, plus the plugin's own tables in ``ops_jobs`` (``PLUGIN_OPS_TABLES``).
     Not the ``ops_jobs`` schema, not its partition helpers (shared, owned by
     ``postgres``; they are SECURITY INVOKER, so EXECUTE is all a caller needs)

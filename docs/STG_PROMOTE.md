@@ -4,7 +4,7 @@
 > Single Golden Source instance in `plugin-market-data` NS replaces per-env workers.
 > Overlays preserved at `k8s/overlays/_archived/stg/` for rollback reference.
 
-## Topology (Owner 2026-07-30)
+## Topology (决定 2026-07-30)
 
 Independent namespace: **`plugin-market-data-stg`** (does not cut over DEV `plugin-market-data`).
 

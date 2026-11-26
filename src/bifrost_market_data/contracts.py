@@ -521,8 +521,8 @@ CONTRACTS: tuple[DatasetContract, ...] = (
         # The expiries Research's ATM IV solves from (iv_solver DTE_MIN..DTE_MAX).
         narrow_filter="(expiry - bar_date) BETWEEN 5 AND 90",
     ),
-    # SEC filings as text (0.37.0). Universe tier because the Owner scoped the
-    # collection to Research's names (2026-09-23), though the 8-K pulls are
+    # SEC filings as text (0.37.0). Universe tier because the
+    # collection is scoped to Research's names (决定 2026-09-23), though the 8-K pulls are
     # whole-market by date and filtered on write. The daily window re-reads four
     # days on every run, which is what repairs a missed one.
     DatasetContract(

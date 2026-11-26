@@ -1,4 +1,4 @@
-# Archive before delete (phase 0 W3, Owner 2026-10-05): rows the nightly trim
+# Archive before delete (phase 0 W3, 决定 2026-10-05): rows the nightly trim
 # expires from raw_market.option_snapshot / option_daily / short_volume are written
 # here as Parquet first. None of them can be fetched again once past the window.
 #

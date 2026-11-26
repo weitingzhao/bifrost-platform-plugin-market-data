@@ -41,8 +41,8 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 | P1 止血 | 修 UnboundLocalError；限流改为付费档；停未授权拉取；EOD 去重（session-once、触发日 holiday skip、OI 随快照写、expiration 随合约写）；维护 slot 退出 gate；删 `trades-quotes` / `filings` / `float` 死路由；依从性证据改为 freshness 兜底 | ✅ 0.10.4 已发布（Console 验收观察 5 个交易日） | 2026-09-06 |
 | P2 收敛 | slot 按授权矩阵重排；新增 ratios / short 全市场日更；宇宙卫生 + 按 symbol 的 void；watchlist 缓存；重活出 API；Dagster RetryPolicy + 告警；未授权能力的占位说明（API / Console / Trade UI） | ✅ Plugin 0.11.1 + Dagster 0.67.0 已部署（验收观察中） | 2026-09-06 |
 | P2.5 Doctor | 手动自检 + 一键修复 + 可执行的 Agent 报告 + 每晚自愈：`GET /market/doctor` / `POST /market/doctor/heal`；Console Doctor 面板；MCP `market_data_doctor` / `market_data_heal`；Dagster `market_self_heal`（00:45 UTC 周二–六） | ✅ Plugin 0.12.0 + Dagster 0.68.1 | 2026-09-06 |
-| P3 模型 | `snapshot_ts` 重定义为观测时间（保留列名与主键形状）；OI 从快照派生、退役 gap-heal；job 幂等键按 session；健康判定按会话覆盖率 | ✅ Plugin 0.13.1 + Research 0.92.0（Owner 2026-09-08 批准方案 A） | 2026-09-08 |
-| P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；国债收益率；Research staging 契约修正 | 🔄 Plugin 0.15.0 + Research 0.93.0 已发布，回填运行中（Owner 2026-09-08 批准 A/A） | 2026-09-08 |
+| P3 模型 | `snapshot_ts` 重定义为观测时间（保留列名与主键形状）；OI 从快照派生、退役 gap-heal；job 幂等键按 session；健康判定按会话覆盖率 | ✅ Plugin 0.13.1 + Research 0.92.0（决定 2026-09-08，方案 A） | 2026-09-08 |
+| P4 挖掘 | 5 年股票 / 2 年期权回填；日内链快照；国债收益率；Research staging 契约修正 | 🔄 Plugin 0.15.0 + Research 0.93.0 已发布，回填运行中（决定 2026-09-08，A/A） | 2026-09-08 |
 
 ### P1 改动摘要（0.10.3）
 
@@ -61,7 +61,7 @@ Owner 策略：**升级订阅之前，先把 Options Starter、Stocks Starter、
 
 ### P2 改动摘要（0.11.0 · research 0.67.0）
 
-- **占位而非删除（Owner 2026-09-06）**：`subscription.py` 是唯一的订阅事实源；`GET /market/capabilities` 给出 entitled / planned / unavailable 三类能力与升级所需套餐；queue-dashboard 把 `option-trades` 作为 `retired · planned_on_upgrade` 行保留在计划表里；Console Ingest 页新增「Subscription coverage」面板；Trade UI Discovery 流动性面板保留「Trades & Quotes — Not in the current plan」卡片。
+- **占位而非删除（决定 2026-09-06）**：`subscription.py` 是唯一的订阅事实源；`GET /market/capabilities` 给出 entitled / planned / unavailable 三类能力与升级所需套餐；queue-dashboard 把 `option-trades` 作为 `retired · planned_on_upgrade` 行保留在计划表里；Console Ingest 页新增「Subscription coverage」面板；Trade UI Discovery 流动性面板保留「Trades & Quotes — Not in the current plan」卡片。
 - **按授权矩阵重排 slot**：`corporate` 改为全市场按除权日窗口拉分红 / 拆股（两个 job 替代每标的两个）；新增 `fundamentals-market`（04:30 UTC 周二至周六）按日期拉全市场 ratios、short volume 与最近 settlement 的 short interest；`option-bars` / `minute-bars` 改为按最新收盘价选 ATM ±N 档 × 最近 N 个到期；合约目录分页上限 20 → 60（SPX 120）。
 - **宇宙卫生**：`ticker_sync` 全量列表未截断时把 vendor 不再列出的名字置为 `active=false`；新表 `ops_jobs.symbol_source_void` 记录 vendor 无数据的 symbol，`financials` 空结果写入、非空清除，rotate 跳过 30 天内确认的 void。
 - **watchlist 缓存**：新表 `ops_jobs.watchlist_cache`；platform-api 可达时刷新，不可达时回退到缓存而非空列表。
@@ -272,9 +272,9 @@ PROD 发布（2026-09-28 01:10 UTC）：先撤 `bifrost-prod` 的两个挂载并
 4. ~~日内快照节奏与保留期~~ — 已定（2026-09-08，日内 A：10:30 / 13:00 / 15:30 ET，日内行 30 天）。
 5. 退役清单确认：option-trades、~~ws-ingestor~~、`trades-quotes` / `filings` 路由、`stock_financials` 旧表、Option Discovery 流动性面板的 vendor 调用。（ws-ingestor 已定：2026-09-27 连同 redis-massive 一起退役、删代码，见下节。）
 
-### ws-ingestor / redis-massive 退役（Owner 2026-09-27）
+### ws-ingestor / redis-massive 退役（决定 2026-09-27）
 
-Options Starter 没有实时 WS，`polygon-ws-ingestor` 常驻只写一个 `ws_mode=rest_only` 心跳（`bifrost:health:ws_massive_option`），全仓没有任何代码读 redis-massive 里的 `massive:*` 报价；redis-massive 唯一的写入方就是它。Owner 选择两者一起退役、代码直接删除（git 历史保留，将来升级订阅再恢复）。
+Options Starter 没有实时 WS，`polygon-ws-ingestor` 常驻只写一个 `ws_mode=rest_only` 心跳（`bifrost:health:ws_massive_option`），全仓没有任何代码读 redis-massive 里的 `massive:*` 报价；redis-massive 唯一的写入方就是它。两者一起退役、代码直接删除（git 历史保留，将来升级订阅再恢复）。
 
 - Plugin：删 `src/bifrost_market_data/ws/`、`scripts/run_polygon_ws.py`、`k8s/base/deployment-polygon-ws.yaml`、`k8s/redis-massive/`、`k8s/external-names/`、`install-redis-massive.sh` / `apply-external-names-massive.sh`、configmap 的 `polygon_ws` / `redis_massive` / `watchlist_pg` 块、`websockets` 依赖。
 - 下游同批：trade-core（0.25.0，删 massive Redis URL / 心跳键 / `socket_massive_disconnected`）、trade-api（`/status` 不再有 `socket.polygon_ws`）、trade-frontend（状态灯与拓扑节点）、bifrost-platform（卫星总线组件、Critical Processes、sessions-catalog、Tier B `massive-ws-quotes`）、bifrost-trade-infra（Trade 配置 `redis_massive`、`REDIS_MASSIVE_*` secrets、verify-phase-b、NetworkPolicy、platform overlay sessions-catalog）。

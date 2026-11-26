@@ -1828,7 +1828,7 @@ def enqueue_slot(
         # to quietly shorten a 90-day window by several sessions.
         # Datasets whose rows cannot be fetched again are held — nothing expires —
         # until the rows past the window can be archived before they are deleted
-        # (phase 0 W3, Owner 2026-10-05). Config, so lifting a hold is a ConfigMap
+        # (phase 0 W3, 决定 2026-10-05). Config, so lifting a hold is a ConfigMap
         # change and not a release.
         held = _retention_held(scfg)
         # Past a hold: the rows go to Parquet on the NAS first and only then leave

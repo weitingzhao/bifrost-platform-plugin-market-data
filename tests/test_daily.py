@@ -2795,7 +2795,7 @@ def test_short_volume_is_deleted_because_it_cannot_be_dropped() -> None:
 def test_a_held_dataset_expires_nothing() -> None:
     """Rows that cannot be fetched again are held until they can be archived first.
 
-    Phase 0 W3 (Owner 2026-10-05): option_snapshot is the vendor's IV / Greeks /
+    Phase 0 W3 (决定 2026-10-05): option_snapshot is the vendor's IV / Greeks /
     OI as observed, and option_daily / short_volume fall out of the vendor's own
     two-year window on the same night they fall out of ours. A held table gets
     no delete and no partition drop; the job trim and partition provisioning in

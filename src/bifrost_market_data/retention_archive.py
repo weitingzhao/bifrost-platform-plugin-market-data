@@ -1,7 +1,7 @@
 """Archive before delete: rows past the window go to Parquet on the NAS, then leave.
 
 Three tables cannot be fetched again once the trim expires them (phase 0 W3,
-Owner 2026-10-05): ``option_snapshot`` is the vendor's IV / Greeks / OI as they
+决定 2026-10-05): ``option_snapshot`` is the vendor's IV / Greeks / OI as they
 were observed, and ``option_daily`` / ``short_volume`` drop out of the vendor's
 own two-year window on the same night they drop out of ours. Deleting them is
 fine — the database should not grow without bound — but only once a copy exists.
